@@ -42,6 +42,8 @@ class OllamaActions(ActionPolicy):
             partner_name=partner,
             alive_players=tuple(self.state.alive_players),
             wolf_chat_history=history,
+            day=self.state.day,
+            state=self.state,
         )
         return self._free_text_with_context(
             "wolf_discussion", player, prompt_ctx, f"{wolf} は相談に応答できませんでした。"
@@ -56,6 +58,8 @@ class OllamaActions(ActionPolicy):
             actor=actor,
             wolves=wolves,
             valid_candidates=valid_candidates,
+            day=self.state.day,
+            state=self.state,
         )
         return self._select_target(
             ActionKind.ATTACK, actor, valid_candidates, prompt_ctx, forbidden=wolves
@@ -69,6 +73,8 @@ class OllamaActions(ActionPolicy):
             actor=actor,
             alive_players=candidates,
             seer_results=results,
+            day=self.state.day,
+            state=self.state,
         )
         return self._select_target(ActionKind.SEER, actor, candidates, prompt_ctx)
 
@@ -80,6 +86,8 @@ class OllamaActions(ActionPolicy):
             actor=actor,
             alive_players=alive,
             conversation_history=history,
+            day=day,
+            state=self.state,
         )
         return self._free_text_with_context(
             "discussion", actor, prompt_ctx, f"{player} は発言できませんでした。"
@@ -97,6 +105,8 @@ class OllamaActions(ActionPolicy):
             alive_players=tuple(self.state.alive_players),
             valid_candidates=valid_candidates,
             runoff=runoff,
+            day=day,
+            state=self.state,
         )
         return self._select_target(
             ActionKind.VOTE, actor, candidates, prompt_ctx, forbid_self=True
@@ -196,29 +206,53 @@ class OllamaActions(ActionPolicy):
     def _free_text_with_context(
         self, action: str, actor: Player, prompt_ctx: PromptContext, fallback: str
     ) -> str:
-        messages = prompt_ctx.to_messages()
-        try:
-            if self.options is not None:
-                response = self.client.chat(actor.model, messages, options=self.options)
-            else:
-                response = self.client.chat(actor.model, messages)
-        except OllamaError as error:
-            self.traces.append(
-                ActionTrace(
-                    action,
-                    actor.name,
-                    (),
-                    (),
-                    None,
-                    True,
-                    error.to_dict(),
+        raw_responses: list[str] = []
+        last_error: OllamaError | None = None
+        for attempt in range(2):
+            user_prompt = prompt_ctx.user_prompt
+            if attempt:
+                user_prompt += "\n前回の応答は空または空白のみでした。内容のある発言をしてください。"
+            messages = [
+                {"role": "system", "content": prompt_ctx.system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            try:
+                if self.options is not None:
+                    response = self.client.chat(
+                        actor.model, messages, options=self.options
+                    )
+                else:
+                    response = self.client.chat(actor.model, messages)
+            except OllamaError as error:
+                last_error = error
+                break
+
+            raw_responses.append(response)
+            if response.strip():
+                self.traces.append(
+                    ActionTrace(
+                        action,
+                        actor.name,
+                        tuple(raw_responses),
+                        (),
+                        None,
+                        False,
+                    )
                 )
-            )
-            return fallback
+                return response
+
         self.traces.append(
-            ActionTrace(action, actor.name, (response,), (), None, False)
+            ActionTrace(
+                action,
+                actor.name,
+                tuple(raw_responses),
+                (),
+                None,
+                True,
+                last_error.to_dict() if last_error is not None else None,
+            )
         )
-        return response
+        return fallback
 
     @staticmethod
     def _label(action: ActionKind) -> str:

@@ -102,6 +102,10 @@ def test_tied_vote_repeats_only_between_tied_candidates() -> None:
     assert state.players[2].is_alive is False
     assert state.phase is Phase.NIGHT_WOLF
     assert state.votes == {"P0": "P2", "P1": "P2", "P2": "P0", "P3": "P2"}
+    assert len(state.vote_history) == 2
+    assert state.vote_history[0][1] is False
+    assert state.vote_history[1][1] is True
+    assert state.executions == [(1, "P2")]
 
 
 def test_self_votes_are_replaced_deterministically_in_initial_and_runoff_votes() -> None:

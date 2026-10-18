@@ -158,6 +158,51 @@ def test_seer_results_isolated_to_seer_only() -> None:
         assert seer_secret not in disc_ctx.system_prompt
 
 
+def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results() -> None:
+    state = create_game(seed=42)
+    state.day = 4
+    dead_player = next(player for player in state.players if player.role is Role.VILLAGER)
+    state.mark_dead(dead_player.name)
+    state.attack_deaths.append((3, dead_player.name))
+    state.executions.append((2, dead_player.name))
+    state.vote_history.append((2, False, {"Player 1": "Player 3"}))
+    state.seer_results["Player 4"] = "wolf"
+    state.seer_result_history.append((3, "Player 4", "wolf"))
+    secret_result = "Day 3: Player 4 = wolf"
+    secret_wolf_chat = "WOLF_CHAT_SECRET: attack Player 6"
+    state.wolf_chat_log.append(Message("Player 1", secret_wolf_chat))
+
+    client = RecordingPromptClient()
+    actions = OllamaActions(state, client)
+    for player in state.players:
+        if player.is_alive:
+            actions.discuss(player.name, state.day, tuple(state.alive_players), ())
+
+    prompts_by_player = {
+        call["messages"][-1]["content"].split("- あなたのプレイヤー名：", 1)[1]
+        .splitlines()[0]: call["messages"][-1]["content"]
+        for call in client.recorded_calls
+    }
+    for player in state.players:
+        if not player.is_alive:
+            continue
+        prompt = prompts_by_player[player.name]
+        assert f"- あなたの役職：{ROLE_NAMES_JA[player.role]}" in prompt
+        assert "- 現在の日数：4日目" in prompt
+        assert "- 現在のフェーズ：昼（議論）" in prompt
+        assert f"- 現在の生存者：{', '.join(state.alive_players)}" in prompt
+        assert f"- 既知の死亡者：{dead_player.name}" in prompt
+        assert "Day 3: " + dead_player.name in prompt
+        assert "Day 2: " + dead_player.name in prompt
+        assert "Player 1 → Player 3" in prompt
+        assert "確定事実として扱わないでください" in prompt
+        assert secret_wolf_chat not in prompt
+        if player.role is Role.SEER:
+            assert secret_result in prompt
+        else:
+            assert secret_result not in prompt
+
+
 def test_dead_players_cannot_receive_prompts() -> None:
     state = create_game(seed=42)
     dead_player = state.players[0]
@@ -235,4 +280,17 @@ def test_eight_players_prompt_snapshot_inspection() -> None:
         sys_msg = next(m["content"] for m in messages if m["role"] == "system")
         assert "あなたは人狼ゲームに参加しているプレイヤーです。" in sys_msg
         assert "【ゲームの基本ルール】" in sys_msg
-
+        user_msg = next(m["content"] for m in messages if m["role"] == "user")
+        assert "【ゲームシステムが確定した事実】" in user_msg
+        player_name = user_msg.split("- あなたのプレイヤー名：", 1)[1].splitlines()[0]
+        assert player_name in state.alive_players
+        assert any(
+            f"- あなたの役職：{role_name}" in user_msg
+            for role_name in ROLE_NAMES_JA.values()
+        )
+        assert "- 現在の日数：1日目" in user_msg
+        assert "- 現在のフェーズ：" in user_msg
+        assert f"- 現在の生存者：{', '.join(state.alive_players)}" in user_msg
+        assert "- 既知の死亡者：なし" in user_msg
+        assert "- 過去の投票結果：" in user_msg
+        assert "確定事実として扱わないでください" in user_msg

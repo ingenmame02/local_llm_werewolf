@@ -150,16 +150,16 @@ def test_cli_execution_with_mock_transport(tmp_path: Path, monkeypatch) -> None:
     # OllamaClient.chat をモック
     def mock_chat(self, model: str, messages: list[dict[str, str]], options=None) -> str:
         last_user = messages[-1]["content"]
-        if "投票" in last_user:
+        if "選択可能な候補:" in last_user:
             # 候補行から最初の候補を取得
             candidates_line = [l for l in last_user.splitlines() if "選択可能な候補:" in l][0]
             first_cand = candidates_line.split(":", 1)[1].split(",")[0].strip()
             return f"投票：{first_cand}"
-        elif "襲撃" in last_user:
+        elif "選択可能な襲撃対象：" in last_user:
             candidates_line = [l for l in last_user.splitlines() if "選択可能な襲撃対象：" in l][0]
             first_cand = candidates_line.split("：", 1)[1].split(",")[0].strip()
             return f"**襲撃対象：{first_cand}**"
-        elif "占い" in last_user:
+        elif "占い対象：" in last_user:
             return "占い対象：P2"
         return "こんにちは。私は村人です。"
 

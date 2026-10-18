@@ -125,9 +125,9 @@ class GameEngine:
         if target not in candidates:
             target = self._rng.choice(candidates)
         target_player = self._player(target)
-        self.state.seer_results[target] = (
-            "wolf" if target_player.role is Role.WOLF else "human"
-        )
+        result = "wolf" if target_player.role is Role.WOLF else "human"
+        self.state.seer_results[target] = result
+        self.state.seer_result_history.append((self.state.day, target, result))
 
     def resolve_morning(self) -> None:
         self.state.phase = Phase.MORNING
@@ -135,6 +135,7 @@ class GameEngine:
         self.state.pending_attack = None
         if victim is not None and self._player(victim).is_alive:
             self.state.mark_dead(victim)
+            self.state.attack_deaths.append((self.state.day, victim))
             self.state.conversation_log.append(
                 Message("system", f"{victim} was attacked during the night.")
             )
@@ -167,13 +168,16 @@ class GameEngine:
         first_votes = self._collect_votes(alive, alive, runoff=False)
         tied = self._top_voted(first_votes)
         final_votes = first_votes
+        self.state.vote_history.append((self.state.day, False, dict(first_votes)))
         if len(tied) > 1:
             final_votes = self._collect_votes(alive, tied, runoff=True)
+            self.state.vote_history.append((self.state.day, True, dict(final_votes)))
             tied = self._top_voted(final_votes)
         executed = tied[0] if len(tied) == 1 else self._rng.choice(tied)
 
         self.state.votes = final_votes
         self.state.mark_dead(executed)
+        self.state.executions.append((self.state.day, executed))
         self.state.conversation_log.append(
             Message("system", f"{executed} was voted out.")
         )

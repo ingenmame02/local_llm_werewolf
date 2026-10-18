@@ -219,3 +219,28 @@ def test_discussion_failure_uses_explicit_fallback_and_trace() -> None:
     assert text == "P0 は発言できませんでした。"
     assert actions.traces[-1].action == "discussion"
     assert actions.traces[-1].fallback_used
+
+
+def test_empty_discussion_is_reprompted_once_then_accepted_if_nonempty() -> None:
+    client = FakeClient(" \n\t ", "話し合いを続けましょう。")
+    actions = OllamaActions(make_state(), client)
+
+    text = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert text == "話し合いを続けましょう。"
+    assert len(client.prompts) == 2
+    assert "空白のみ" in client.prompts[1]
+    assert actions.traces[-1].raw_responses == (" \n\t ", "話し合いを続けましょう。")
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_empty_discussion_after_reprompt_uses_explicit_fallback() -> None:
+    client = FakeClient("", " \t\n ")
+    actions = OllamaActions(make_state(), client)
+
+    text = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert text == "P0 は発言できませんでした。"
+    assert len(client.prompts) == 2
+    assert actions.traces[-1].raw_responses == ("", " \t\n ")
+    assert actions.traces[-1].fallback_used is True

@@ -41,7 +41,11 @@ class GameState:
     conversation_log: list[Message] = field(default_factory=list)
     wolf_chat_log: list[Message] = field(default_factory=list)
     seer_results: dict[str, str] = field(default_factory=dict)
+    seer_result_history: list[tuple[int, str, str]] = field(default_factory=list)
     votes: dict[str, str] = field(default_factory=dict)
+    vote_history: list[tuple[int, bool, dict[str, str]]] = field(default_factory=list)
+    attack_deaths: list[tuple[int, str]] = field(default_factory=list)
+    executions: list[tuple[int, str]] = field(default_factory=list)
     winner: str | None = None
     seed: int | None = None
     pending_attack: str | None = None
