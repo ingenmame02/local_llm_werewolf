@@ -1,5 +1,7 @@
 import random
+import time
 from dataclasses import dataclass
+from typing import Callable
 
 from .action_parser import ActionKind, ActionParser
 from .engine import ActionPolicy
@@ -26,16 +28,19 @@ class OllamaActions(ActionPolicy):
         client: OllamaClient,
         seed: int | None = None,
         options: dict[str, object] | None = None,
+        event_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.state = state
         self.client = client
         self.options = options
+        self.event_callback = event_callback
         self._rng = random.Random(state.seed if seed is None else seed)
         self.traces: list[ActionTrace] = []
 
     def wolf_discuss(
         self, wolf: str, partner: str, history: tuple[Message, ...]
     ) -> str:
+        started_at = self._start_action("wolf_discussion", self._player(wolf))
         player = self._player(wolf)
         prompt_ctx = PromptBuilder.build_wolf_discuss_prompt(
             actor=player,
@@ -46,10 +51,15 @@ class OllamaActions(ActionPolicy):
             state=self.state,
         )
         return self._free_text_with_context(
-            "wolf_discussion", player, prompt_ctx, f"{wolf} は相談に応答できませんでした。"
+            "wolf_discussion",
+            player,
+            prompt_ctx,
+            f"{wolf} は相談に応答できませんでした。",
+            started_at,
         )
 
     def choose_attack(self, wolves: tuple[str, ...], candidates: tuple[str, ...]) -> str:
+        started_at = self._start_action("attack", self._player(wolves[0]))
         actor = self._player(wolves[0])
         valid_candidates = self._valid_candidates(
             actor, candidates, forbidden=wolves
@@ -62,12 +72,18 @@ class OllamaActions(ActionPolicy):
             state=self.state,
         )
         return self._select_target(
-            ActionKind.ATTACK, actor, valid_candidates, prompt_ctx, forbidden=wolves
+            ActionKind.ATTACK,
+            actor,
+            valid_candidates,
+            prompt_ctx,
+            started_at,
+            forbidden=wolves,
         )
 
     def choose_seer_target(
         self, seer: str, candidates: tuple[str, ...], results: tuple[tuple[str, str], ...]
     ) -> str:
+        started_at = self._start_action("seer", self._player(seer))
         actor = self._player(seer)
         prompt_ctx = PromptBuilder.build_seer_prompt(
             actor=actor,
@@ -76,11 +92,14 @@ class OllamaActions(ActionPolicy):
             day=self.state.day,
             state=self.state,
         )
-        return self._select_target(ActionKind.SEER, actor, candidates, prompt_ctx)
+        return self._select_target(
+            ActionKind.SEER, actor, candidates, prompt_ctx, started_at
+        )
 
     def discuss(
         self, player: str, day: int, alive: tuple[str, ...], history: tuple[Message, ...]
     ) -> str:
+        started_at = self._start_action("discussion", self._player(player))
         actor = self._player(player)
         prompt_ctx = PromptBuilder.build_discussion_prompt(
             actor=actor,
@@ -90,12 +109,17 @@ class OllamaActions(ActionPolicy):
             state=self.state,
         )
         return self._free_text_with_context(
-            "discussion", actor, prompt_ctx, f"{player} は発言できませんでした。"
+            "discussion",
+            actor,
+            prompt_ctx,
+            f"{player} は発言できませんでした。",
+            started_at,
         )
 
     def vote(
         self, voter: str, candidates: tuple[str, ...], day: int, runoff: bool
     ) -> str:
+        started_at = self._start_action("vote", self._player(voter))
         actor = self._player(voter)
         valid_candidates = self._valid_candidates(
             actor, candidates, forbid_self=True
@@ -109,7 +133,12 @@ class OllamaActions(ActionPolicy):
             state=self.state,
         )
         return self._select_target(
-            ActionKind.VOTE, actor, candidates, prompt_ctx, forbid_self=True
+            ActionKind.VOTE,
+            actor,
+            candidates,
+            prompt_ctx,
+            started_at,
+            forbid_self=True,
         )
 
     def _select_target(
@@ -118,6 +147,7 @@ class OllamaActions(ActionPolicy):
         actor: Player,
         candidates: tuple[str, ...],
         prompt_ctx: PromptContext,
+        started_at: float,
         forbid_self: bool = False,
         forbidden: tuple[str, ...] = (),
     ) -> str:
@@ -131,6 +161,8 @@ class OllamaActions(ActionPolicy):
         raw_responses: list[str] = []
         parsed_targets: list[str | None] = []
         last_error: OllamaError | None = None
+        transport_attempts = 0
+        semantic_retries = 0
 
         for request_number in range(2):
             messages = [
@@ -151,23 +183,43 @@ class OllamaActions(ActionPolicy):
                     )
             except OllamaError as error:
                 last_error = error
+                transport_attempts += error.attempts
                 break
 
+            transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
             raw_responses.append(response)
             target = ActionParser.parse(response, action)
             parsed_targets.append(target)
             if ActionParser.validate_target(
                 target, valid_candidates, actor.name if forbid_self else None
             ):
-                self.traces.append(
-                    ActionTrace(
-                        action, actor.name, tuple(raw_responses),
-                        tuple(parsed_targets), target, False,
-                    )
+                trace = ActionTrace(
+                    action, actor.name, tuple(raw_responses),
+                    tuple(parsed_targets), target, False,
+                )
+                self.traces.append(trace)
+                self._complete_action(
+                    action,
+                    actor,
+                    started_at,
+                    semantic_retries,
+                    transport_attempts,
+                    False,
+                    selected_target=target,
                 )
                 return target
 
+            self._emit(
+                "llm_action_parse_failed",
+                action,
+                actor,
+                started_at,
+                transport_retries=max(0, transport_attempts - len(raw_responses)),
+                parsed_target=target,
+                will_retry=request_number == 0,
+            )
             if request_number == 0:
+                semantic_retries += 1
                 user_prompts.append(
                     f"{prompt_ctx.user_prompt}\n前回の応答は形式または候補が不正でした。"
                     f"候補から1名を選び、最後に必ず「{self._label(action)}：名前」とだけ明示してください。"
@@ -184,6 +236,16 @@ class OllamaActions(ActionPolicy):
                 True,
                 last_error.to_dict() if last_error is not None else None,
             )
+        )
+        self._complete_action(
+            action,
+            actor,
+            started_at,
+            semantic_retries,
+            transport_attempts,
+            True,
+            selected_target=fallback,
+            error=last_error,
         )
         return fallback
 
@@ -204,10 +266,16 @@ class OllamaActions(ActionPolicy):
         )
 
     def _free_text_with_context(
-        self, action: str, actor: Player, prompt_ctx: PromptContext, fallback: str
+        self,
+        action: str,
+        actor: Player,
+        prompt_ctx: PromptContext,
+        fallback: str,
+        started_at: float,
     ) -> str:
         raw_responses: list[str] = []
         last_error: OllamaError | None = None
+        transport_attempts = 0
         for attempt in range(2):
             user_prompt = prompt_ctx.user_prompt
             if attempt:
@@ -225,8 +293,10 @@ class OllamaActions(ActionPolicy):
                     response = self.client.chat(actor.model, messages)
             except OllamaError as error:
                 last_error = error
+                transport_attempts += error.attempts
                 break
 
+            transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
             raw_responses.append(response)
             if response.strip():
                 self.traces.append(
@@ -239,7 +309,27 @@ class OllamaActions(ActionPolicy):
                         False,
                     )
                 )
+                self._complete_action(
+                    action,
+                    actor,
+                    started_at,
+                    attempt,
+                    transport_attempts,
+                    False,
+                    content=response,
+                )
                 return response
+
+            if attempt == 0:
+                self._emit(
+                    "llm_action_parse_failed",
+                    action,
+                    actor,
+                    started_at,
+                    transport_retries=max(0, transport_attempts - len(raw_responses)),
+                    reason="empty_response",
+                    will_retry=True,
+                )
 
         self.traces.append(
             ActionTrace(
@@ -252,7 +342,89 @@ class OllamaActions(ActionPolicy):
                 last_error.to_dict() if last_error is not None else None,
             )
         )
+        self._complete_action(
+            action,
+            actor,
+            started_at,
+            max(0, len(raw_responses) - 1),
+            transport_attempts,
+            True,
+            content=fallback,
+            error=last_error,
+        )
         return fallback
+
+    def _start_action(self, action: str, actor: Player) -> float:
+        started_at = time.perf_counter()
+        self._emit(
+            "llm_action_started",
+            action,
+            actor,
+            started_at,
+        )
+        return started_at
+
+    def _complete_action(
+        self,
+        action: ActionKind | str,
+        actor: Player,
+        started_at: float,
+        semantic_retries: int,
+        transport_attempts: int,
+        fallback_used: bool,
+        selected_target: str | None = None,
+        content: str | None = None,
+        error: OllamaError | None = None,
+    ) -> None:
+        self._emit(
+            "llm_action_completed",
+            action,
+            actor,
+            started_at,
+            elapsed_seconds=round(time.perf_counter() - started_at, 3),
+            semantic_retries=semantic_retries,
+            transport_retries=max(0, transport_attempts - (semantic_retries + 1)),
+            total_retries=semantic_retries
+            + max(0, transport_attempts - (semantic_retries + 1)),
+            fallback_used=fallback_used,
+            selected_target=selected_target,
+            content=content,
+            error=error.to_dict() if error is not None else None,
+        )
+
+    def _emit(
+        self,
+        event_type: str,
+        action: ActionKind | str,
+        actor: Player,
+        started_at: float,
+        **details: object,
+    ) -> None:
+        if self.event_callback is None:
+            return
+        action_name = action.value if isinstance(action, ActionKind) else action
+        phase_labels = {
+            "night_wolf": "夜・人狼相談",
+            "night_seer": "夜・占い",
+            "day_discussion": "昼・議論",
+            "voting": "投票",
+        }
+        self.event_callback(
+            {
+                "type": event_type,
+                "day": self.state.day,
+                "phase": self.state.phase.value,
+                "phase_label": phase_labels.get(
+                    self.state.phase.value, self.state.phase.value
+                ),
+                "player": actor.name,
+                "action": action_name,
+                "private": action_name
+                in {"wolf_discussion", ActionKind.ATTACK.value, ActionKind.SEER.value},
+                "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                **details,
+            }
+        )
 
     @staticmethod
     def _label(action: ActionKind) -> str:

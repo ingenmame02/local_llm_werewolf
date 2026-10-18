@@ -31,6 +31,7 @@ def test_cli_parser_options() -> None:
         "--temperature", "0.5",
         "--num-ctx", "2048",
         "--log-dir", "custom_logs",
+        "--show-private",
     ])
     assert args.mode == "ollama"
     assert args.models_file == Path("config/players.json")
@@ -39,6 +40,9 @@ def test_cli_parser_options() -> None:
     assert args.temperature == 0.5
     assert args.num_ctx == 2048
     assert args.log_dir == Path("custom_logs")
+    assert args.show_private is True
+    private_args = parser.parse_args(["--private-log"])
+    assert private_args.private_log is True
 
 
 def test_mock_actions_completes_game_via_cli(tmp_path: Path, capsys) -> None:
@@ -66,7 +70,7 @@ def test_mock_actions_completes_game_via_cli(tmp_path: Path, capsys) -> None:
 
     assert lines[0]["type"] == "game_init"
     assert lines[0]["mode"] == "mock"
-    assert lines[0]["seed"] == 0
+    assert "seed" not in lines[0]
 
     assert lines[-1]["type"] == "game_result"
     assert lines[-1]["winner"] == "village"
@@ -110,14 +114,22 @@ def test_identical_seed_reproducibility(tmp_path: Path) -> None:
     log_dir1 = tmp_path / "run1"
     log_dir2 = tmp_path / "run2"
 
-    args1 = build_parser().parse_args(["--mode", "mock", "--seed", "123", "--log-dir", str(log_dir1)])
-    args2 = build_parser().parse_args(["--mode", "mock", "--seed", "123", "--log-dir", str(log_dir2)])
+    args1 = build_parser().parse_args([
+        "--mode", "mock", "--seed", "123", "--log-dir", str(log_dir1),
+        "--private-log",
+    ])
+    args2 = build_parser().parse_args([
+        "--mode", "mock", "--seed", "123", "--log-dir", str(log_dir2),
+        "--private-log",
+    ])
 
     assert run_cli_game(args1) == 0
     assert run_cli_game(args2) == 0
 
-    res1 = json.loads(list(log_dir1.glob("game_*.jsonl"))[0].read_text(encoding="utf-8").strip().splitlines()[-1])
-    res2 = json.loads(list(log_dir2.glob("game_*.jsonl"))[0].read_text(encoding="utf-8").strip().splitlines()[-1])
+    private1 = next(log_dir1.glob("game_*.private.jsonl"))
+    private2 = next(log_dir2.glob("game_*.private.jsonl"))
+    res1 = json.loads(private1.read_text(encoding="utf-8").strip().splitlines()[-1])
+    res2 = json.loads(private2.read_text(encoding="utf-8").strip().splitlines()[-1])
 
     assert res1["winner"] == res2["winner"]
     assert res1["day"] == res2["day"]
@@ -148,10 +160,12 @@ def test_ollama_offline_error_handled_gracefully_and_saves_log(tmp_path: Path, m
     assert len(log_files) == 1
     last_line = json.loads(log_files[0].read_text(encoding="utf-8").strip().splitlines()[-1])
     assert last_line["type"] == "game_result"
-    assert "接続できません" in str(last_line["error"])
+    assert last_line["error_occurred"] is True
 
 
-def test_ollama_mode_invalid_response_uses_fallback_and_records_trace(tmp_path: Path, monkeypatch) -> None:
+def test_ollama_mode_invalid_response_uses_fallback_and_records_trace(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     # Ollama が形式不正な回答（またはMarkdown装飾）を返した場合の動作を検証
     call_count = 0
 
@@ -176,17 +190,227 @@ def test_ollama_mode_invalid_response_uses_fallback_and_records_trace(tmp_path: 
         "--mode", "ollama",
         "--seed", "42",
         "--log-dir", str(log_dir),
+        "--private-log",
     ])
 
     exit_code = run_cli_game(args)
     assert exit_code == 0
 
-    log_file = list(log_dir.glob("game_*.jsonl"))[0]
+    log_file = next(
+        path for path in log_dir.glob("game_*.jsonl")
+        if not path.name.endswith(".private.jsonl")
+    )
     last_line = json.loads(log_file.read_text(encoding="utf-8").strip().splitlines()[-1])
     assert last_line["type"] == "game_result"
-    assert len(last_line["traces"]) > 0
+    private_file = next(log_dir.glob("game_*.private.jsonl"))
+    private_last_line = json.loads(
+        private_file.read_text(encoding="utf-8").strip().splitlines()[-1]
+    )
+    assert len(private_last_line["traces"]) > 0
 
     # 投票で fallback_used が True になっているトレースが存在することを確認
-    vote_traces = [t for t in last_line["traces"] if t["action"] == "vote"]
+    vote_traces = [t for t in private_last_line["traces"] if t["action"] == "vote"]
     assert len(vote_traces) > 0
     assert any(t["fallback_used"] is True for t in vote_traces)
+    output = capsys.readouterr().out
+    assert "応答を解析できません。再要求します。" in output
+    assert "フォールバック 有" in output
+
+
+@pytest.mark.parametrize(
+    ("private_option", "show_private", "expect_private_log"),
+    [(None, False, False), ("--show-private", True, True), ("--private-log", False, True)],
+)
+def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    private_option: str | None,
+    show_private: bool,
+    expect_private_log: bool,
+) -> None:
+    private_wolf_text = "WOLF_PRIVATE_MARKER"
+    attack_response = "ATTACK_RAW_RESPONSE_MARKER"
+    seer_response = "SEER_RAW_RESPONSE_MARKER"
+    vote_response = "VOTE_RAW_RESPONSE_MARKER"
+
+    def mock_chat(self, model, messages, options=None):
+        prompt = messages[-1]["content"]
+        if "これまでの相談内容" in prompt:
+            return private_wolf_text
+        if "襲撃対象：" in prompt:
+            line = next(line for line in prompt.splitlines() if "選択可能な襲撃対象：" in line)
+            return f"{attack_response} 襲撃対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
+        if "占い対象：" in prompt:
+            line = next(line for line in prompt.splitlines() if "- 生存者：" in line)
+            return f"{seer_response} 占い対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
+        if "選択可能な候補:" in prompt:
+            line = next(line for line in prompt.splitlines() if "選択可能な候補:" in line)
+            return f"{vote_response} 投票：{line.split(':', 1)[1].split(',', 1)[0].strip()}"
+        return "PUBLIC_DAY_SPEECH"
+
+    monkeypatch.setattr(OllamaClient, "ping", lambda self: True)
+    monkeypatch.setattr(OllamaClient, "chat", mock_chat)
+    log_dir = tmp_path / "event_logs"
+    argv = [
+        "--mode", "ollama",
+        "--seed", "42",
+        "--log-dir", str(log_dir),
+    ]
+    if private_option:
+        argv.append(private_option)
+
+    assert run_cli_game(build_parser().parse_args(argv)) == 0
+
+    output = capsys.readouterr().out
+    assert "[Day 1][夜・人狼相談][Player " in output
+    assert "応答待ち..." in output
+    assert "PUBLIC_DAY_SPEECH" in output
+    assert (private_wolf_text in output) is show_private
+
+    public_log = next(
+        path for path in log_dir.glob("game_*.jsonl")
+        if not path.name.endswith(".private.jsonl")
+    )
+    public_text = public_log.read_text(encoding="utf-8")
+    records = [
+        json.loads(line)
+        for line in public_text.splitlines()
+    ]
+    assert [record["sequence"] for record in records] == list(range(len(records)))
+    assert "seed" not in records[0]
+    assert "raw_responses" not in public_text
+    assert "role" not in records[-1]["players"][0]
+    assert "partner" not in records[-1]["players"][0]
+    assert "wolf_chat_log" not in records[-1]
+    assert "seer_results" not in records[-1]
+    public_attack = next(
+        record for record in records if record["type"] == "action_pending_attack"
+    )
+    public_seer = next(
+        record for record in records if record["type"] == "seer_results"
+    )
+    assert "target" not in public_attack
+    assert "results" not in public_seer
+    for action in ("attack", "seer"):
+        public_action_results = [
+            record
+            for record in records
+            if record["type"] == "llm_action_completed"
+            and record["action"] == action
+        ]
+        assert public_action_results
+        assert all(
+            "selected_target" not in record and "content" not in record
+            for record in public_action_results
+        )
+    assert all(
+        secret not in public_text
+        for secret in (
+            private_wolf_text,
+            attack_response,
+            seer_response,
+            vote_response,
+        )
+    )
+    wolf_events = [
+        record for record in records
+        if record["type"] == "llm_action_completed"
+        and record["action"] == "wolf_discussion"
+    ]
+    assert wolf_events
+    assert wolf_events[0]["private"] is True
+    assert wolf_events[0]["fallback_used"] is False
+    assert any(record["type"] == "llm_action_started" for record in records)
+    assert any(record["type"] == "llm_action_parse_failed" for record in records)
+    assert ("占い結果（管理者表示）" in output) is show_private
+
+    output_completion_order = [
+        line for line in output.splitlines()
+        if "応答待ち..." in line or "完了 (" in line
+    ]
+    assert output_completion_order
+    assert next(
+        index for index, line in enumerate(output_completion_order)
+        if "応答待ち..." in line
+    ) < next(
+        index for index, line in enumerate(output_completion_order) if "完了 (" in line
+    )
+
+    private_logs = list(log_dir.glob("game_*.private.jsonl"))
+    assert bool(private_logs) is expect_private_log
+    if expect_private_log:
+        private_log = private_logs[0]
+        private_text = private_log.read_text(encoding="utf-8")
+        private_records = [
+            json.loads(line) for line in private_text.splitlines()
+        ]
+        assert [record["sequence"] for record in private_records] == list(
+            range(len(private_records))
+        )
+        for secret in (
+            private_wolf_text,
+            attack_response,
+            seer_response,
+            vote_response,
+        ):
+            assert secret in private_text
+        assert "seed" in private_records[0]
+        assert all("role" in player for player in private_records[-1]["players"])
+        assert "wolf_chat_log" in private_records[-1]
+        assert "seer_results" in private_records[-1]
+        private_attack = next(
+            record
+            for record in private_records
+            if record["type"] == "action_pending_attack"
+        )
+        assert "target" not in public_attack
+        assert private_attack["target"] in private_records[-1]["alive_players"] + [
+            player["name"]
+            for player in private_records[-1]["players"]
+            if not player["is_alive"]
+        ]
+        private_seer = next(
+            record
+            for record in private_records
+            if record["type"] == "seer_results"
+        )
+        assert "results" not in public_seer
+        assert private_seer["results"]
+
+
+def test_ctrl_c_records_current_llm_action_before_finalizing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(OllamaClient, "ping", lambda self: True)
+
+    def interrupt_chat(self, model, messages, options=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(OllamaClient, "chat", interrupt_chat)
+    log_dir = tmp_path / "interrupt_logs"
+    args = build_parser().parse_args([
+        "--mode", "ollama",
+        "--seed", "42",
+        "--log-dir", str(log_dir),
+    ])
+
+    with pytest.raises(SystemExit) as exit_error:
+        run_cli_game(args)
+
+    assert exit_error.value.code == 130
+    assert "中断した処理" in capsys.readouterr().out
+    records = [
+        json.loads(line)
+        for line in next(log_dir.glob("game_*.jsonl"))
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    interrupted = next(
+        record for record in records if record["type"] == "llm_action_interrupted"
+    )
+    assert interrupted["active_action"]["player"] in {
+        player["name"] for player in records[-1]["players"]
+    }
+    assert interrupted["active_action"]["action"] == "wolf_discussion"
+    assert records[-1]["error_occurred"] is True

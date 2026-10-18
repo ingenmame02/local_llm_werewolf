@@ -244,3 +244,26 @@ def test_empty_discussion_after_reprompt_uses_explicit_fallback() -> None:
     assert len(client.prompts) == 2
     assert actions.traces[-1].raw_responses == ("", " \t\n ")
     assert actions.traces[-1].fallback_used is True
+
+
+def test_action_lifecycle_events_include_reprompt_fallback_and_timing() -> None:
+    client = FakeClient("投票：unknown", "投票：unknown")
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(make_state(), client, event_callback=events.append)
+
+    actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+
+    assert [event["type"] for event in events] == [
+        "llm_action_started",
+        "llm_action_parse_failed",
+        "llm_action_parse_failed",
+        "llm_action_completed",
+    ]
+    assert events[0]["player"] == "P0"
+    assert events[0]["action"] == "vote"
+    assert events[0]["private"] is False
+    assert events[1]["will_retry"] is True
+    assert events[2]["will_retry"] is False
+    assert events[3]["semantic_retries"] == 1
+    assert events[3]["fallback_used"] is True
+    assert isinstance(events[3]["elapsed_seconds"], float)

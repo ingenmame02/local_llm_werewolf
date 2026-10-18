@@ -1,0 +1,2 @@
+{"type": "game_init", "game_id": "f30ba5058dc8", "timestamp": "2026-10-18T07:31:00.480312+00:00", "mode": "ollama", "options": {"temperature": 0.7, "num_ctx": 4096}, "timeout": 180.0, "base_url": "http://localhost:11434", "show_private": false, "sequence": 0}
+{"type": "llm_action_started", "day": 1, "phase": "night_wolf", "phase_label": "夜・人狼相談", "player": "Player 2", "action": "wolf_discussion", "private": true, "elapsed_seconds": 0.0, "timestamp": "2026-10-18T07:31:00.568202+00:00", "game_id": "f30ba5058dc8", "sequence": 1}

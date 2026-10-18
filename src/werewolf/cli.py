@@ -53,12 +53,23 @@ ROLE_NAMES_JA = {
 
 
 class GameLogger:
-    def __init__(self, game_id: str, log_dir: Path, metadata: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        game_id: str,
+        log_dir: Path,
+        metadata: dict[str, Any],
+        private_enabled: bool = False,
+    ) -> None:
         self.game_id = game_id
         self.log_dir = log_dir
         self.log_file = log_dir / f"game_{game_id}.jsonl"
+        self.private_log_file = (
+            log_dir / f"game_{game_id}.private.jsonl" if private_enabled else None
+        )
         self.metadata = metadata
         self._written = False
+        self._sequence = 0
+        self._private_sequence = 0
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
         # 1行目にゲーム開始メタデータを書き込み
@@ -68,13 +79,34 @@ class GameLogger:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **metadata,
         }
-        self.append_record(init_record)
+        public_init_record = {
+            key: value for key, value in init_record.items() if key != "seed"
+        }
+        self.append_record(public_init_record, init_record)
 
-    def append_record(self, record: dict[str, Any]) -> None:
-        if "timestamp" not in record:
-            record["timestamp"] = datetime.now(timezone.utc).isoformat()
+    def append_record(
+        self,
+        record: dict[str, Any],
+        private_record: dict[str, Any] | None = None,
+    ) -> None:
+        self._append_to_file(record, self.log_file, private=False)
+        if self.private_log_file is not None:
+            self._append_to_file(
+                private_record if private_record is not None else record,
+                self.private_log_file,
+                private=True,
+            )
+
+    def _append_to_file(
+        self, record: dict[str, Any], path: Path, private: bool
+    ) -> None:
+        record = dict(record)
+        record.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
         record["game_id"] = self.game_id
-        with self.log_file.open("a", encoding="utf-8") as f:
+        sequence_attr = "_private_sequence" if private else "_sequence"
+        record["sequence"] = getattr(self, sequence_attr)
+        setattr(self, sequence_attr, getattr(self, sequence_attr) + 1)
+        with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def finalize(self, state: GameState, traces: list[Any] | None = None, error: str | None = None) -> None:
@@ -82,23 +114,21 @@ class GameLogger:
             return
         self._written = True
 
-        players_data = [
+        public_players_data = [
             {
                 "name": p.name,
                 "model": p.model,
-                "role": p.role.value,
                 "is_alive": p.is_alive,
-                "partner": p.partner,
             }
             for p in state.players
         ]
         conversation_data = [{"speaker": m.speaker, "content": m.content} for m in state.conversation_log]
         wolf_chat_data = [{"speaker": m.speaker, "content": m.content} for m in state.wolf_chat_log]
 
-        traces_data = []
+        private_traces_data = []
         if traces:
             for t in traces:
-                traces_data.append(
+                private_traces_data.append(
                     {
                         "action": getattr(t, "action", str(t)),
                         "player": getattr(t, "player", ""),
@@ -110,22 +140,36 @@ class GameLogger:
                     }
                 )
 
-        summary_record = {
+        public_summary = {
             "type": "game_result",
             "game_id": self.game_id,
             "day": state.day,
             "phase": state.phase.value,
             "winner": state.winner,
-            "error": error,
-            "players": players_data,
+            "error_occurred": error is not None,
+            "players": public_players_data,
             "alive_players": state.alive_players,
             "conversation_log": conversation_data,
+            "votes": state.votes,
+        }
+        private_summary = {
+            **public_summary,
+            "error": error,
+            "players": [
+                {
+                    "name": p.name,
+                    "model": p.model,
+                    "role": p.role.value,
+                    "is_alive": p.is_alive,
+                    "partner": p.partner,
+                }
+                for p in state.players
+            ],
             "wolf_chat_log": wolf_chat_data,
             "seer_results": state.seer_results,
-            "votes": state.votes,
-            "traces": traces_data,
+            "traces": private_traces_data,
         }
-        self.append_record(summary_record)
+        self.append_record(public_summary, private_summary)
 
 
 def print_banner(text: str) -> None:
@@ -162,12 +206,72 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "options": options,
         "timeout": args.timeout,
         "base_url": args.base_url,
+        "show_private": args.show_private,
     }
-    logger = GameLogger(game_id, log_dir, meta)
+    private_logging = args.show_private or args.private_log
+    logger = GameLogger(game_id, log_dir, meta, private_enabled=private_logging)
+    show_private = args.show_private
+    if logger.private_log_file is not None:
+        print(f"管理者用JSONLログ保存先: {logger.private_log_file}")
+
+    def emit_action_event(event: dict[str, object]) -> None:
+        public_event = {
+            key: value
+            for key, value in event.items()
+            if key not in {"content", "selected_target", "parsed_target", "error"}
+        }
+        if event.get("error") is not None:
+            public_event["error_occurred"] = True
+        if event.get("type") == "llm_action_completed" and event.get("action") == "discussion":
+            content = event.get("content")
+            if isinstance(content, str):
+                public_event["published_message"] = content
+        logger.append_record(public_event, event)
+        event_type = event["type"]
+        day = event["day"]
+        phase = event["phase_label"]
+        player = event["player"]
+        action = event["action"]
+        action_labels = {
+            "wolf_discussion": "人狼相談",
+            "attack": "襲撃選択",
+            "seer": "占い",
+            "discussion": "議論",
+            "vote": "投票",
+        }
+        label = action_labels.get(str(action), str(action))
+        prefix = f"[Day {day}][{phase}][{player}]"
+        private = bool(event["private"])
+
+        if event_type == "llm_action_started":
+            print(f"{prefix} 応答待ち... ({label})", flush=True)
+        elif event_type == "llm_action_parse_failed":
+            if event.get("will_retry"):
+                print(f"{prefix} 応答を解析できません。再要求します。", flush=True)
+            else:
+                print(f"{prefix} 再要求後も解析できません。", flush=True)
+        elif event_type == "llm_action_completed":
+            retries = int(event["total_retries"])
+            fallback = "有" if event["fallback_used"] else "無"
+            print(
+                f"{prefix} 完了 ({event['elapsed_seconds']}s, "
+                f"リトライ {retries}回, フォールバック {fallback})",
+                flush=True,
+            )
+            if event.get("error"):
+                print(f"  エラー: {event['error']}", flush=True)
+            if event.get("selected_target") and (
+                not private or show_private
+            ):
+                print(f"  {label}: {event['selected_target']}", flush=True)
+            content = event.get("content")
+            if content and (not private or show_private):
+                print(f"  {player}: {content}", flush=True)
 
     # クライアントとポリシーの設定
     client: OllamaClient | None = None
     actions: ActionPolicy
+    active_call: dict[str, object] | None = None
     if args.mode == "ollama":
         client = OllamaClient(base_url=args.base_url, timeout=args.timeout, max_retries=2)
         if not client.ping():
@@ -176,7 +280,26 @@ def run_cli_game(args: argparse.Namespace) -> int:
             logger.finalize(state, traces=None, error=err_msg)
             print(f"ログを保存しました: {logger.log_file}")
             return 1
-        actions = OllamaActions(state=state, client=client, seed=args.seed, options=options)
+        def on_action_event(event: dict[str, object]) -> None:
+            nonlocal active_call
+            if event["type"] == "llm_action_started":
+                active_call = {
+                    "day": event["day"],
+                    "phase": event["phase"],
+                    "player": event["player"],
+                    "action": event["action"],
+                }
+            emit_action_event(event)
+            if event["type"] == "llm_action_completed":
+                active_call = None
+
+        actions = OllamaActions(
+            state=state,
+            client=client,
+            seed=args.seed,
+            options=options,
+            event_callback=on_action_event,
+        )
     else:
         actions = MockActions()
 
@@ -184,6 +307,14 @@ def run_cli_game(args: argparse.Namespace) -> int:
 
     def cleanup_and_exit(signum=None, frame=None):
         print("\n\n[中断] シグナルを受信しました。ログを保存して終了します...")
+        if active_call is not None:
+            logger.append_record(
+                {
+                    "type": "llm_action_interrupted",
+                    "active_action": active_call,
+                }
+            )
+            print(f"  中断した処理: {active_call}", flush=True)
         traces = getattr(actions, "traces", None)
         logger.finalize(state, traces=traces, error="interrupted")
         print(f"ログ保存完了: {logger.log_file}")
@@ -207,6 +338,10 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 logger.append_record({
                     "type": "action_pending_attack",
                     "day": state.day,
+                    "private": True,
+                }, {
+                    "type": "action_pending_attack",
+                    "day": state.day,
                     "target": state.pending_attack,
                 })
             if state.winner is not None:
@@ -217,8 +352,15 @@ def run_cli_game(args: argparse.Namespace) -> int:
             logger.append_record({
                 "type": "seer_results",
                 "day": state.day,
+                "private": True,
+                "result_count": len(state.seer_results),
+            }, {
+                "type": "seer_results",
+                "day": state.day,
                 "results": dict(state.seer_results),
             })
+            if show_private and state.seer_results:
+                print(f"  占い結果（管理者表示）: {state.seer_results}", flush=True)
 
             # 3. 朝フェーズ（犠牲者発表）
             prev_alive = set(state.alive_players)
@@ -242,16 +384,16 @@ def run_cli_game(args: argparse.Namespace) -> int:
             print_round_header(state.day, Phase.DAY_DISCUSSION, state.alive_players)
             prev_log_len = len(state.conversation_log)
             engine.run_discussion()
-            # 新規会話の表示
             new_msgs = state.conversation_log[prev_log_len:]
-            for msg in new_msgs:
-                print(f"  [{msg.speaker}]: {msg.content}")
-                logger.append_record({
-                    "type": "discussion_message",
-                    "day": state.day,
-                    "speaker": msg.speaker,
-                    "content": msg.content,
-                })
+            if not isinstance(actions, OllamaActions):
+                for msg in new_msgs:
+                    print(f"  [{msg.speaker}]: {msg.content}")
+                    logger.append_record({
+                        "type": "discussion_message",
+                        "day": state.day,
+                        "speaker": msg.speaker,
+                        "content": msg.content,
+                    })
 
             # 5. 投票フェーズ（処刑）
             prev_alive = set(state.alive_players)
@@ -353,6 +495,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="http://localhost:11434",
         help="Ollama API base URL",
+    )
+    parser.add_argument(
+        "--show-private",
+        action="store_true",
+        help="Show private werewolf discussion and seer information in the terminal",
+    )
+    parser.add_argument(
+        "--private-log",
+        action="store_true",
+        help="Write an administrator-only JSONL log without showing private content in the terminal",
     )
     return parser
 
