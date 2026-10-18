@@ -34,6 +34,12 @@ def _urlopen_transport(request: Request, timeout: float) -> bytes:
         return response.read()
 
 
+@dataclass(frozen=True)
+class ChatResponse:
+    content: str
+    attempts: int
+
+
 class OllamaClient:
     def __init__(
         self,
@@ -50,16 +56,46 @@ class OllamaClient:
             raise ValueError("Ollama base URL cannot be empty.")
 
         self.endpoint = f"{base_url.rstrip('/')}/api/chat"
+        self.tags_endpoint = f"{base_url.rstrip('/')}/api/tags"
         self.timeout = timeout
         self.max_retries = max_retries
         self._transport = transport or _urlopen_transport
 
-    def chat(self, model: str, messages: list[dict[str, str]]) -> str:
+    def ping(self) -> bool:
+        request = Request(self.tags_endpoint, headers={"Content-Type": "application/json"}, method="GET")
+        try:
+            self._transport(request, min(self.timeout, 5.0))
+            return True
+        except Exception:
+            return False
+
+    def chat_with_metadata(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict[str, object] | None = None,
+    ) -> ChatResponse:
+        content = self.chat(model=model, messages=messages, options=options)
+        # 内部で記録された実際の試行回数を取得（なければ1）
+        attempts = getattr(self, "_last_attempts", 1)
+        return ChatResponse(content=content, attempts=attempts)
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict[str, object] | None = None,
+    ) -> str:
         if not model.strip():
             raise ValueError("Model name cannot be empty.")
-        body = json.dumps(
-            {"model": model, "messages": messages, "stream": False}
-        ).encode("utf-8")
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+        }
+        if options:
+            payload["options"] = options
+        body = json.dumps(payload).encode("utf-8")
         request = Request(
             self.endpoint,
             data=body,
@@ -68,6 +104,7 @@ class OllamaClient:
         )
 
         for attempt in range(1, self.max_retries + 2):
+            self._last_attempts = attempt
             try:
                 response_body = self._transport(request, self.timeout)
                 response = json.loads(response_body)
@@ -108,3 +145,4 @@ class OllamaClient:
                 raise last_error
 
         raise RuntimeError("Ollama retry loop exited unexpectedly.")
+

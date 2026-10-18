@@ -24,6 +24,10 @@ from werewolf import (
         ("投票: Player 1！", ActionKind.VOTE, "Player 1"),
         ("投票：\n", ActionKind.VOTE, None),
         ("Player 1に投票します。", ActionKind.VOTE, None),
+        ("**襲撃対象：Player 4**", ActionKind.ATTACK, "Player 4"),
+        ("さっさと終わらせよう。\n\n**襲撃対象：Player 4**", ActionKind.ATTACK, "Player 4"),
+        ("**投票**：**Player 1**", ActionKind.VOTE, "Player 1"),
+        ("*占い対象*：*Player 3*", ActionKind.SEER, "Player 3"),
     ],
 )
 def test_parser_extracts_only_labeled_targets(
@@ -99,6 +103,25 @@ def test_client_retries_timeout_and_accepts_empty_model_content() -> None:
 
     assert client.chat("model-x", []) == ""
     assert calls == 2
+
+
+def test_client_chat_with_metadata_tracks_attempts() -> None:
+    calls = 0
+
+    def transport(request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls < 2:
+            raise TimeoutError("slow")
+        return b'{"message": {"content": "success after retry"}}'
+
+    client = OllamaClient(max_retries=2, transport=transport)
+    resp = client.chat_with_metadata("model-x", [])
+
+    assert resp.content == "success after retry"
+    assert resp.attempts == 2
+    assert calls == 2
+
 
 
 def make_state(seed: int = 23) -> GameState:

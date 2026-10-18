@@ -29,18 +29,23 @@ class ScriptedActions(MockActions):
     def vote(self, voter, candidates, day, runoff) -> str:
         if runoff:
             self.runoff_voters.append(voter)
-            return "P2"
+            return "P0" if voter == "P2" else "P2"
         return {
             "P0": "P1",
-            "P1": "P1",
-            "P2": "P2",
+            "P1": "P0",
+            "P2": "P3",
             "P3": "P2",
         }[voter]
 
 
 class AlwaysVoteWolf(MockActions):
     def vote(self, voter, candidates, day, runoff) -> str:
-        return "P0"
+        return "P1" if voter == "P0" else "P0"
+
+
+class AlwaysVoteForSelf(MockActions):
+    def vote(self, voter, candidates, day, runoff) -> str:
+        return voter
 
 
 def test_village_wins_when_the_last_wolf_is_executed() -> None:
@@ -96,7 +101,36 @@ def test_tied_vote_repeats_only_between_tied_candidates() -> None:
     assert actions.runoff_voters == ["P0", "P1", "P2", "P3"]
     assert state.players[2].is_alive is False
     assert state.phase is Phase.NIGHT_WOLF
-    assert state.votes == {"P0": "P2", "P1": "P2", "P2": "P2", "P3": "P2"}
+    assert state.votes == {"P0": "P2", "P1": "P2", "P2": "P0", "P3": "P2"}
+
+
+def test_self_votes_are_replaced_deterministically_in_initial_and_runoff_votes() -> None:
+    def collect_votes(seed: int) -> tuple[dict[str, str], dict[str, str]]:
+        state = make_state(
+            Role.WOLF, Role.VILLAGER, Role.VILLAGER, Role.VILLAGER, seed=seed
+        )
+        engine = GameEngine(state, AlwaysVoteForSelf())
+        first_votes = engine._collect_votes(
+            ("P0", "P1", "P2", "P3"),
+            ("P0", "P1", "P2", "P3"),
+            runoff=False,
+        )
+        runoff_votes = engine._collect_votes(
+            ("P0", "P1", "P2", "P3"),
+            ("P1", "P2"),
+            runoff=True,
+        )
+        return first_votes, runoff_votes
+
+    first_votes, runoff_votes = collect_votes(seed=23)
+    assert (first_votes, runoff_votes) == collect_votes(seed=23)
+    assert all(voter != target for voter, target in first_votes.items())
+    assert all(voter != target for voter, target in runoff_votes.items())
+    assert set(runoff_votes.values()) <= {"P1", "P2"}
+
+
+def test_mock_actions_never_votes_for_self() -> None:
+    assert MockActions().vote("P0", ("P0", "P1"), day=1, runoff=False) == "P1"
 
 
 def test_still_tied_runoff_uses_repeatable_seeded_tiebreak() -> None:
@@ -108,7 +142,7 @@ def test_still_tied_runoff_uses_repeatable_seeded_tiebreak() -> None:
         def vote(self, voter, candidates, day, runoff) -> str:
             if runoff:
                 self.runoff_voters.append(voter)
-            return "P1" if voter in ("P0", "P1") else "P2"
+            return "P1" if voter in ("P0", "P2") else "P2"
 
     GameEngine(first, PersistentlyTied()).run_voting()
     GameEngine(second, PersistentlyTied()).run_voting()

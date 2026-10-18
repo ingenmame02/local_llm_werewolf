@@ -1,0 +1,246 @@
+from dataclasses import dataclass
+from typing import Mapping
+
+from .models import GameState, Message, Player, Role
+
+ROLE_NAMES_JA: dict[Role, str] = {
+    Role.WOLF: "人狼",
+    Role.MADMAN: "狂人",
+    Role.SEER: "占い師",
+    Role.VILLAGER: "村人",
+}
+
+ROLE_DESCRIPTIONS_JA: dict[Role, str] = {
+    Role.WOLF: (
+        "あなたは人狼です。夜に村人を襲撃して減らしていくのが目的です。\n"
+        "相方の人狼と協力し、昼は村人のふりをして疑われないように立ち回ってください。\n"
+        "最終的に人狼陣営の数が村人陣営以上になれば勝利です。"
+    ),
+    Role.MADMAN: (
+        "あなたは狂人です。人狼陣営の仲間ですが、特殊能力はありません。\n"
+        "昼は村人のふりをして、人狼が有利になるように村を混乱させたり、誤った方向に議論を誘導したりしてください。\n"
+        "自分が処刑されても、人狼陣営が勝てばあなたの勝ちです。"
+    ),
+    Role.SEER: (
+        "あなたは占い師です。夜に1人を占って「人狼」か「人間」かを知ることができます。\n"
+        "得た情報をうまく使って人狼を見つけ、村を勝利に導くのが目的です。\n"
+        "ただし、自分が占い師だとバレすぎると襲撃されるリスクもあるので、情報の出し方には注意してください。"
+    ),
+    Role.VILLAGER: (
+        "あなたは村人です。特別な能力はありません。\n"
+        "昼の議論と投票で人狼を見つけ出し、処刑していくのが目的です。\n"
+        "怪しい言動をしている人を注意深く観察してください。"
+    ),
+}
+
+COMMON_SYSTEM_TEMPLATE = """あなたは人狼ゲームに参加しているプレイヤーです。
+あなたの役職は「{role}」です。
+
+【ゲームの基本ルール】
+- このゲームは「村人陣営」と「人狼陣営」に分かれて戦います。
+- 夜：人狼が1人を襲撃します。占い師は1人を占えます。
+- 朝：襲撃された人が発表されます。
+- 昼：生存者全員で議論します（1日3ターン程度）。
+- 投票：議論の後、処刑する相手を投票で選びます。
+- 村人陣営の勝利条件：人狼を全滅させる。
+- 人狼陣営の勝利条件：人狼陣営の数が村人陣営以上になる。
+- 投票では自分自身に投票してはいけません。
+
+【あなたの役職について】
+{role_description}
+
+このゲームでは、上記のルールと役職の目的を意識しつつ、普段のあなたらしい話し方や考え方をできるだけ残してください。
+無理に別人を演じる必要はありません。"""
+
+
+@dataclass(frozen=True)
+class PromptContext:
+    system_prompt: str
+    user_prompt: str
+
+    def to_messages(self) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.user_prompt},
+        ]
+
+
+class PromptBuilder:
+    @staticmethod
+    def build_system_prompt(player: Player) -> str:
+        role_ja = ROLE_NAMES_JA[player.role]
+        role_desc = ROLE_DESCRIPTIONS_JA[player.role]
+        return COMMON_SYSTEM_TEMPLATE.format(
+            role=role_ja,
+            role_description=role_desc,
+        )
+
+    @classmethod
+    def build_wolf_discuss_prompt(
+        cls,
+        actor: Player,
+        partner_name: str,
+        alive_players: tuple[str, ...],
+        wolf_chat_history: tuple[Message, ...],
+    ) -> PromptContext:
+        if actor.role is not Role.WOLF:
+            raise PermissionError(f"Player {actor.name} ({actor.role}) is not a wolf.")
+        if not actor.is_alive:
+            raise ValueError(f"Dead player {actor.name} cannot act.")
+
+        formatted_history = (
+            "\n".join(f"{m.speaker}: {m.content}" for m in wolf_chat_history)
+            if wolf_chat_history
+            else "なし"
+        )
+        user_prompt = (
+            "【現在の状況】\n"
+            "- フェーズ：夜（人狼同士の相談）\n"
+            "- あなたの役職：人狼\n"
+            f"- 相方の人狼：{partner_name}\n"
+            f"- 生存者：{', '.join(alive_players)}\n\n"
+            "【これまでの相談内容】\n"
+            f"{formatted_history}\n\n"
+            "【指示】\n"
+            "相方と相談して、今夜襲撃する相手を決めたいです。\n"
+            "- 誰を襲撃したいか、その理由を話してください\n"
+            "- 相方の意見も踏まえて調整して構いません\n\n"
+            "最後に必ず以下の形式で襲撃対象を明示してください：\n"
+            "襲撃対象：プレイヤー名"
+        )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )
+
+    @classmethod
+    def build_attack_prompt(
+        cls,
+        actor: Player,
+        wolves: tuple[str, ...],
+        valid_candidates: tuple[str, ...],
+    ) -> PromptContext:
+        if actor.role is not Role.WOLF:
+            raise PermissionError(f"Player {actor.name} ({actor.role}) is not a wolf.")
+        if not actor.is_alive:
+            raise ValueError(f"Dead player {actor.name} cannot act.")
+
+        user_prompt = (
+            "【現在の状況】\n"
+            "- フェーズ：夜（襲撃）\n"
+            "- あなたの役職：人狼\n"
+            f"- 人狼一覧：{', '.join(wolves)}\n"
+            f"- 選択可能な襲撃対象：{', '.join(valid_candidates)}\n\n"
+            "【指示】\n"
+            "今夜襲撃する対象を1人選んでください。\n"
+            "最後に必ず以下の形式で襲撃対象を明示してください：\n"
+            "襲撃対象：プレイヤー名"
+        )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )
+
+    @classmethod
+    def build_seer_prompt(
+        cls,
+        actor: Player,
+        alive_players: tuple[str, ...],
+        seer_results: Mapping[str, str] | tuple[tuple[str, str], ...],
+    ) -> PromptContext:
+        if actor.role is not Role.SEER:
+            raise PermissionError(f"Player {actor.name} ({actor.role}) is not a seer.")
+        if not actor.is_alive:
+            raise ValueError(f"Dead player {actor.name} cannot act.")
+
+        if isinstance(seer_results, Mapping):
+            results_list = [f"{k}: {v}" for k, v in seer_results.items()]
+        else:
+            results_list = [f"{k}: {v}" for k, v in seer_results]
+        formatted_results = "\n".join(results_list) if results_list else "なし"
+
+        user_prompt = (
+            "【現在の状況】\n"
+            "- フェーズ：夜（占い）\n"
+            "- あなたの役職：占い師\n"
+            f"- 生存者：{', '.join(alive_players)}\n"
+            f"- これまでの占い結果：\n{formatted_results}\n\n"
+            "【指示】\n"
+            "今夜占う相手を1人選んでください。\n"
+            "- なぜその人を占うのか、簡単に理由を述べても構いません\n\n"
+            "最後に必ず以下の形式で占い対象を明示してください：\n"
+            "占い対象：プレイヤー名"
+        )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )
+
+    @classmethod
+    def build_discussion_prompt(
+        cls,
+        actor: Player,
+        alive_players: tuple[str, ...],
+        conversation_history: tuple[Message, ...],
+    ) -> PromptContext:
+        if not actor.is_alive:
+            raise ValueError(f"Dead player {actor.name} cannot act.")
+
+        formatted_history = (
+            "\n".join(f"{m.speaker}: {m.content}" for m in conversation_history)
+            if conversation_history
+            else "なし"
+        )
+        role_ja = ROLE_NAMES_JA[actor.role]
+        user_prompt = (
+            "【現在の状況】\n"
+            "- フェーズ：昼（議論）\n"
+            f"- 生存者：{', '.join(alive_players)}\n"
+            f"- あなたの役職：{role_ja}\n\n"
+            "【これまでの公開会話】\n"
+            f"{formatted_history}\n\n"
+            "【指示】\n"
+            "上記を踏まえて、今の状況についてあなたの考えを述べてください。\n"
+            "- 疑っている人や、怪しいと思う点があれば話してください\n"
+            "- 自分の意見をはっきり言う必要はありません（様子を見る発言でも構いません）\n"
+            "- 普段のあなたらしい話し方でお願いします\n\n"
+            "発言のみを出力してください。"
+        )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )
+
+    @classmethod
+    def build_vote_prompt(
+        cls,
+        actor: Player,
+        alive_players: tuple[str, ...],
+        valid_candidates: tuple[str, ...],
+        today_summary: str = "",
+        runoff: bool = False,
+    ) -> PromptContext:
+        if not actor.is_alive:
+            raise ValueError(f"Dead player {actor.name} cannot act.")
+
+        role_ja = ROLE_NAMES_JA[actor.role]
+        summary_text = today_summary if today_summary else "（議論ログを参照してください）"
+        user_prompt = (
+            "【現在の状況】\n"
+            f"- フェーズ：投票{'（決戦再投票）' if runoff else ''}\n"
+            f"- 生存者：{', '.join(alive_players)}\n"
+            f"- あなたの役職：{role_ja}\n"
+            f"- 選択可能な候補: {', '.join(valid_candidates)}\n\n"
+            "【本日の議論まとめ】\n"
+            f"{summary_text}\n\n"
+            "【指示】\n"
+            "処刑する相手を1人選んでください。\n"
+            "- 自分自身には投票できません\n"
+            "- 簡単な理由を述べても構いません\n\n"
+            "最後に必ず以下の形式で投票先を明示してください：\n"
+            "投票：プレイヤー名"
+        )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )

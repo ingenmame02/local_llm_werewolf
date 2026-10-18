@@ -11,13 +11,13 @@ def test_loads_all_eight_models_from_configuration() -> None:
 
     assert len(configs) == 8
     assert [config.model for config in configs] == [
-        "CALM3-22B",
-        "muse-glimmer",
-        "mistral-small",
-        "glm-4.7-flash",
+        "CALM3-22B-Chat-GGUF:latest",
+        "muse-glimmer:latest",
+        "mistral-small:24b-262000",
+        "glm-4.7-flash:latest",
         "qwen3.8:27b",
         "deepseek-r1:32b",
-        "gpt-oss-20b",
+        "gpt-oss-20b-262000:latest",
         "gemma4:26b",
     ]
 

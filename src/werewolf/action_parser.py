@@ -22,12 +22,12 @@ class ActionParser:
     def parse(response: str, action: ActionKind) -> str | None:
         label = re.escape(_LABELS[action])
         match = re.search(
-            rf"(?m)^\s*{label}\s*[:：]\s*(.*?)\s*$",
+            rf"(?m)^\s*(?:\*{{1,3}}|_{{1,3}})?\s*{label}\s*(?:\*{{1,3}}|_{{1,3}})?\s*[:：]\s*(.*?)\s*$",
             response,
         )
         if match is None:
             return None
-        target = _TRAILING_PUNCTUATION.sub("", match.group(1)).strip(_OUTER_QUOTES)
+        target = _TRAILING_PUNCTUATION.sub("", match.group(1)).strip(_OUTER_QUOTES + "*_")
         return target or None
 
     @staticmethod

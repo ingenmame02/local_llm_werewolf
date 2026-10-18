@@ -5,6 +5,7 @@ from .action_parser import ActionKind, ActionParser
 from .engine import ActionPolicy
 from .models import GameState, Message, Player
 from .ollama import OllamaClient, OllamaError
+from .prompts import PromptBuilder, PromptContext
 
 
 @dataclass(frozen=True)
@@ -24,9 +25,11 @@ class OllamaActions(ActionPolicy):
         state: GameState,
         client: OllamaClient,
         seed: int | None = None,
+        options: dict[str, object] | None = None,
     ) -> None:
         self.state = state
         self.client = client
+        self.options = options
         self._rng = random.Random(state.seed if seed is None else seed)
         self.traces: list[ActionTrace] = []
 
@@ -34,14 +37,14 @@ class OllamaActions(ActionPolicy):
         self, wolf: str, partner: str, history: tuple[Message, ...]
     ) -> str:
         player = self._player(wolf)
-        prompt = (
-            f"夜の人狼相談です。あなたは人狼で、相方は{partner}です。\n"
-            f"生存者: {', '.join(self.state.alive_players)}\n"
-            f"これまでの相談: {self._format_history(history)}\n"
-            "襲撃対象について相談し、最後に必ず「襲撃対象：プレイヤー名」と出力してください。"
+        prompt_ctx = PromptBuilder.build_wolf_discuss_prompt(
+            actor=player,
+            partner_name=partner,
+            alive_players=tuple(self.state.alive_players),
+            wolf_chat_history=history,
         )
-        return self._free_text(
-            "wolf_discussion", player, prompt, f"{wolf} は相談に応答できませんでした。"
+        return self._free_text_with_context(
+            "wolf_discussion", player, prompt_ctx, f"{wolf} は相談に応答できませんでした。"
         )
 
     def choose_attack(self, wolves: tuple[str, ...], candidates: tuple[str, ...]) -> str:
@@ -49,50 +52,54 @@ class OllamaActions(ActionPolicy):
         valid_candidates = self._valid_candidates(
             actor, candidates, forbidden=wolves
         )
-        prompt = self._target_prompt(
-            "襲撃対象", actor, valid_candidates,
-            f"人狼は {', '.join(wolves)} です。今夜襲撃する対象を選んでください。",
+        prompt_ctx = PromptBuilder.build_attack_prompt(
+            actor=actor,
+            wolves=wolves,
+            valid_candidates=valid_candidates,
         )
         return self._select_target(
-            ActionKind.ATTACK, actor, valid_candidates, prompt, forbidden=wolves
+            ActionKind.ATTACK, actor, valid_candidates, prompt_ctx, forbidden=wolves
         )
 
     def choose_seer_target(
         self, seer: str, candidates: tuple[str, ...], results: tuple[tuple[str, str], ...]
     ) -> str:
         actor = self._player(seer)
-        past_results = "\n".join(f"{name}: {result}" for name, result in results) or "なし"
-        prompt = self._target_prompt(
-            "占い対象", actor, candidates,
-            f"あなたは占い師です。これまでの占い結果:\n{past_results}\n今夜占う対象を選んでください。",
+        prompt_ctx = PromptBuilder.build_seer_prompt(
+            actor=actor,
+            alive_players=candidates,
+            seer_results=results,
         )
-        return self._select_target(ActionKind.SEER, actor, candidates, prompt)
+        return self._select_target(ActionKind.SEER, actor, candidates, prompt_ctx)
 
     def discuss(
         self, player: str, day: int, alive: tuple[str, ...], history: tuple[Message, ...]
     ) -> str:
         actor = self._player(player)
-        prompt = (
-            f"昼の議論です。あなたの役職は{actor.role.value}、日数は{day}日目です。\n"
-            f"生存者: {', '.join(alive)}\n"
-            f"公開会話:\n{self._format_history(history)}\n"
-            "議論内容だけを発言してください。"
+        prompt_ctx = PromptBuilder.build_discussion_prompt(
+            actor=actor,
+            alive_players=alive,
+            conversation_history=history,
         )
-        return self._free_text(
-            "discussion", actor, prompt, f"{player} は発言できませんでした。"
+        return self._free_text_with_context(
+            "discussion", actor, prompt_ctx, f"{player} は発言できませんでした。"
         )
 
     def vote(
         self, voter: str, candidates: tuple[str, ...], day: int, runoff: bool
     ) -> str:
         actor = self._player(voter)
-        prompt = self._target_prompt(
-            "投票", actor, candidates,
-            f"{day}日目の投票です。再投票: {'はい' if runoff else 'いいえ'}。処刑対象を選んでください。",
-            forbid_self=True,
+        valid_candidates = self._valid_candidates(
+            actor, candidates, forbid_self=True
+        )
+        prompt_ctx = PromptBuilder.build_vote_prompt(
+            actor=actor,
+            alive_players=tuple(self.state.alive_players),
+            valid_candidates=valid_candidates,
+            runoff=runoff,
         )
         return self._select_target(
-            ActionKind.VOTE, actor, candidates, prompt, forbid_self=True
+            ActionKind.VOTE, actor, candidates, prompt_ctx, forbid_self=True
         )
 
     def _select_target(
@@ -100,7 +107,7 @@ class OllamaActions(ActionPolicy):
         action: ActionKind,
         actor: Player,
         candidates: tuple[str, ...],
-        prompt: str,
+        prompt_ctx: PromptContext,
         forbid_self: bool = False,
         forbidden: tuple[str, ...] = (),
     ) -> str:
@@ -110,17 +117,28 @@ class OllamaActions(ActionPolicy):
         if not valid_candidates:
             raise ValueError(f"No valid candidates for {action.value} by {actor.name}.")
 
-        prompts = [prompt]
+        user_prompts = [prompt_ctx.user_prompt]
         raw_responses: list[str] = []
         parsed_targets: list[str | None] = []
         last_error: OllamaError | None = None
 
         for request_number in range(2):
+            messages = [
+                {"role": "system", "content": prompt_ctx.system_prompt},
+                {"role": "user", "content": user_prompts[-1]},
+            ]
             try:
-                response = self.client.chat(
-                    actor.model,
-                    [{"role": "user", "content": prompts[-1]}],
-                )
+                if self.options is not None:
+                    response = self.client.chat(
+                        actor.model,
+                        messages,
+                        options=self.options,
+                    )
+                else:
+                    response = self.client.chat(
+                        actor.model,
+                        messages,
+                    )
             except OllamaError as error:
                 last_error = error
                 break
@@ -140,8 +158,8 @@ class OllamaActions(ActionPolicy):
                 return target
 
             if request_number == 0:
-                prompts.append(
-                    f"{prompt}\n前回の応答は形式または候補が不正でした。"
+                user_prompts.append(
+                    f"{prompt_ctx.user_prompt}\n前回の応答は形式または候補が不正でした。"
                     f"候補から1名を選び、最後に必ず「{self._label(action)}：名前」とだけ明示してください。"
                 )
 
@@ -175,11 +193,15 @@ class OllamaActions(ActionPolicy):
             and (not forbid_self or candidate != actor.name)
         )
 
-    def _free_text(
-        self, action: str, actor: Player, prompt: str, fallback: str
+    def _free_text_with_context(
+        self, action: str, actor: Player, prompt_ctx: PromptContext, fallback: str
     ) -> str:
+        messages = prompt_ctx.to_messages()
         try:
-            response = self.client.chat(actor.model, [{"role": "user", "content": prompt}])
+            if self.options is not None:
+                response = self.client.chat(actor.model, messages, options=self.options)
+            else:
+                response = self.client.chat(actor.model, messages)
         except OllamaError as error:
             self.traces.append(
                 ActionTrace(
@@ -198,23 +220,6 @@ class OllamaActions(ActionPolicy):
         )
         return response
 
-    def _target_prompt(
-        self,
-        label: str,
-        actor: Player,
-        candidates: tuple[str, ...],
-        instruction: str,
-        forbid_self: bool = False,
-    ) -> str:
-        valid_candidates = self._valid_candidates(
-            actor, candidates, forbid_self=forbid_self
-        )
-        return (
-            f"{instruction}\nあなたの役職: {actor.role.value}\n"
-            f"選択可能な候補: {', '.join(valid_candidates)}\n"
-            f"必ず最後に「{label}：プレイヤー名」と出力してください。"
-        )
-
     @staticmethod
     def _label(action: ActionKind) -> str:
         return {
@@ -222,10 +227,6 @@ class OllamaActions(ActionPolicy):
             ActionKind.SEER: "占い対象",
             ActionKind.VOTE: "投票",
         }[action]
-
-    @staticmethod
-    def _format_history(history: tuple[Message, ...]) -> str:
-        return "\n".join(f"{message.speaker}: {message.content}" for message in history) or "なし"
 
     def _player(self, name: str) -> Player:
         return next(player for player in self.state.players if player.name == name)

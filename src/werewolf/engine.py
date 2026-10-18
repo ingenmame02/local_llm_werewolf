@@ -48,7 +48,10 @@ class MockActions:
     def vote(
         self, voter: str, candidates: tuple[str, ...], day: int, runoff: bool
     ) -> str:
-        return candidates[0]
+        eligible = tuple(candidate for candidate in candidates if candidate != voter)
+        if not eligible:
+            raise ValueError(f"No eligible vote targets for {voter}.")
+        return eligible[0]
 
 
 class GameEngine:
@@ -205,9 +208,17 @@ class GameEngine:
         self, voters: tuple[str, ...], candidates: tuple[str, ...], runoff: bool
     ) -> dict[str, str]:
         votes: dict[str, str] = {}
+        living = set(self.state.alive_players)
         for voter in voters:
+            eligible = tuple(
+                candidate
+                for candidate in candidates
+                if candidate != voter and candidate in living
+            )
+            if not eligible:
+                raise ValueError(f"No eligible living vote targets for {voter}.")
             choice = self.actions.vote(voter, candidates, self.state.day, runoff)
-            votes[voter] = choice if choice in candidates else self._rng.choice(candidates)
+            votes[voter] = choice if choice in eligible else self._rng.choice(eligible)
         return votes
 
     @staticmethod

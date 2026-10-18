@@ -1,0 +1,512 @@
+{
+  "generated_at": "2026-10-18T05:31:49.238914+00:00",
+  "models_file": "config\\players.json",
+  "rounds": 1,
+  "timeout": 180.0,
+  "transport_retries": 0,
+  "semantic_retries": 0,
+  "total_retries": 0,
+  "fallback_count": 0,
+  "options": {
+    "temperature": 0.7,
+    "num_ctx": 4096
+  },
+  "models": {
+    "CALM3-22B-Chat-GGUF:latest": {
+      "total_actions": 4,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "average_response_seconds": 6.069,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "muse-glimmer:latest": {
+      "total_actions": 4,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "average_response_seconds": 32.654,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "mistral-small:24b-262000": {
+      "total_actions": 4,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "average_response_seconds": 8.884,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "glm-4.7-flash:latest": {
+      "total_actions": 4,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "average_response_seconds": 17.051,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "qwen3.8:27b": {
+      "total_actions": 4,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "average_response_seconds": 30.018,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "deepseek-r1:32b": {
+      "total_actions": 4,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "average_response_seconds": 21.998,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "gpt-oss-20b-262000:latest": {
+      "total_actions": 4,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "average_response_seconds": 6.186,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "gemma4:26b": {
+      "total_actions": 4,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "average_response_seconds": 21.1,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    }
+  }
+}
