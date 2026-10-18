@@ -303,7 +303,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
     else:
         actions = MockActions()
 
-    engine = GameEngine(state, actions, seed=args.seed)
+    engine = GameEngine(
+        state,
+        actions,
+        seed=args.seed,
+        event_callback=logger.append_record,
+    )
 
     def cleanup_and_exit(signum=None, frame=None):
         print("\n\n[中断] シグナルを受信しました。ログを保存して終了します...")

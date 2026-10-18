@@ -1,5 +1,5 @@
 import random
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .models import GameState, Message, Phase, Player, Role
 
@@ -55,10 +55,17 @@ class MockActions:
 
 
 class GameEngine:
-    def __init__(self, state: GameState, actions: ActionPolicy, seed: int | None = None):
+    def __init__(
+        self,
+        state: GameState,
+        actions: ActionPolicy,
+        seed: int | None = None,
+        event_callback: Callable[[dict[str, object]], None] | None = None,
+    ):
         self.state = state
         self.actions = actions
         self._rng = random.Random(state.seed if seed is None else seed)
+        self.event_callback = event_callback
 
     def run(self) -> GameState:
         self.check_winner()
@@ -160,25 +167,50 @@ class GameEngine:
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:
-        self.state.phase = Phase.VOTING
+        if (
+            self.state.phase is not Phase.VOTING
+            or self.state.voting_completed_day == self.state.day
+        ):
+            return
+
         alive = tuple(self.state.alive_players)
         if not alive:
             self.check_winner()
             return
 
-        first_votes = self._collect_votes(alive, alive, runoff=False)
+        day = self.state.day
+        initial_phase_id = f"day-{day}-initial"
+        runoff_phase_id = f"day-{day}-runoff"
+        initial_already_completed = (
+            initial_phase_id in self.state.completed_vote_phases
+        )
+        first_votes = self._collect_votes(
+            alive, alive, runoff=False, phase_id=initial_phase_id, attempt=1
+        )
         tied = self._top_voted(first_votes)
         final_votes = first_votes
-        self.state.vote_history.append((self.state.day, False, dict(first_votes)))
+        if not initial_already_completed:
+            self.state.vote_history.append((day, False, dict(first_votes)))
         if len(tied) > 1:
-            final_votes = self._collect_votes(alive, tied, runoff=True)
-            self.state.vote_history.append((self.state.day, True, dict(final_votes)))
+            runoff_already_completed = (
+                runoff_phase_id in self.state.completed_vote_phases
+            )
+            final_votes = self._collect_votes(
+                alive,
+                tuple(tied),
+                runoff=True,
+                phase_id=runoff_phase_id,
+                attempt=2,
+            )
+            if not runoff_already_completed:
+                self.state.vote_history.append((day, True, dict(final_votes)))
             tied = self._top_voted(final_votes)
         executed = tied[0] if len(tied) == 1 else self._rng.choice(tied)
 
         self.state.votes = final_votes
+        self.state.voting_completed_day = day
         self.state.mark_dead(executed)
-        self.state.executions.append((self.state.day, executed))
+        self.state.executions.append((day, executed))
         self.state.conversation_log.append(
             Message("system", f"{executed} was voted out.")
         )
@@ -186,6 +218,13 @@ class GameEngine:
         if self.state.winner is None:
             self.state.day += 1
             self.state.phase = Phase.NIGHT_WOLF
+        self._emit_voting_event(
+            "voting_phase_ended",
+            voting_phase_id=f"day-{day}",
+            day=day,
+            executed=executed,
+            next_phase=self.state.phase.value,
+        )
 
     def check_winner(self) -> str | None:
         living_wolves = sum(
@@ -210,11 +249,36 @@ class GameEngine:
         return self.state.winner
 
     def _collect_votes(
-        self, voters: tuple[str, ...], candidates: tuple[str, ...], runoff: bool
+        self,
+        voters: tuple[str, ...],
+        candidates: tuple[str, ...],
+        runoff: bool,
+        phase_id: str | None = None,
+        attempt: int | None = None,
     ) -> dict[str, str]:
-        votes: dict[str, str] = {}
+        day = self.state.day
+        ballot_id = phase_id or f"day-{day}-{'runoff' if runoff else 'initial'}"
+        vote_attempt = attempt or (2 if runoff else 1)
+        votes = self.state.vote_phase_results.setdefault(ballot_id, {})
+        if ballot_id in self.state.completed_vote_phases:
+            return dict(votes)
+        self._emit_voting_event(
+            "voting_phase_started",
+            voting_phase_id=ballot_id,
+            day=day,
+            attempt=vote_attempt,
+            voters=list(voters),
+            candidates=list(candidates),
+        )
         living = set(self.state.alive_players)
+        requested_voters = set(voters)
+        if len(requested_voters) != len(voters):
+            raise ValueError(f"Duplicate voters supplied for {ballot_id}.")
+        if set(votes) - requested_voters:
+            raise ValueError(f"Unexpected recorded voters for {ballot_id}.")
         for voter in voters:
+            if voter in votes:
+                continue
             eligible = tuple(
                 candidate
                 for candidate in candidates
@@ -222,9 +286,41 @@ class GameEngine:
             )
             if not eligible:
                 raise ValueError(f"No eligible living vote targets for {voter}.")
+            self._emit_voting_event(
+                "vote_started",
+                voting_phase_id=ballot_id,
+                day=day,
+                voter=voter,
+                attempt=vote_attempt,
+            )
             choice = self.actions.vote(voter, candidates, self.state.day, runoff)
-            votes[voter] = choice if choice in eligible else self._rng.choice(eligible)
-        return votes
+            selected = choice if choice in eligible else self._rng.choice(eligible)
+            votes[voter] = selected
+            self._emit_voting_event(
+                "vote_completed",
+                voting_phase_id=ballot_id,
+                day=day,
+                voter=voter,
+                attempt=vote_attempt,
+                target=selected,
+                fallback_used=choice not in eligible,
+            )
+        self.state.completed_vote_phases.add(ballot_id)
+        self._emit_voting_event(
+            "voting_ballot_completed",
+            voting_phase_id=ballot_id,
+            day=day,
+            attempt=vote_attempt,
+            votes=dict(votes),
+        )
+        return dict(votes)
+
+    def _emit_voting_event(self, event_type: str, **details: object) -> None:
+        if self.event_callback is None:
+            return
+        self.event_callback(
+            {"type": event_type, "phase": Phase.VOTING.value, **details}
+        )
 
     @staticmethod
     def _top_voted(votes: dict[str, str]) -> list[str]:

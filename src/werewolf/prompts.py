@@ -33,33 +33,15 @@ ROLE_DESCRIPTIONS_JA: dict[Role, str] = {
     ),
 }
 
-COMMON_SYSTEM_TEMPLATE = """あなたは人狼ゲームに参加しているプレイヤーです。
+COMMON_SYSTEM_TEMPLATE = """人狼ゲームのプレイヤーとして行動してください。
 あなたの役職は「{role}」です。
-
-【ゲームの基本ルール】
-- このゲームは「村人陣営」と「人狼陣営」に分かれて戦います。
-- 夜：人狼が1人を襲撃します。占い師は1人を占えます。
-- 朝：襲撃された人が発表されます。
-- 昼：生存者全員で議論します（1日3ターン程度）。
-- 投票：議論の後、処刑する相手を投票で選びます。
-- 村人陣営の勝利条件：人狼を全滅させる。
-- 人狼陣営の勝利条件：人狼陣営の数が村人陣営以上になる。
-- 投票では自分自身に投票してはいけません。
-
-【あなたの役職について】
 {role_description}
+ユーザーメッセージのルールカードと確定事実に従い、指定された形式だけを簡潔に返してください。"""
 
-このゲームでは、上記のルールと役職の目的を意識しつつ、普段のあなたらしい話し方や考え方をできるだけ残してください。
-無理に別人を演じる必要はありません。"""
-
-RULE_CARD = """【人狼ルールカード】
-- プレイヤーは8人。初期役職は人狼2、狂人1、占い師1、村人4。
-- 夜は人狼相談・襲撃・占い、朝は死亡発表、昼の議論は3ターン、その後に投票。
-- 狂人は人狼陣営だが襲撃できない。
-- 占い結果は「人狼」または「人間」。
-- 投票では自分自身に投票できない。
-- 同票時は1回だけ再投票し、それでも同票なら抽選する。
-- 「パス」は昼議論の明示的な発言スキップで、空応答とは異なる。
+RULE_CARD = """【ルール】
+8人：人狼2・狂人1・占い師1・村人4。夜は相談/襲撃/占い、朝は死亡発表、昼議論3巡後に投票。
+狂人は襲撃不可。占い結果は人狼/人間。自分への投票不可。同票は再投票1回後に抽選。
+昼の「パス」は有効な発言スキップで、空応答とは異なる。
 
 """
 
@@ -76,33 +58,37 @@ class PromptContext:
         ]
 
     def compact(self, recent_lines: int = 4) -> PromptContext:
+        start_marker = (
+            "【これまでの公開会話】"
+            if "【これまでの公開会話】" in self.user_prompt
+            else "【公開会話（発言は未確認情報）】"
+            if "【公開会話（発言は未確認情報）】" in self.user_prompt
+            else "【これまでの相談内容（提案・意見であり、確定事実ではありません）】"
+        )
         return PromptContext(
             system_prompt=self.system_prompt,
             user_prompt=_compact_history_section(
                 self.user_prompt,
-                "【これまでの公開会話】",
-                "【直前の発言】",
-                recent_lines,
-            )
-            if "【これまでの公開会話】" in self.user_prompt
-            else _compact_history_section(
-                self.user_prompt,
-                "【これまでの相談内容（提案・意見であり、確定事実ではありません）】",
-                "【指示】",
+                start_marker,
                 recent_lines,
             ),
         )
 
 
 def _compact_history_section(
-    prompt: str, start_marker: str, end_marker: str, recent_lines: int
+    prompt: str, start_marker: str, recent_lines: int
 ) -> str:
     start = prompt.find(start_marker)
+    end_marker = (
+        "【占い師本人だけが参照できる結果】"
+        if "【占い師本人だけが参照できる結果】" in prompt
+        else "【指示】"
+    )
     end = prompt.find(end_marker, start + len(start_marker))
     if start < 0 or end < 0:
         return prompt
     section = prompt[start:end]
-    lines = section.splitlines()
+    lines = [line for line in section.splitlines() if line.strip()]
     content_start = 2 if len(lines) > 1 and lines[1].startswith("以下は") else 1
     history = lines[content_start:]
     if len(history) <= recent_lines:
@@ -136,7 +122,6 @@ class PromptBuilder:
         day: int,
         phase: str,
         state: GameState | None = None,
-        seer_results: Mapping[str, str] | tuple[tuple[str, str], ...] = (),
         conversation_history: tuple[Message, ...] | None = None,
     ) -> str:
         dead_players = (
@@ -144,45 +129,6 @@ class PromptBuilder:
             if state is not None
             else ()
         )
-        attack_history = (
-            "\n".join(f"Day {event_day}: {name}" for event_day, name in state.attack_deaths)
-            if state is not None and state.attack_deaths
-            else "なし"
-        )
-        execution_history = (
-            "\n".join(f"Day {event_day}: {name}" for event_day, name in state.executions)
-            if state is not None and state.executions
-            else "なし"
-        )
-        vote_history = "なし"
-        if state is not None and state.vote_history:
-            vote_history = "\n".join(
-                f"Day {event_day}{'（決選再投票）' if runoff else '（通常投票）'}: "
-                + ", ".join(f"{voter} → {target}" for voter, target in votes.items())
-                for event_day, runoff, votes in state.vote_history
-            )
-
-        result_history = "なし"
-        if actor.role is Role.SEER:
-            if state is not None and state.seer_result_history:
-                result_history = "\n".join(
-                    f"Day {event_day}: {target} = {result}"
-                    for event_day, target, result in state.seer_result_history
-                )
-            elif state is not None and state.seer_results:
-                result_history = "\n".join(
-                    f"{target} = {result}"
-                    for target, result in state.seer_results.items()
-                )
-            elif isinstance(seer_results, Mapping):
-                result_history = "\n".join(
-                    f"{target} = {result}" for target, result in seer_results.items()
-                ) or "なし"
-            elif seer_results:
-                result_history = "\n".join(
-                    f"{target} = {result}" for target, result in seer_results
-                )
-
         latest_attack = (
             f"Day {state.attack_deaths[-1][0]}: {state.attack_deaths[-1][1]}"
             if state is not None and state.attack_deaths
@@ -233,10 +179,7 @@ class PromptBuilder:
             f"- 最新の襲撃死亡者：{latest_attack}\n"
             f"- 最新の処刑者：{latest_execution}\n"
             f"- 最新の投票結果：{latest_vote}\n"
-            f"- 朝に発表された襲撃死亡者：\n{attack_history}\n"
-            f"- 投票による処刑者：\n{execution_history}\n"
-            f"- 過去の投票結果：\n{vote_history}\n"
-            f"- 占い師本人だけが参照できる占い結果履歴：\n{result_history}\n\n"
+            "\n"
             "【情報の区分】\n"
             "この欄のゲームシステム記録だけが確定事実です。プレイヤーの発言・主張・推測は未確認情報であり、"
             "確定事実として扱わないでください。\n\n"
@@ -273,11 +216,7 @@ class PromptBuilder:
         )
         user_prompt = (
             cls._fact_header(actor, alive_players, day, "夜（人狼同士の相談）", state)
-            + "【現在の状況】\n"
-            "- フェーズ：夜（人狼同士の相談）\n"
-            "- あなたの役職：人狼\n"
-            f"- 相方の人狼：{partner_name}\n"
-            f"- 生存者：{', '.join(alive_players)}\n\n"
+            + f"相方の人狼：{partner_name}\n\n"
             "【これまでの相談内容（提案・意見であり、確定事実ではありません）】\n"
             f"{formatted_history}\n\n"
             "【指示】\n"
@@ -315,8 +254,6 @@ class PromptBuilder:
                 state,
             )
             + "【現在の状況】\n"
-            "- フェーズ：夜（襲撃）\n"
-            "- あなたの役職：人狼\n"
             f"- 人狼一覧：{', '.join(wolves)}\n"
             f"- 選択可能な襲撃対象：{', '.join(valid_candidates)}\n\n"
             "【指示】\n"
@@ -375,15 +312,11 @@ class PromptBuilder:
         past_result_text = "\n".join(past_results) or "なし"
 
         user_prompt = (
-            cls._fact_header(
-                actor, alive_players, day, "夜（占い）", state, seer_results
-            )
-            + "【現在の状況】\n"
-            "- フェーズ：夜（占い）\n"
-            "- あなたの役職：占い師\n"
-            f"- 生存者：{', '.join(alive_players)}\n"
+            cls._fact_header(actor, alive_players, day, "夜（占い）", state)
+            + "【占い履歴】\n"
             f"- 今回（当日）の占い結果：\n{today_result_text}\n"
             f"- 過去（当日より前）の占い結果：\n{past_result_text}\n\n"
+            f"選択可能な占い対象：{', '.join(alive_players)}\n"
             "【指示】\n"
             "今夜占う相手を1人選んでください。\n"
             "- なぜその人を占うのか、簡単に理由を述べても構いません\n\n"
@@ -411,13 +344,11 @@ class PromptBuilder:
             message for message in conversation_history if message.speaker != "system"
         )
         formatted_history = (
-            "\n".join(f"{m.speaker}: {m.content}" for m in player_history)
-            if player_history
+            "\n".join(f"{m.speaker}: {m.content}" for m in player_history[:-1])
+            if len(player_history) > 1
             else "なし"
         )
         previous_message = player_history[-1] if player_history else None
-        previous_speaker = previous_message.speaker if previous_message else "なし"
-        previous_utterance = previous_message.content if previous_message else "なし"
         directly_addressed = cls._is_directed_to_player(
             actor, previous_message, player_history
         )
@@ -426,12 +357,6 @@ class PromptBuilder:
             if actor.role is Role.SEER and state is not None
             else {}
         )
-        seer_result_text = "なし"
-        if own_seer_results:
-            seer_result_text = "\n".join(
-                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
-                for target, result in own_seer_results.items()
-            )
         current_seer_results = (
             [
                 f"{target}: {'人狼' if result == 'wolf' else '人間'}"
@@ -456,33 +381,17 @@ class PromptBuilder:
                 state,
                 conversation_history=player_history,
             )
-            + "【現在の状況】\n"
-            "- フェーズ：昼（議論）\n"
-            f"- 生存者：{', '.join(alive_players)}\n"
-            f"- あなたの役職：{role_ja}\n\n"
-            "【これまでの公開会話】\n"
+            + f"- あなたへの質問・反応の可能性：{'あり' if directly_addressed else '明確な手がかりなし'}\n\n"
+            + "【これまでの公開会話】\n"
             "以下はプレイヤーの発言であり、確定事実ではありません。\n"
             f"{formatted_history}\n\n"
-            "【直前の発言】\n"
-            f"- 発言者：{previous_speaker}\n"
-            f"- 発言内容：{previous_utterance}\n"
-            f"- あなたへの質問・反応の可能性：{'あり' if directly_addressed else '明確な手がかりなし'}\n\n"
             + (
-                "【あなた本人だけが知る占い結果】\n"
-                + (
-                    "\n".join(
-                        f"Day {event_day}: {target} = "
-                        f"{'人狼' if result == 'wolf' else '人間'}"
-                        for event_day, target, result in state.seer_result_history
-                    )
-                    or "なし"
-                )
-                + "\n\n"
-                + "【今回（当日）の占い結果】\n"
+                "【占い師本人だけが参照できる結果】\n"
+                + "今回（当日）：\n"
                 + (
                     "\n".join(current_seer_results) or "なし"
                 )
-                + "\n\n【過去（当日より前）の占い結果】\n"
+                + "\n過去（当日より前）：\n"
                 + (
                     "\n".join(
                         f"Day {event_day}: {target} = "
@@ -492,7 +401,7 @@ class PromptBuilder:
                     )
                     or "なし"
                 )
-                + f"\n\n- 利用可能な最新結果：\n{seer_result_text}\n\n"
+                + "\n\n"
                 if actor.role is Role.SEER and state is not None
                 else ""
             )
@@ -509,7 +418,7 @@ class PromptBuilder:
                 "- 占い結果を持つ占い師は、今日まだ結果を活用した発言をしていない場合、今回の発言で必ず結果を推理に反映してください\n"
                 "- 結果を公開するか伏せるかは選べますが、対象への疑い・信頼・警戒など、結果を踏まえた判断を具体的に述べてください\n"
                 "- 今日の最初の情報活用発言をするまでは、パスだけを出力してはいけません\n"
-                "- 占い結果が複数ある場合、今回（当日）の結果を優先して活用し、過去の結果だけで判断しないでください\n"
+                "- 今回の結果がある場合はそれを最優先し、今回の結果がない場合は最新の過去結果を使ってください\n"
                 if actor.role is Role.SEER and own_seer_results
                 else ""
             )
@@ -518,7 +427,7 @@ class PromptBuilder:
         return PromptContext(
             system_prompt=cls.build_system_prompt(actor),
             user_prompt=user_prompt,
-        )
+        ).compact(recent_lines=6)
 
     @staticmethod
     def _is_directed_to_player(
@@ -571,7 +480,7 @@ class PromptBuilder:
         if not actor.is_alive:
             raise ValueError(f"Dead player {actor.name} cannot act.")
 
-        role_ja = ROLE_NAMES_JA[actor.role]
+
         summary_text = today_summary if today_summary else "（議論ログを参照してください）"
         user_prompt = (
             cls._fact_header(
@@ -581,11 +490,7 @@ class PromptBuilder:
                 f"投票{'（決戦再投票）' if runoff else ''}",
                 state,
             )
-            + "【現在の状況】\n"
-            f"- フェーズ：投票{'（決戦再投票）' if runoff else ''}\n"
-            f"- 生存者：{', '.join(alive_players)}\n"
-            f"- あなたの役職：{role_ja}\n"
-            f"- 選択可能な候補: {', '.join(valid_candidates)}\n\n"
+            + f"- 選択可能な候補: {', '.join(valid_candidates)}\n"
             "【本日の議論まとめ（未確認の主張・推測を含みます）】\n"
             f"{summary_text}\n\n"
             "【指示】\n"

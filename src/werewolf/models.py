@@ -59,6 +59,9 @@ class GameState:
     seed: int | None = None
     pending_attack: str | None = None
     discussion_turn: int = 0
+    vote_phase_results: dict[str, dict[str, str]] = field(default_factory=dict)
+    completed_vote_phases: set[str] = field(default_factory=set)
+    voting_completed_day: int | None = None
 
     def __post_init__(self) -> None:
         if self.day < 0:

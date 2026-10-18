@@ -84,6 +84,24 @@ def test_mock_actions_completes_game_via_cli(tmp_path: Path, capsys) -> None:
         for record in voting_records
         for voter, target in record["votes"].items()
     )
+    vote_events = [
+        line
+        for line in lines
+        if line["type"] in {"voting_phase_started", "vote_started", "vote_completed",
+                            "voting_ballot_completed", "voting_phase_ended"}
+    ]
+    completed_votes = [line for line in vote_events if line["type"] == "vote_completed"]
+    assert completed_votes
+    assert len({
+        (line["voting_phase_id"], line["voter"])
+        for line in completed_votes
+    }) == len(completed_votes)
+    ended_phase_ids = [
+        line["voting_phase_id"]
+        for line in vote_events
+        if line["type"] == "voting_phase_ended"
+    ]
+    assert len(ended_phase_ids) == len(set(ended_phase_ids))
 
 
 def test_village_and_werewolf_wins_with_mock_actions(tmp_path: Path) -> None:
@@ -242,7 +260,11 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
             line = next(line for line in prompt.splitlines() if "選択可能な襲撃対象：" in line)
             return f"{attack_response} 襲撃対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
         if "占い対象：" in prompt:
-            line = next(line for line in prompt.splitlines() if "- 生存者：" in line)
+            line = next(
+                line
+                for line in prompt.splitlines()
+                if "選択可能な占い対象：" in line
+            )
             return f"{seer_response} 占い対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
         if "選択可能な候補:" in prompt:
             line = next(line for line in prompt.splitlines() if "選択可能な候補:" in line)

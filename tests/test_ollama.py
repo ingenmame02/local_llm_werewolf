@@ -271,6 +271,37 @@ def test_discussion_pass_is_explicit_valid_response_without_retry() -> None:
     assert actions.traces[-1].raw_responses == ("  パス。  ",)
 
 
+def test_thinking_only_response_is_retried_and_thought_text_is_not_returned() -> None:
+    client = FakeClient("<think>推理中</think>", "<think>内部発言</think>結論です。")
+    actions = OllamaActions(make_state(), client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "結論です。"
+    assert len(client.prompts) == 2
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_vote_target_inside_think_tag_is_ignored() -> None:
+    client = FakeClient("<think>投票：P1</think>\n投票：P2")
+    actions = OllamaActions(make_state(), client)
+
+    target = actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+
+    assert target == "P2"
+    assert len(client.prompts) == 1
+
+
+def test_pass_after_think_tag_is_valid_and_only_final_text_is_recorded() -> None:
+    client = FakeClient("<think>考えています</think> パス")
+    actions = OllamaActions(make_state(), client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "パス"
+    assert actions.traces[-1].fallback_used is False
+
+
 def test_wolf_can_pass_consultation_but_attack_selection_remains_required() -> None:
     client = FakeClient("パス", "襲撃対象：P0")
     actions = OllamaActions(make_state(), client)
@@ -306,7 +337,7 @@ def test_seer_must_use_result_before_pass_and_can_pass_after_contribution() -> N
     assert len(client.prompts) == 3
     assert "前回の応答は空、パス" in client.prompts[1]
     assert "P1: 人狼" in client.prompts[0]
-    assert "【今回（当日）の占い結果】\nP1: 人狼" in client.prompts[0]
+    assert "今回（当日）：\nP1: 人狼" in client.prompts[0]
     assert actions.traces[0].fallback_used is False
     assert actions.traces[1].fallback_used is False
 
@@ -342,7 +373,8 @@ def test_context_overflow_compacts_old_discussion_and_retries() -> None:
 
     assert response == "回答します。"
     assert len(client.prompts) == 2
-    assert "old statement 0" in client.prompts[0]
+    assert "old statement 0" not in client.prompts[0]
+    assert "old statement 10" in client.prompts[0]
     assert "old statement 0" not in client.prompts[1]
     assert "old statement 10" in client.prompts[1]
     assert "old statement 4" not in client.prompts[1]

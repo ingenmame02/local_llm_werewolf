@@ -33,10 +33,9 @@ def test_system_prompt_common_structure_and_role_description() -> None:
         sys_prompt = PromptBuilder.build_system_prompt(player)
 
         # 全LLMで共通システムプロンプトの骨格が含まれること
-        assert "あなたは人狼ゲームに参加しているプレイヤーです。" in sys_prompt
+        assert "人狼ゲームのプレイヤーとして行動してください。" in sys_prompt
         assert f"あなたの役職は「{ROLE_NAMES_JA[role]}」です。" in sys_prompt
-        assert "【ゲームの基本ルール】" in sys_prompt
-        assert "【あなたの役職について】" in sys_prompt
+        assert "ユーザーメッセージのルールカードと確定事実に従い" in sys_prompt
         assert ROLE_DESCRIPTIONS_JA[role] in sys_prompt
 
 
@@ -168,7 +167,7 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
     state.vote_history.append((2, False, {"Player 1": "Player 3"}))
     state.seer_results["Player 4"] = "wolf"
     state.seer_result_history.append((3, "Player 4", "wolf"))
-    secret_result = "Day 3: Player 4 = wolf"
+    secret_result = "Day 3: Player 4 = 人狼"
     secret_wolf_chat = "WOLF_CHAT_SECRET: attack Player 6"
     state.wolf_chat_log.append(Message("Player 1", secret_wolf_chat))
 
@@ -178,11 +177,11 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
         if player.is_alive:
             actions.discuss(player.name, state.day, tuple(state.alive_players), ())
 
-    prompts_by_player = {
-        call["messages"][-1]["content"].split("- あなたのプレイヤー名：", 1)[1]
-        .splitlines()[0]: call["messages"][-1]["content"]
-        for call in client.recorded_calls
-    }
+    prompts_by_player: dict[str, str] = {}
+    for call in client.recorded_calls:
+        prompt = call["messages"][-1]["content"]
+        player_name = prompt.split("- あなたのプレイヤー名：", 1)[1].splitlines()[0]
+        prompts_by_player.setdefault(player_name, prompt)
     for player in state.players:
         if not player.is_alive:
             continue
@@ -190,7 +189,7 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
         assert f"- あなたの役職：{ROLE_NAMES_JA[player.role]}" in prompt
         assert "- 現在の日数：4日目" in prompt
         assert "- 現在のフェーズ：昼（議論）" in prompt
-        assert "【人狼ルールカード】" in prompt
+        assert "【ルール】" in prompt
         assert "- 昼議論ターン：0/3" in prompt
         assert f"- 現在の発言者：{player.name}" in prompt
         assert f"- 現在の生存者：{', '.join(state.alive_players)}" in prompt
@@ -202,7 +201,7 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
         assert secret_wolf_chat not in prompt
         if player.role is Role.SEER:
             assert secret_result in prompt
-            assert "【あなた本人だけが知る占い結果】" in prompt
+            assert "【占い師本人だけが参照できる結果】" in prompt
             assert "結果を公開するか伏せるかは選べます" in prompt
         else:
             assert secret_result not in prompt
@@ -224,9 +223,47 @@ def test_seer_discussion_separates_current_and_past_results() -> None:
         state=state,
     ).user_prompt
 
-    assert "【今回（当日）の占い結果】\nPlayer 6: 人間" in prompt
-    assert "【過去（当日より前）の占い結果】\nDay 1: Player 4 = 人狼" in prompt
-    assert "今回（当日）の結果を優先" in prompt
+    assert "今回（当日）：\nPlayer 6: 人間" in prompt
+    assert "過去（当日より前）：\nDay 1: Player 4 = 人狼" in prompt
+    assert "今回の結果がある場合はそれを最優先" in prompt
+
+
+def test_compacted_discussion_keeps_latest_speech_and_seer_result_private() -> None:
+    state = create_game(seed=42)
+    state.day = 4
+    seer = next(player for player in state.players if player.role is Role.SEER)
+    villager = next(player for player in state.players if player.role is Role.VILLAGER)
+    state.seer_results["Player 4"] = "wolf"
+    state.seer_result_history.append((4, "Player 4", "wolf"))
+    history = tuple(
+        Message(f"Player {index % 8 + 1}", f"old claim {index}")
+        for index in range(30)
+    ) + (Message(villager.name, "latest utterance is a question for the seer"),)
+
+    seer_prompt = PromptBuilder.build_discussion_prompt(
+        seer, tuple(state.alive_players), history, day=4, state=state
+    ).user_prompt
+    villager_prompt = PromptBuilder.build_discussion_prompt(
+        villager, tuple(state.alive_players), history, day=4, state=state
+    ).user_prompt
+
+    start = seer_prompt.index("【これまでの公開会話】")
+    end = seer_prompt.index("【占い師本人だけが参照できる結果】", start)
+    uncompressed_history = (
+        "【これまでの公開会話】\n"
+        "以下はプレイヤーの発言であり、確定事実ではありません。\n"
+        + "\n".join(f"{message.speaker}: {message.content}" for message in history[:-1])
+        + "\n\n"
+    )
+    uncompressed_prompt = seer_prompt[:start] + uncompressed_history + seer_prompt[end:]
+
+    assert len(seer_prompt) < len(uncompressed_prompt)
+    assert "old claim 0" not in seer_prompt
+    assert "old claim 28" in seer_prompt
+    assert "latest utterance is a question for the seer" in seer_prompt
+    assert "Player 4: 人狼" in seer_prompt
+    assert "Player 4: 人狼" not in villager_prompt
+    assert "- 選択可能な候補:" not in seer_prompt
 
 
 def test_rule_card_is_present_in_every_prompt_kind() -> None:
@@ -263,7 +300,7 @@ def test_rule_card_is_present_in_every_prompt_kind() -> None:
         ),
     )
 
-    assert all("【人狼ルールカード】" in prompt.user_prompt for prompt in prompts)
+    assert all("【ルール】" in prompt.user_prompt for prompt in prompts)
     assert all("- 直前の発言者：P3" in prompt.user_prompt for prompt in prompts)
     assert all("- 直前の発言内容：直近の公開発言です。" in prompt.user_prompt for prompt in prompts)
 
@@ -282,8 +319,8 @@ def test_discussion_prompt_separates_previous_speaker_and_detects_direct_address
         day=2,
     ).user_prompt
 
-    assert "- 発言者：P1" in prompt
-    assert "- 発言内容：P2、あなたの発言の根拠を説明してくれますか？" in prompt
+    assert "- 直前の発言者：P1" in prompt
+    assert "- 直前の発言内容：P2、あなたの発言の根拠を説明してくれますか？" in prompt
     assert "- あなたへの質問・反応の可能性：あり" in prompt
     assert "まず相手へ直接答えてください" in prompt
     assert "無言にせず「パス」とだけ出力できます" in prompt
@@ -303,7 +340,7 @@ def test_discussion_prompt_marks_reaction_to_own_prior_utterance() -> None:
         conversation_history=history,
     ).user_prompt
 
-    assert "- 発言者：P1" in prompt
+    assert "- 直前の発言者：P1" in prompt
     assert "- あなたへの質問・反応の可能性：あり" in prompt
 
 
@@ -382,8 +419,8 @@ def test_eight_players_prompt_snapshot_inspection() -> None:
         assert "user" in roles
 
         sys_msg = next(m["content"] for m in messages if m["role"] == "system")
-        assert "あなたは人狼ゲームに参加しているプレイヤーです。" in sys_msg
-        assert "【ゲームの基本ルール】" in sys_msg
+        assert "人狼ゲームのプレイヤーとして行動してください。" in sys_msg
+        assert "【ゲームの基本ルール】" not in sys_msg
         user_msg = next(m["content"] for m in messages if m["role"] == "user")
         assert "【ゲームシステムが確定した事実】" in user_msg
         player_name = user_msg.split("- あなたのプレイヤー名：", 1)[1].splitlines()[0]
@@ -396,5 +433,5 @@ def test_eight_players_prompt_snapshot_inspection() -> None:
         assert "- 現在のフェーズ：" in user_msg
         assert f"- 現在の生存者：{', '.join(state.alive_players)}" in user_msg
         assert "- 既知の死亡者：なし" in user_msg
-        assert "- 過去の投票結果：" in user_msg
+        assert "- 最新の投票結果：なし" in user_msg
         assert "確定事実として扱わないでください" in user_msg

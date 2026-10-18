@@ -1,4 +1,5 @@
 import random
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -8,6 +9,9 @@ from .engine import ActionPolicy
 from .models import GameState, Message, Player
 from .ollama import OllamaClient, OllamaError
 from .prompts import PromptBuilder, PromptContext
+
+_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+_UNCLOSED_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -125,10 +129,16 @@ class OllamaActions(ActionPolicy):
         valid_candidates = self._valid_candidates(
             actor, candidates, forbid_self=True
         )
+        recent_speech = [
+            f"{message.speaker}: {message.content}"
+            for message in self.state.conversation_log
+            if message.speaker != "system"
+        ][-8:]
         prompt_ctx = PromptBuilder.build_vote_prompt(
             actor=actor,
             alive_players=tuple(self.state.alive_players),
             valid_candidates=valid_candidates,
+            today_summary="\n".join(recent_speech),
             runoff=runoff,
             day=day,
             state=self.state,
@@ -210,7 +220,7 @@ class OllamaActions(ActionPolicy):
 
             transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
             raw_responses.append(response)
-            target = ActionParser.parse(response, action)
+            target = ActionParser.parse(self._final_response(response), action)
             parsed_targets.append(target)
             if ActionParser.validate_target(
                 target, valid_candidates, actor.name if forbid_self else None
@@ -337,7 +347,7 @@ class OllamaActions(ActionPolicy):
 
             transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
             raw_responses.append(response)
-            response_text = response.strip()
+            response_text = self._final_response(response).strip()
             is_pass = self._is_pass(response_text)
             must_use_seer_info = self._must_use_seer_info(action, actor)
             uses_seer_info = self._references_seer_result(actor, response_text)
@@ -417,6 +427,12 @@ class OllamaActions(ActionPolicy):
             error=last_error,
         )
         return fallback_response
+
+    @staticmethod
+    def _final_response(response: str) -> str:
+        final = _THINK_BLOCK.sub("", response)
+        final = _UNCLOSED_THINK_BLOCK.sub("", final)
+        return final.replace("</think>", "").strip()
 
     @staticmethod
     def _is_pass(response: str) -> bool:
