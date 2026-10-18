@@ -70,7 +70,7 @@ class GameLogger:
         self._written = False
         self._sequence = 0
         self._private_sequence = 0
-        self._model_stats: dict[str, dict[str, int | float]] = {}
+        self._model_stats: dict[str, dict[str, Any]] = {}
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
         # 1行目にゲーム開始メタデータを書き込み
@@ -90,18 +90,27 @@ class GameLogger:
         record: dict[str, Any],
         private_record: dict[str, Any] | None = None,
     ) -> None:
+        diagnostic_record = private_record if private_record is not None else record
+        model = diagnostic_record.get("model", record.get("model"))
+        if (
+            isinstance(model, str)
+            and diagnostic_record.get("type") == "llm_action_parse_failed"
+        ):
+            stats = self._model_stats.setdefault(model, self._new_model_stats())
+            reason = diagnostic_record.get("reason")
+            if isinstance(reason, str):
+                reasons = stats["failure_reasons"]
+                reasons[reason] = reasons.get(reason, 0) + 1
+                stats["parse_failure_count"] += 1
+                if reason in {"empty_content", "thinking_only_response"}:
+                    stats["empty_response_count"] += 1
+                if reason == "generation_truncated":
+                    stats["truncated_count"] += 1
         if record.get("type") == "llm_action_completed":
-            model = record.get("model")
             if isinstance(model, str):
                 stats = self._model_stats.setdefault(
                     model,
-                    {
-                        "actions": 0,
-                        "retries": 0,
-                        "fallback_count": 0,
-                        "timeout_count": 0,
-                        "elapsed_seconds": 0.0,
-                    },
+                    self._new_model_stats(),
                 )
                 stats["actions"] += 1
                 stats["retries"] += int(record.get("total_retries", 0))
@@ -112,7 +121,9 @@ class GameLogger:
                     3,
                 )
                 error = record.get("error")
-                if isinstance(error, dict) and error.get("kind") == "timeout":
+                if record.get("failure_reason") == "timeout" or (
+                    isinstance(error, dict) and error.get("kind") == "timeout"
+                ):
                     stats["timeout_count"] += 1
         self._append_to_file(record, self.log_file, private=False)
         if self.private_log_file is not None:
@@ -121,6 +132,22 @@ class GameLogger:
                 self.private_log_file,
                 private=True,
             )
+
+    @staticmethod
+    def _new_model_stats() -> dict[str, Any]:
+        return {
+            "actions": 0,
+            "retries": 0,
+            "fallback_count": 0,
+            "fallback_rate": 0.0,
+            "timeout_count": 0,
+            "parse_failure_count": 0,
+            "empty_response_count": 0,
+            "empty_response_rate": 0.0,
+            "truncated_count": 0,
+            "elapsed_seconds": 0.0,
+            "failure_reasons": {},
+        }
 
     def _append_to_file(
         self, record: dict[str, Any], path: Path, private: bool
@@ -138,6 +165,13 @@ class GameLogger:
         if self._written:
             return
         self._written = True
+        for stats in self._model_stats.values():
+            actions = stats["actions"]
+            if actions:
+                stats["fallback_rate"] = round(stats["fallback_count"] / actions, 4)
+                stats["empty_response_rate"] = round(
+                    stats["empty_response_count"] / actions, 4
+                )
 
         public_players_data = [
             {
@@ -162,6 +196,8 @@ class GameLogger:
                         "selected_target": getattr(t, "selected_target", None),
                         "fallback_used": getattr(t, "fallback_used", False),
                         "error": getattr(t, "error", None),
+                        "failure_reasons": getattr(t, "failure_reasons", ()),
+                        "response_metadata": getattr(t, "response_metadata", ()),
                     }
                 )
 
@@ -246,7 +282,15 @@ def run_cli_game(args: argparse.Namespace) -> int:
         public_event = {
             key: value
             for key, value in event.items()
-            if key not in {"content", "selected_target", "parsed_target", "error"}
+            if key not in {
+                "content",
+                "selected_target",
+                "parsed_target",
+                "error",
+                "response_metadata",
+                "failure_reason",
+                "failure_reasons",
+            }
         }
         if event.get("error") is not None:
             public_event["error_occurred"] = True

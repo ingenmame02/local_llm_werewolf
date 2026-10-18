@@ -129,6 +129,28 @@ def test_client_chat_with_metadata_tracks_attempts() -> None:
     assert calls == 2
 
 
+def test_client_chat_with_metadata_tracks_completion_and_thinking_fields() -> None:
+    def transport(request, timeout):
+        return json.dumps(
+            {
+                "message": {"content": "", "thinking": "internal chain"},
+                "done_reason": "length",
+            }
+        ).encode("utf-8")
+
+    response = OllamaClient(transport=transport).chat_with_metadata("model-x", [])
+
+    assert response.content == ""
+    assert response.done_reason == "length"
+    assert response.content_length == 0
+    assert response.thinking_present is True
+    assert response.to_metadata() == {
+        "done_reason": "length",
+        "content_length": 0,
+        "thinking_present": True,
+    }
+
+
 
 def make_state(seed: int = 23) -> GameState:
     return GameState(
@@ -192,6 +214,115 @@ def test_invalid_response_after_reprompt_uses_seeded_valid_fallback() -> None:
     assert len(first.traces[-1].raw_responses) == 2
 
 
+@pytest.mark.parametrize(
+    ("action", "first_response", "second_response"),
+    [
+        ("vote", "投票：P1", "投票：P2"),
+        ("attack", "襲撃対象：P0", "襲撃対象：P0"),
+        ("seer", "占い対象：P0", "占い対象：P0"),
+    ],
+)
+def test_truncated_target_response_retries_with_increased_generation_limit(
+    action, first_response, second_response
+) -> None:
+    from werewolf import ChatResponse
+
+    class MetadataClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.chat_responses = [
+                ChatResponse(
+                    content=first_response,
+                    attempts=1,
+                    done_reason="length",
+                    content_length=len(first_response),
+                ),
+                ChatResponse(
+                    content=second_response,
+                    attempts=1,
+                    done_reason="stop",
+                    content_length=len(second_response),
+                ),
+            ]
+
+        def chat(self, model, messages, options=None):
+            self.prompts.append(messages[-1]["content"])
+            self.options.append(options)
+            response = self.chat_responses.pop(0)
+            self._last_chat_response = response
+            return response.content
+
+    state = make_state()
+    actor_name = {"vote": "P0", "attack": "P1", "seer": "P2"}[action]
+    next(player for player in state.players if player.name == actor_name).num_predict = 256
+    client = MetadataClient()
+    actions = OllamaActions(state, client)
+
+    if action == "vote":
+        target = actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+    elif action == "attack":
+        target = actions.choose_attack(("P1",), ("P0", "P2"))
+    else:
+        target = actions.choose_seer_target("P2", ("P0", "P1"), ())
+
+    expected_target = {"vote": "P2", "attack": "P0", "seer": "P0"}[action]
+    assert target == expected_target
+    assert client.options == [
+        {"num_predict": 256},
+        {"num_predict": 512},
+    ]
+    assert len(client.prompts) == 2
+    assert actions.traces[-1].failure_reasons == ("generation_truncated",)
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_thinking_only_target_responses_retry_then_use_legal_fallback() -> None:
+    from werewolf import ChatResponse
+
+    class MetadataClient(FakeClient):
+        def chat(self, model, messages, options=None):
+            self.prompts.append(messages[-1]["content"])
+            self.options.append(options)
+            response = ChatResponse(
+                content="<think>選択を検討中</think>",
+                attempts=1,
+                done_reason="stop",
+                content_length=len("<think>選択を検討中</think>"),
+                thinking_present=True,
+            )
+            self._last_chat_response = response
+            return response.content
+
+    state = make_state(seed=71)
+    state.players[0].num_predict = 256
+    client = MetadataClient()
+    actions = OllamaActions(state, client)
+    events: list[dict[str, object]] = []
+    actions.event_callback = events.append
+
+    target = actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+
+    assert target in {"P1", "P2"}
+    assert client.options == [
+        {"num_predict": 256},
+        {"num_predict": 512},
+    ]
+    assert len(client.prompts) == 2
+    assert actions.traces[-1].failure_reasons == (
+        "thinking_only_response",
+        "thinking_only_response",
+    )
+    assert actions.traces[-1].fallback_used is True
+    parse_failures = [
+        event for event in events if event["type"] == "llm_action_parse_failed"
+    ]
+    assert [event["reason"] for event in parse_failures] == [
+        "thinking_only_response",
+        "thinking_only_response",
+    ]
+    assert [event["will_retry"] for event in parse_failures] == [True, False]
+
+
 def test_ollama_failure_falls_back_and_preserves_structured_error() -> None:
     client = FakeClient(
         OllamaError("timeout", "request timed out", attempts=3)
@@ -231,9 +362,10 @@ def test_discussion_failure_uses_explicit_fallback_and_trace() -> None:
 
     text = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
 
-    assert text == "P0 は発言できませんでした。"
+    assert text == "パス"
     assert actions.traces[-1].action == "discussion"
     assert actions.traces[-1].fallback_used
+    assert actions.traces[-1].failure_reasons == ("communication_failure",)
 
 
 def test_empty_discussion_is_reprompted_once_then_accepted_if_nonempty() -> None:
@@ -244,7 +376,7 @@ def test_empty_discussion_is_reprompted_once_then_accepted_if_nonempty() -> None
 
     assert text == "話し合いを続けましょう。"
     assert len(client.prompts) == 2
-    assert "空白のみ" in client.prompts[1]
+    assert "前回は本文が空でした" in client.prompts[1]
     assert actions.traces[-1].raw_responses == (" \n\t ", "話し合いを続けましょう。")
     assert actions.traces[-1].fallback_used is False
 
@@ -255,7 +387,7 @@ def test_empty_discussion_after_reprompt_uses_explicit_fallback() -> None:
 
     text = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
 
-    assert text == "P0 は発言できませんでした。"
+    assert text == "パス"
     assert len(client.prompts) == 2
     assert actions.traces[-1].raw_responses == ("", " \t\n ")
     assert actions.traces[-1].fallback_used is True
@@ -516,11 +648,108 @@ def test_timeout_does_not_trigger_an_additional_semantic_retry() -> None:
 
     response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
 
-    assert response == "P0 は発言できませんでした。"
+    assert response == "パス"
     assert len(client.prompts) == 1
     assert client.timeouts == [7.0]
     assert client.timeout == 30.0
     assert actions.traces[-1].fallback_used is True
+
+
+@pytest.mark.parametrize(
+    ("content", "thinking", "done_reason", "reason"),
+    [
+        ("", False, "stop", "empty_content"),
+        ("<think>分析中</think>", False, "stop", "thinking_only_response"),
+        ("途中の回答", False, "length", "generation_truncated"),
+    ],
+)
+def test_empty_generation_is_classified_and_retried_with_more_tokens(
+    content, thinking, done_reason, reason
+) -> None:
+    from werewolf import ChatResponse
+
+    class MetadataClient(FakeClient):
+        def chat(self, model, messages, options=None):
+            self.prompts.append(messages[-1]["content"])
+            self.options.append(options)
+            if len(self.prompts) == 1:
+                self._last_chat_response = ChatResponse(
+                    content=content,
+                    attempts=1,
+                    done_reason=done_reason,
+                    content_length=len(content),
+                    thinking_present=thinking,
+                )
+                return content
+            return "議論ではP1の投票先を確認します。"
+
+    state = make_state()
+    state.players[0].num_predict = 256
+    client = MetadataClient(content)
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "議論ではP1の投票先を確認します。"
+    assert len(client.prompts) == 2
+    assert client.options[0] == {"num_predict": 256}
+    assert client.options[1] == {"num_predict": 512}
+    assert actions.traces[-1].failure_reasons == (reason,)
+    assert actions.traces[-1].response_metadata[0] == {
+        "done_reason": done_reason,
+        "content_length": len(content),
+        "thinking_present": thinking,
+    }
+
+
+def test_seer_skips_previously_scanned_living_candidates_and_dead_players() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.mark_dead("P1")
+    state.seer_results["P0"] = "human"
+    client = FakeClient("占い対象：P2")
+    actions = OllamaActions(state, client)
+
+    target = actions.choose_seer_target(
+        "P0", ("P0", "P1", "P2"), (("P0", "human"),)
+    )
+
+    assert target == "P2"
+    assert "選択可能な占い対象：P2" in client.prompts[0]
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_reason"),
+    [
+        ("P1は人狼でした。", "unverified_dead_role"),
+        ("P1に投票すべきです。", "dead_player_action_target"),
+        ("今夜は占います。", "out_of_phase_action_claim"),
+    ],
+)
+def test_game_rule_inconsistent_discussion_is_reprompted(
+    response, expected_reason
+) -> None:
+    state = make_state()
+    state.mark_dead("P1")
+    client = FakeClient(response, "生存者のP2について投票根拠を確認します。")
+    actions = OllamaActions(state, client)
+
+    answer = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert answer == "生存者のP2について投票根拠を確認します。"
+    assert len(client.prompts) == 2
+    assert expected_reason in actions.traces[-1].failure_reasons
+
+
+def test_discussion_can_refer_to_a_dead_player_without_proposing_an_action() -> None:
+    state = make_state()
+    state.mark_dead("P1")
+    response = "P1への投票は昨日のことで、今の対象は生存者から考えます。"
+    client = FakeClient(response)
+    actions = OllamaActions(state, client)
+
+    assert actions.discuss("P0", 1, tuple(state.alive_players), ()) == response
+    assert len(client.prompts) == 1
 
 
 def test_action_lifecycle_events_include_reprompt_fallback_and_timing() -> None:

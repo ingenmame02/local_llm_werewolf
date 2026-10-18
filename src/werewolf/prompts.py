@@ -171,6 +171,28 @@ class PromptBuilder:
             if state is not None and phase.startswith("昼")
             else "該当なし"
         )
+        if phase.startswith("昼"):
+            available_actions = (
+                "発言またはパス。投票では生存している他者のみを選択（自己・死亡者への投票不可）"
+            )
+        elif phase.startswith("投票"):
+            available_actions = "生存している他者1名への投票（自己・死亡者への投票不可）"
+        elif phase == "夜（占い）" and actor.role is Role.SEER:
+            available_actions = "未占いの生存者1名を占う"
+        elif phase.startswith("夜（襲撃"):
+            available_actions = (
+                "生存中の人狼のみが人狼以外の生存者1名を襲撃対象に選ぶ"
+                if actor.role is Role.WOLF
+                else "行動なし"
+            )
+        elif phase.startswith("夜（人狼同士"):
+            available_actions = (
+                "相方と相談し、襲撃提案をする（襲撃確定は専用行動）"
+                if actor.role is Role.WOLF
+                else "行動なし"
+            )
+        else:
+            available_actions = "行動なし"
         source_history = (
             conversation_history
             if conversation_history is not None
@@ -187,6 +209,7 @@ class PromptBuilder:
             f"- あなたの役職：{ROLE_NAMES_JA[actor.role]}\n"
             f"- 現在の日数：{day}日目\n"
             f"- 現在のフェーズ：{phase}\n"
+            f"- このフェーズで可能な行動：{available_actions}\n"
             f"- 昼議論ターン：{current_turn}\n"
             f"- 現在の発言者：{actor.name}\n"
             f"- 直前の発言者：{previous_message.speaker if previous_message else 'なし'}\n"
@@ -304,6 +327,11 @@ class PromptBuilder:
             results_list = [f"{k}: {v}" for k, v in seer_results.items()]
         else:
             results_list = [f"{k}: {v}" for k, v in seer_results]
+        scanned_targets = set(state.seer_results) if state is not None else set()
+        unscanned_candidates = tuple(
+            candidate for candidate in alive_players if candidate not in scanned_targets
+        )
+        eligible_candidates = unscanned_candidates or alive_players
         today_results = (
             [
                 f"{target}: {'人狼' if result == 'wolf' else '人間'}"
@@ -336,9 +364,10 @@ class PromptBuilder:
             + "【占い履歴】\n"
             f"- 今回（当日）の占い結果：\n{today_result_text}\n"
             f"- 過去（当日より前）の占い結果：\n{past_result_text}\n\n"
-            f"選択可能な占い対象：{', '.join(alive_players)}\n"
+            f"選択可能な占い対象：{', '.join(eligible_candidates)}\n"
             "【指示】\n"
             "今夜占う相手を1人選んでください。\n"
+            "既に占った対象は選ばず、未占いの生存者から選んでください。\n"
             "- なぜその人を占うのか、簡単に理由を述べても構いません\n\n"
             "最後に必ず以下の形式で占い対象を明示してください：\n"
             "占い対象：プレイヤー名"

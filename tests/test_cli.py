@@ -52,6 +52,13 @@ def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path:
     logger = GameLogger("stats", tmp_path, {})
     logger.append_record(
         {
+            "type": "llm_action_parse_failed",
+            "model": "slow-model",
+            "reason": "empty_content",
+        }
+    )
+    logger.append_record(
+        {
             "type": "llm_action_completed",
             "model": "slow-model",
             "total_retries": 2,
@@ -77,8 +84,14 @@ def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path:
         "actions": 2,
         "retries": 2,
         "fallback_count": 1,
+        "fallback_rate": 0.5,
         "timeout_count": 1,
+        "empty_response_count": 1,
+        "empty_response_rate": 0.5,
+        "truncated_count": 0,
+        "parse_failure_count": 1,
         "elapsed_seconds": 13.75,
+        "failure_reasons": {"empty_content": 1},
     }
 
 

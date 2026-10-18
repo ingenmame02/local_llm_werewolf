@@ -8,7 +8,7 @@ from typing import Callable
 from .action_parser import ActionKind, ActionParser
 from .engine import ActionPolicy
 from .models import GameState, Message, Player, Role
-from .ollama import OllamaClient, OllamaError
+from .ollama import ChatResponse, OllamaClient, OllamaError
 from .prompts import PromptBuilder, PromptContext
 
 _THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
@@ -24,6 +24,8 @@ class ActionTrace:
     selected_target: str | None
     fallback_used: bool
     error: dict[str, str | int | None] | None = None
+    failure_reasons: tuple[str, ...] = ()
+    response_metadata: tuple[dict[str, str | int | bool | None], ...] = ()
 
 
 class OllamaActions(ActionPolicy):
@@ -91,15 +93,22 @@ class OllamaActions(ActionPolicy):
     ) -> str:
         started_at = self._start_action("seer", self._player(seer))
         actor = self._player(seer)
+        living_candidates = self._valid_candidates(actor, candidates)
+        unscanned_candidates = tuple(
+            candidate
+            for candidate in living_candidates
+            if candidate not in self.state.seer_results
+        )
+        eligible_candidates = unscanned_candidates or living_candidates
         prompt_ctx = PromptBuilder.build_seer_prompt(
             actor=actor,
-            alive_players=candidates,
+            alive_players=eligible_candidates,
             seer_results=results,
             day=self.state.day,
             state=self.state,
         )
         return self._select_target(
-            ActionKind.SEER, actor, candidates, prompt_ctx, started_at
+            ActionKind.SEER, actor, eligible_candidates, prompt_ctx, started_at
         )
 
     def discuss(
@@ -175,6 +184,9 @@ class OllamaActions(ActionPolicy):
         last_error: OllamaError | None = None
         transport_attempts = 0
         semantic_retries = 0
+        last_response_issue: str | None = None
+        failure_reasons: list[str] = []
+        response_metadata_history: list[dict[str, str | int | bool | None]] = []
 
         for request_number in range(2):
             messages = [
@@ -182,15 +194,35 @@ class OllamaActions(ActionPolicy):
                 {"role": "user", "content": user_prompts[-1]},
             ]
             try:
-                response = self._chat(actor, messages)
+                chat_response = self._chat(
+                    actor,
+                    messages,
+                    increase_generation=(
+                        request_number == 1
+                        and last_response_issue
+                        in {
+                            "empty_content",
+                            "thinking_only_response",
+                            "generation_truncated",
+                        }
+                    ),
+                )
             except OllamaError as error:
                 last_error = error
+                context_overflow = (
+                    error.kind != "timeout" and self._is_context_overflow(error)
+                )
+                failure_reason = (
+                    "context_overflow_compacted"
+                    if context_overflow
+                    else self._transport_failure_reason(error)
+                )
+                failure_reasons.append(failure_reason)
                 transport_attempts += error.attempts
                 compacted = prompt_ctx.compact(recent_lines=2)
                 if (
                     request_number == 0
-                    and error.kind != "timeout"
-                    and self._is_context_overflow(error)
+                    and context_overflow
                     and compacted.user_prompt != prompt_ctx.user_prompt
                 ):
                     self._emit(
@@ -207,11 +239,38 @@ class OllamaActions(ActionPolicy):
                     )
                     semantic_retries += 1
                     continue
+                self._emit(
+                    "llm_action_parse_failed",
+                    action,
+                    actor,
+                    started_at,
+                    reason=failure_reason,
+                    will_retry=False,
+                )
                 break
 
-            transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
-            raw_responses.append(response)
-            target = ActionParser.parse(self._final_response(response), action)
+            transport_attempts += chat_response.attempts
+            response_metadata = chat_response.to_metadata()
+            response_metadata_history.append(response_metadata)
+            raw_responses.append(chat_response.content)
+            final_response = self._final_response(chat_response.content)
+            if response_metadata.get("done_reason") == "length":
+                response_issue = "generation_truncated"
+            elif not final_response:
+                response_issue = (
+                    "thinking_only_response"
+                    if response_metadata.get("thinking_present")
+                    or self._has_thinking(chat_response.content)
+                    else "empty_content"
+                )
+            else:
+                response_issue = None
+            last_response_issue = response_issue
+            target = (
+                None
+                if response_issue is not None
+                else ActionParser.parse(final_response, action)
+            )
             parsed_targets.append(target)
             if ActionParser.validate_target(
                 target, valid_candidates, actor.name if forbid_self else None
@@ -219,6 +278,8 @@ class OllamaActions(ActionPolicy):
                 trace = ActionTrace(
                     action, actor.name, tuple(raw_responses),
                     tuple(parsed_targets), target, False,
+                    failure_reasons=tuple(failure_reasons),
+                    response_metadata=tuple(response_metadata_history),
                 )
                 self.traces.append(trace)
                 self._complete_action(
@@ -229,8 +290,37 @@ class OllamaActions(ActionPolicy):
                     transport_attempts,
                     False,
                     selected_target=target,
+                    failure_reasons=tuple(failure_reasons),
+                    response_metadata=response_metadata,
                 )
                 return target
+
+            if response_issue is not None:
+                failure_reason = response_issue
+                retry_instruction = {
+                    "empty_content": "前回は本文が空でした。",
+                    "thinking_only_response": "前回は思考だけで最終回答がありませんでした。",
+                    "generation_truncated": "前回は生成上限で回答が途切れました。",
+                }[response_issue]
+                self._emit(
+                    "llm_action_parse_failed",
+                    action,
+                    actor,
+                    started_at,
+                    transport_retries=max(0, transport_attempts - len(raw_responses)),
+                    parsed_target=None,
+                    reason=failure_reason,
+                    response_metadata=response_metadata,
+                    will_retry=request_number == 0,
+                )
+                failure_reasons.append(failure_reason)
+                if request_number == 0:
+                    semantic_retries += 1
+                    user_prompts.append(
+                        f"{prompt_ctx.user_prompt}\n{retry_instruction} "
+                        f"候補から1名を選び、「{self._label(action)}：名前」だけを最後まで出力してください。"
+                    )
+                continue
 
             self._emit(
                 "llm_action_parse_failed",
@@ -239,7 +329,16 @@ class OllamaActions(ActionPolicy):
                 started_at,
                 transport_retries=max(0, transport_attempts - len(raw_responses)),
                 parsed_target=target,
+                reason=(
+                    "invalid_target"
+                    if target is not None
+                    else "invalid_action_response"
+                ),
+                response_metadata=response_metadata,
                 will_retry=request_number == 0,
+            )
+            failure_reasons.append(
+                "invalid_target" if target is not None else "invalid_action_response"
             )
             if request_number == 0:
                 semantic_retries += 1
@@ -258,6 +357,8 @@ class OllamaActions(ActionPolicy):
                 fallback,
                 True,
                 last_error.to_dict() if last_error is not None else None,
+                tuple(failure_reasons),
+                tuple(response_metadata_history),
             )
         )
         self._complete_action(
@@ -269,6 +370,15 @@ class OllamaActions(ActionPolicy):
             True,
             selected_target=fallback,
             error=last_error,
+            failure_reasons=tuple(failure_reasons),
+            failure_reason=(
+                failure_reasons[-1] if failure_reasons else "invalid_action_response"
+            ),
+            response_metadata=(
+                response_metadata_history[-1]
+                if response_metadata_history
+                else None
+            ),
         )
         return fallback
 
@@ -300,6 +410,8 @@ class OllamaActions(ActionPolicy):
         last_error: OllamaError | None = None
         transport_attempts = 0
         last_response_issue: str | None = None
+        failure_reasons: list[str] = []
+        response_metadata_history: list[dict[str, str | int | bool | None]] = []
         for attempt in range(2):
             user_prompt = prompt_ctx.user_prompt
             if attempt:
@@ -311,15 +423,31 @@ class OllamaActions(ActionPolicy):
                 {"role": "user", "content": user_prompt},
             ]
             try:
-                response = self._chat(actor, messages)
+                chat_response = self._chat(
+                    actor,
+                    messages,
+                    increase_generation=(
+                        attempt == 1
+                        and last_response_issue
+                        in {"empty_content", "thinking_only_response", "generation_truncated"}
+                    ),
+                )
             except OllamaError as error:
                 last_error = error
+                context_overflow = (
+                    error.kind != "timeout" and self._is_context_overflow(error)
+                )
+                last_response_issue = (
+                    "context_overflow_compacted"
+                    if context_overflow
+                    else self._transport_failure_reason(error)
+                )
+                failure_reasons.append(last_response_issue)
                 transport_attempts += error.attempts
                 compacted = prompt_ctx.compact(recent_lines=2)
                 if (
                     attempt == 0
-                    and error.kind != "timeout"
-                    and self._is_context_overflow(error)
+                    and context_overflow
                     and compacted.user_prompt != prompt_ctx.user_prompt
                 ):
                     prompt_ctx = compacted
@@ -332,11 +460,21 @@ class OllamaActions(ActionPolicy):
                         will_retry=True,
                     )
                     continue
+                self._emit(
+                    "llm_action_parse_failed",
+                    action,
+                    actor,
+                    started_at,
+                    reason=last_response_issue,
+                    will_retry=False,
+                )
                 break
 
-            transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
-            raw_responses.append(response)
-            response_text = self._final_response(response).strip()
+            transport_attempts += chat_response.attempts
+            metadata = chat_response.to_metadata()
+            response_metadata_history.append(metadata)
+            raw_responses.append(chat_response.content)
+            response_text = self._final_response(chat_response.content).strip()
             is_pass = self._is_pass(response_text)
             must_use_seer_info = self._must_use_seer_info(action, actor)
             uses_seer_info = self._references_seer_result(actor, response_text)
@@ -345,6 +483,15 @@ class OllamaActions(ActionPolicy):
                 if action == "discussion" and response_text and not is_pass
                 else None
             )
+            if metadata.get("done_reason") == "length" and attempt == 0:
+                response_issue = "generation_truncated"
+            elif not response_text and response_issue is None:
+                response_issue = (
+                    "thinking_only_response"
+                    if metadata.get("thinking_present")
+                    or self._has_thinking(chat_response.content)
+                    else "empty_content"
+                )
             last_response_issue = response_issue
             if response_text and response_issue is None and (
                 not must_use_seer_info or (not is_pass and uses_seer_info)
@@ -361,6 +508,8 @@ class OllamaActions(ActionPolicy):
                         (),
                         None,
                         False,
+                        failure_reasons=tuple(failure_reasons),
+                        response_metadata=tuple(response_metadata_history),
                     )
                 )
                 self._complete_action(
@@ -371,19 +520,20 @@ class OllamaActions(ActionPolicy):
                     transport_attempts,
                     False,
                     content=response_text,
+                    failure_reasons=tuple(failure_reasons),
+                    response_metadata=metadata,
                 )
                 return response_text
 
             if attempt == 0:
                 reason = (
-                    "empty_response"
-                    if not response_text
-                    else response_issue
+                    response_issue
                     if response_issue is not None
                     else "seer_result_required"
                     if must_use_seer_info
                     else "invalid_discussion_response"
                 )
+                failure_reasons.append(reason)
                 self._emit(
                     "llm_action_parse_failed",
                     action,
@@ -391,6 +541,7 @@ class OllamaActions(ActionPolicy):
                     started_at,
                     transport_retries=max(0, transport_attempts - len(raw_responses)),
                     reason=reason,
+                    response_metadata=metadata,
                     will_retry=True,
                 )
 
@@ -401,7 +552,7 @@ class OllamaActions(ActionPolicy):
         )
         if forced_seer_message is not None:
             self._seer_info_used_day[actor.name] = self.state.day
-        fallback_response = forced_seer_message or fallback
+        fallback_response = forced_seer_message or "パス"
         self.traces.append(
             ActionTrace(
                 action,
@@ -411,6 +562,8 @@ class OllamaActions(ActionPolicy):
                 None,
                 True,
                 last_error.to_dict() if last_error is not None else None,
+                tuple(failure_reasons),
+                tuple(response_metadata_history),
             )
         )
         self._complete_action(
@@ -422,6 +575,15 @@ class OllamaActions(ActionPolicy):
             True,
             content=fallback_response,
             error=last_error,
+            failure_reasons=tuple(failure_reasons),
+            failure_reason=(
+                failure_reasons[-1] if failure_reasons else "unavailable_response"
+            ),
+            response_metadata=(
+                response_metadata_history[-1]
+                if response_metadata_history
+                else None
+            ),
         )
         return fallback_response
 
@@ -489,11 +651,17 @@ class OllamaActions(ActionPolicy):
         self, action: str, actor: Player, response_issue: str | None = None
     ) -> str:
         retry_guidance = {
+            "empty_content": "前回は本文が空でした。短い最終回答だけを生成してください。",
+            "thinking_only_response": "前回は思考だけで最終回答がありませんでした。思考を出さず、最終回答だけを生成してください。",
+            "generation_truncated": "前回は生成上限で途切れました。結論だけを短く最後まで出力してください。",
             "wrong_response_language": "指定された応答言語で短く発言してください。",
             "third_person_self_reference": "自分自身を第三者のように名前で説明せず、一人称で発言してください。",
             "unknown_player_reference": "実在しないプレイヤー名を使わず、現在のプレイヤーだけに言及してください。",
             "unverified_game_event": "ゲーム台帳にない襲撃・処刑・死亡を事実として述べないでください。",
             "unknown_attacker_claim": "襲撃者は公開されていません。推測を確定した事実として断言しないでください。",
+            "unverified_dead_role": "死亡者の真役職は非公開です。役職を確定事項として扱わないでください。",
+            "dead_player_action_target": "死亡者は現在の投票・処刑対象にできません。生存者だけに言及してください。",
+            "out_of_phase_action_claim": "昼議論中に夜の能力行動を実行済み・実行予定として断言しないでください。",
             "unverified_attributed_speech": "履歴にない発言を他人の発言として引用しないでください。",
             "repeated_speech": "過去の自分の発言を繰り返さず、新しい根拠か提案を加えてください。",
             "question_not_answered_first": "最初の一文で直前の発言者へ直接回答してください。",
@@ -537,6 +705,35 @@ class OllamaActions(ActionPolicy):
         known_players = {player.name for player in self.state.players}
         if any(name not in known_players for name in mentioned_players):
             return "unknown_player_reference"
+        dead_players = {
+            player.name for player in self.state.players if not player.is_alive
+        }
+        for dead_name in dead_players:
+            name = re.escape(dead_name)
+            if re.search(
+                rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,16}}"
+                rf"(?:人狼|狂人|占い師|村人)(?:だった|でした|です|だ|と判明|と確定)",
+                response,
+            ):
+                return "unverified_dead_role"
+            if re.search(
+                rf"{name}(?:さん)?(?:に|へ)(?:は)?"
+                rf"(?:投票(?:する|したい|すべき|しよう)?|"
+                rf"票を入れる(?:べき|べきです|べきだ|たい)?|"
+                rf"処刑(?:する|したい|すべき)?|吊(?:る|りたい|るべき))",
+                response,
+            ) or re.search(
+                rf"(?:投票先|処刑対象)(?:は|として|に)\s*{name}(?:さん)?",
+                response,
+            ):
+                return "dead_player_action_target"
+
+        if re.search(
+            r"(?:今夜|夜に)(?:は)?(?:私は|僕は|私が|僕が)?"
+            r"(?:占う|占います|襲撃する|襲撃します)",
+            response,
+        ):
+            return "out_of_phase_action_claim"
 
         for player in self.state.players:
             name = re.escape(player.name)
@@ -611,19 +808,43 @@ class OllamaActions(ActionPolicy):
         return options or None
 
     def _chat(
-        self, actor: Player, messages: list[dict[str, str]]
-    ) -> str:
+        self,
+        actor: Player,
+        messages: list[dict[str, str]],
+        increase_generation: bool = False,
+    ) -> ChatResponse:
         options = self._options_for(actor)
+        if increase_generation:
+            current_limit = options.get("num_predict", 512) if options else 512
+            if isinstance(current_limit, int) and not isinstance(current_limit, bool):
+                options = dict(options or {})
+                options["num_predict"] = max(current_limit, min(current_limit * 2, 8192))
         original_timeout = getattr(self.client, "timeout", None)
         if original_timeout is not None and actor.timeout is not None:
             self.client.timeout = actor.timeout
         try:
+            if hasattr(self.client, "_last_chat_response"):
+                delattr(self.client, "_last_chat_response")
             if options is not None:
-                return self.client.chat(actor.model, messages, options=options)
-            return self.client.chat(actor.model, messages)
+                content = self.client.chat(actor.model, messages, options=options)
+            else:
+                content = self.client.chat(actor.model, messages)
+            metadata = getattr(self.client, "_last_chat_response", None)
+            if isinstance(metadata, ChatResponse):
+                return metadata
+            return ChatResponse(
+                content=content,
+                attempts=max(1, getattr(self.client, "_last_attempts", 1)),
+                content_length=len(content),
+                thinking_present=self._has_thinking(content),
+            )
         finally:
             if original_timeout is not None:
                 self.client.timeout = original_timeout
+
+    @staticmethod
+    def _has_thinking(response: str) -> bool:
+        return bool(_THINK_BLOCK.search(response) or _UNCLOSED_THINK_BLOCK.search(response))
 
     @staticmethod
     def _is_context_overflow(error: OllamaError) -> bool:
@@ -641,6 +862,15 @@ class OllamaActions(ActionPolicy):
                 "コンテキストが長",
             )
         )
+
+    @staticmethod
+    def _transport_failure_reason(error: OllamaError) -> str:
+        return {
+            "timeout": "timeout",
+            "connection": "communication_failure",
+            "http": "communication_failure",
+            "invalid_response": "invalid_ollama_response",
+        }.get(error.kind, "communication_failure")
 
     def _start_action(self, action: str, actor: Player) -> float:
         started_at = time.perf_counter()
@@ -663,6 +893,9 @@ class OllamaActions(ActionPolicy):
         selected_target: str | None = None,
         content: str | None = None,
         error: OllamaError | None = None,
+        failure_reason: str | None = None,
+        failure_reasons: tuple[str, ...] = (),
+        response_metadata: dict[str, str | int | bool | None] | None = None,
     ) -> None:
         self._emit(
             "llm_action_completed",
@@ -678,6 +911,9 @@ class OllamaActions(ActionPolicy):
             selected_target=selected_target,
             content=content,
             error=error.to_dict() if error is not None else None,
+            failure_reason=failure_reason,
+            failure_reasons=failure_reasons,
+            response_metadata=response_metadata,
         )
 
     def _emit(

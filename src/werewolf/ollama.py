@@ -38,6 +38,20 @@ def _urlopen_transport(request: Request, timeout: float) -> bytes:
 class ChatResponse:
     content: str
     attempts: int
+    done_reason: str | None = None
+    content_length: int | None = None
+    thinking_present: bool = False
+
+    def to_metadata(self) -> dict[str, str | int | bool | None]:
+        return {
+            "done_reason": self.done_reason,
+            "content_length": (
+                self.content_length
+                if self.content_length is not None
+                else len(self.content)
+            ),
+            "thinking_present": self.thinking_present,
+        }
 
 
 class OllamaClient:
@@ -76,9 +90,15 @@ class OllamaClient:
         options: dict[str, object] | None = None,
     ) -> ChatResponse:
         content = self.chat(model=model, messages=messages, options=options)
-        # 内部で記録された実際の試行回数を取得（なければ1）
-        attempts = getattr(self, "_last_attempts", 1)
-        return ChatResponse(content=content, attempts=attempts)
+        return getattr(
+            self,
+            "_last_chat_response",
+            ChatResponse(
+                content=content,
+                attempts=getattr(self, "_last_attempts", 1),
+                content_length=len(content),
+            ),
+        )
 
     def chat(
         self,
@@ -108,9 +128,23 @@ class OllamaClient:
             try:
                 response_body = self._transport(request, self.timeout)
                 response = json.loads(response_body)
-                content = response["message"]["content"]
+                if not isinstance(response, dict):
+                    raise ValueError("The response body is not a JSON object.")
+                message = response["message"]
+                if not isinstance(message, dict):
+                    raise ValueError("The response message is not a JSON object.")
+                content = message["content"]
                 if not isinstance(content, str):
                     raise ValueError("The response message content is not a string.")
+                done_reason = response.get("done_reason")
+                thinking = message.get("thinking")
+                self._last_chat_response = ChatResponse(
+                    content=content,
+                    attempts=attempt,
+                    done_reason=done_reason if isinstance(done_reason, str) else None,
+                    content_length=len(content),
+                    thinking_present=bool(thinking) or "<think" in content.casefold(),
+                )
                 return content
             except HTTPError as error:
                 error_body = error.read().decode("utf-8", errors="replace")[:500]
@@ -145,4 +179,3 @@ class OllamaClient:
                 raise last_error
 
         raise RuntimeError("Ollama retry loop exited unexpectedly.")
-
