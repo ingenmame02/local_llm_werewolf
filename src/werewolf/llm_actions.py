@@ -36,6 +36,7 @@ class OllamaActions(ActionPolicy):
         self.event_callback = event_callback
         self._rng = random.Random(state.seed if seed is None else seed)
         self.traces: list[ActionTrace] = []
+        self._seer_info_used_day: dict[str, int] = {}
 
     def wolf_discuss(
         self, wolf: str, partner: str, history: tuple[Message, ...]
@@ -279,7 +280,7 @@ class OllamaActions(ActionPolicy):
         for attempt in range(2):
             user_prompt = prompt_ctx.user_prompt
             if attempt:
-                user_prompt += "\n前回の応答は空または空白のみでした。内容のある発言をしてください。"
+                user_prompt += self._discussion_retry_instruction(action, actor)
             messages = [
                 {"role": "system", "content": prompt_ctx.system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -298,7 +299,17 @@ class OllamaActions(ActionPolicy):
 
             transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
             raw_responses.append(response)
-            if response.strip():
+            response_text = response.strip()
+            is_pass = self._is_pass(response_text)
+            must_use_seer_info = self._must_use_seer_info(action, actor)
+            uses_seer_info = self._references_seer_result(actor, response_text)
+            if response_text and (
+                not must_use_seer_info or (not is_pass and uses_seer_info)
+            ):
+                if is_pass:
+                    response_text = "パス"
+                elif must_use_seer_info:
+                    self._seer_info_used_day[actor.name] = self.state.day
                 self.traces.append(
                     ActionTrace(
                         action,
@@ -316,21 +327,36 @@ class OllamaActions(ActionPolicy):
                     attempt,
                     transport_attempts,
                     False,
-                    content=response,
+                    content=response_text,
                 )
-                return response
+                return response_text
 
             if attempt == 0:
+                reason = (
+                    "empty_response"
+                    if not response_text
+                    else "seer_result_required"
+                    if must_use_seer_info
+                    else "invalid_discussion_response"
+                )
                 self._emit(
                     "llm_action_parse_failed",
                     action,
                     actor,
                     started_at,
                     transport_retries=max(0, transport_attempts - len(raw_responses)),
-                    reason="empty_response",
+                    reason=reason,
                     will_retry=True,
                 )
 
+        forced_seer_message = (
+            self._seer_info_fallback(actor)
+            if self._must_use_seer_info(action, actor)
+            else None
+        )
+        if forced_seer_message is not None:
+            self._seer_info_used_day[actor.name] = self.state.day
+        fallback_response = forced_seer_message or fallback
         self.traces.append(
             ActionTrace(
                 action,
@@ -349,10 +375,70 @@ class OllamaActions(ActionPolicy):
             max(0, len(raw_responses) - 1),
             transport_attempts,
             True,
-            content=fallback,
+            content=fallback_response,
             error=last_error,
         )
-        return fallback
+        return fallback_response
+
+    @staticmethod
+    def _is_pass(response: str) -> bool:
+        normalized = response.strip().strip("。.!！?？「」『』\"' ")
+        return normalized.casefold() in {"パス", "pass"}
+
+    def _must_use_seer_info(self, action: str, actor: Player) -> bool:
+        return (
+            action == "discussion"
+            and actor.role.value == "seer"
+            and bool(self.state.seer_results)
+            and self._seer_info_used_day.get(actor.name) != self.state.day
+        )
+
+    def _references_seer_result(self, actor: Player, response: str) -> bool:
+        if actor.role.value != "seer" or not response:
+            return False
+        result_targets = set(self.state.seer_results)
+        mentions_result_target = any(target in response for target in result_targets)
+        usage_terms = (
+            "占い",
+            "結果",
+            "情報",
+            "疑い",
+            "警戒",
+            "信頼",
+            "擁護",
+            "推理",
+            "seer",
+            "result",
+            "information",
+            "suspect",
+        )
+        return mentions_result_target and any(
+            term.casefold() in response.casefold() for term in usage_terms
+        )
+
+    def _seer_info_fallback(self, actor: Player) -> str | None:
+        if actor.role.value != "seer" or not self.state.seer_results:
+            return None
+        target, result = next(reversed(self.state.seer_results.items()))
+        if result == "wolf":
+            return (
+                f"占い結果を踏まえると、{target}さんは人狼でした。"
+                "この情報を共有し、今日は特に警戒して議論したいです。"
+            )
+        return (
+            f"占い結果を踏まえると、{target}さんは人間でした。"
+            "現時点ではその人への疑いを弱め、別の可能性を慎重に考えたいです。"
+        )
+
+    def _discussion_retry_instruction(self, action: str, actor: Player) -> str:
+        if self._must_use_seer_info(action, actor):
+            target = next(reversed(self.state.seer_results))
+            return (
+                "\n前回の応答は空、パス、または占い結果を活用していませんでした。"
+                f"今回は必ず{target}の占い結果を踏まえた判断を具体的に話してください。"
+                "結果を公開せずに活用しても構いません。"
+            )
+        return "\n前回の応答は空または空白のみでした。内容のある発言をしてください。"
 
     def _start_action(self, action: str, actor: Player) -> float:
         started_at = time.perf_counter()

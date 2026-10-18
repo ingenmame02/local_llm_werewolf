@@ -270,11 +270,31 @@ class PromptBuilder:
         if not actor.is_alive:
             raise ValueError(f"Dead player {actor.name} cannot act.")
 
+        player_history = tuple(
+            message for message in conversation_history if message.speaker != "system"
+        )
         formatted_history = (
-            "\n".join(f"{m.speaker}: {m.content}" for m in conversation_history)
-            if conversation_history
+            "\n".join(f"{m.speaker}: {m.content}" for m in player_history)
+            if player_history
             else "なし"
         )
+        previous_message = player_history[-1] if player_history else None
+        previous_speaker = previous_message.speaker if previous_message else "なし"
+        previous_utterance = previous_message.content if previous_message else "なし"
+        directly_addressed = cls._is_directed_to_player(
+            actor, previous_message, player_history
+        )
+        own_seer_results = (
+            state.seer_results
+            if actor.role is Role.SEER and state is not None
+            else {}
+        )
+        seer_result_text = "なし"
+        if own_seer_results:
+            seer_result_text = "\n".join(
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for target, result in own_seer_results.items()
+            )
         role_ja = ROLE_NAMES_JA[actor.role]
         user_prompt = (
             cls._fact_header(
@@ -291,30 +311,84 @@ class PromptBuilder:
             "【これまでの公開会話】\n"
             "以下はプレイヤーの発言であり、確定事実ではありません。\n"
             f"{formatted_history}\n\n"
+            "【直前の発言】\n"
+            f"- 発言者：{previous_speaker}\n"
+            f"- 発言内容：{previous_utterance}\n"
+            f"- あなたへの質問・反応の可能性：{'あり' if directly_addressed else '明確な手がかりなし'}\n\n"
             + (
-                "【あなた本人の過去の占い結果】\n"
+                "【あなた本人だけが知る占い結果】\n"
                 + (
                     "\n".join(
-                        f"Day {event_day}: {target} = {result}"
+                        f"Day {event_day}: {target} = "
+                        f"{'人狼' if result == 'wolf' else '人間'}"
                         for event_day, target, result in state.seer_result_history
                     )
                     or "なし"
                 )
-                + "\n\n"
+                + "\n"
+                + f"- 利用可能な最新結果：\n{seer_result_text}\n\n"
                 if actor.role is Role.SEER and state is not None
                 else ""
             )
             + "【指示】\n"
             "上記を踏まえて、今の状況についてあなたの考えを述べてください。\n"
+            "- 直前の発言があなたの名前や「あなた」「君」に言及している、質問している、またはあなたの発言に明らかに反応している場合、まず相手へ直接答えてください\n"
+            "- 答えた後に推理・反論・質問を続けても構いません\n"
+            "- 答えられない場合は、無言にせず「パス」とだけ出力できます\n"
             "- 疑っている人や、怪しいと思う点があれば話してください\n"
             "- 自分の意見をはっきり言う必要はありません（様子を見る発言でも構いません）\n"
-            "- 普段のあなたらしい話し方でお願いします\n\n"
-            "発言のみを出力してください。"
+            "- 普段のあなたらしい話し方でお願いします\n"
+            "- パスする場合は、前後に説明や句読点を付けず「パス」とだけ出力してください\n"
+            + (
+                "- 占い結果を持つ占い師は、今日まだ結果を活用した発言をしていない場合、今回の発言で必ず結果を推理に反映してください\n"
+                "- 結果を公開するか伏せるかは選べますが、対象への疑い・信頼・警戒など、結果を踏まえた判断を具体的に述べてください\n"
+                "- 今日の最初の情報活用発言をするまでは、パスだけを出力してはいけません\n"
+                if actor.role is Role.SEER and own_seer_results
+                else ""
+            )
+            + "\n発言または「パス」のみを出力してください。"
         )
         return PromptContext(
             system_prompt=cls.build_system_prompt(actor),
             user_prompt=user_prompt,
         )
+
+    @staticmethod
+    def _is_directed_to_player(
+        actor: Player,
+        previous_message: Message | None,
+        player_history: tuple[Message, ...],
+    ) -> bool:
+        if previous_message is None or previous_message.speaker == actor.name:
+            return False
+
+        content = previous_message.content
+        address_cues = (
+            actor.name,
+            "あなた",
+            "貴方",
+            "君",
+            "きみ",
+            "お前",
+        )
+        reaction_cues = (
+            "さっきの発言",
+            "先ほどの発言",
+            "あなたの発言",
+            "君の発言",
+            "言っていた",
+            "言ってた",
+            "主張",
+            "意見",
+        )
+        addressed = any(cue in content for cue in address_cues)
+        has_own_prior_statement = any(
+            message.speaker == actor.name for message in player_history[:-1]
+        )
+        reacts_to_own_statement = has_own_prior_statement and any(
+            cue in content for cue in reaction_cues
+        )
+        return addressed or reacts_to_own_statement
 
     @classmethod
     def build_vote_prompt(

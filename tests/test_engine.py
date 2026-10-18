@@ -137,6 +137,23 @@ def test_mock_actions_never_votes_for_self() -> None:
     assert MockActions().vote("P0", ("P0", "P1"), day=1, runoff=False) == "P1"
 
 
+def test_discussion_pass_is_recorded_as_a_public_conversation_turn() -> None:
+    state = make_state(Role.WOLF, Role.SEER, Role.VILLAGER)
+
+    class PassDiscussion(MockActions):
+        def discuss(self, player, day, alive, history) -> str:
+            return "パス"
+
+    GameEngine(state, PassDiscussion()).run_discussion()
+
+    discussion_messages = [
+        message for message in state.conversation_log if message.speaker != "system"
+    ]
+    assert len(discussion_messages) == 3 * len(state.alive_players)
+    assert all(message.content == "パス" for message in discussion_messages)
+    assert state.phase is Phase.VOTING
+
+
 def test_still_tied_runoff_uses_repeatable_seeded_tiebreak() -> None:
     first = make_state(Role.WOLF, Role.VILLAGER, Role.VILLAGER, Role.VILLAGER)
     second = make_state(Role.WOLF, Role.VILLAGER, Role.VILLAGER, Role.VILLAGER)

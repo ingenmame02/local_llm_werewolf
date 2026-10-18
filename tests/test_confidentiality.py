@@ -199,8 +199,49 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
         assert secret_wolf_chat not in prompt
         if player.role is Role.SEER:
             assert secret_result in prompt
+            assert "【あなた本人だけが知る占い結果】" in prompt
+            assert "結果を公開するか伏せるかは選べます" in prompt
         else:
             assert secret_result not in prompt
+
+
+def test_discussion_prompt_separates_previous_speaker_and_detects_direct_address() -> None:
+    actor = Player("P2", "model-2", Role.VILLAGER)
+    history = (
+        Message("P2", "昨日の投票には根拠があると思います。"),
+        Message("P1", "P2、あなたの発言の根拠を説明してくれますか？"),
+    )
+
+    prompt = PromptBuilder.build_discussion_prompt(
+        actor=actor,
+        alive_players=("P1", "P2"),
+        conversation_history=history,
+        day=2,
+    ).user_prompt
+
+    assert "- 発言者：P1" in prompt
+    assert "- 発言内容：P2、あなたの発言の根拠を説明してくれますか？" in prompt
+    assert "- あなたへの質問・反応の可能性：あり" in prompt
+    assert "まず相手へ直接答えてください" in prompt
+    assert "無言にせず「パス」とだけ出力できます" in prompt
+    assert "【情報の区分】" in prompt
+    assert "確定事実として扱わないでください" in prompt
+
+
+def test_discussion_prompt_marks_reaction_to_own_prior_utterance() -> None:
+    actor = Player("P2", "model-2", Role.VILLAGER)
+    history = (
+        Message("P2", "私はP1を疑っています。"),
+        Message("P1", "先ほどの発言について、具体的な理由を聞きたいです。"),
+    )
+    prompt = PromptBuilder.build_discussion_prompt(
+        actor=actor,
+        alive_players=("P1", "P2"),
+        conversation_history=history,
+    ).user_prompt
+
+    assert "- 発言者：P1" in prompt
+    assert "- あなたへの質問・反応の可能性：あり" in prompt
 
 
 def test_dead_players_cannot_receive_prompts() -> None:

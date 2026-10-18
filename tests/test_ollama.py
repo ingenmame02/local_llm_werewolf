@@ -8,6 +8,7 @@ from werewolf import (
     ActionKind,
     ActionParser,
     GameState,
+    Message,
     OllamaActions,
     OllamaClient,
     OllamaError,
@@ -243,6 +244,71 @@ def test_empty_discussion_after_reprompt_uses_explicit_fallback() -> None:
     assert text == "P0 は発言できませんでした。"
     assert len(client.prompts) == 2
     assert actions.traces[-1].raw_responses == ("", " \t\n ")
+    assert actions.traces[-1].fallback_used is True
+
+
+def test_discussion_pass_is_explicit_valid_response_without_retry() -> None:
+    client = FakeClient("  パス。  ")
+    actions = OllamaActions(make_state(), client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "パス"
+    assert len(client.prompts) == 1
+    assert actions.traces[-1].fallback_used is False
+    assert actions.traces[-1].raw_responses == ("  パス。  ",)
+
+
+def test_wolf_can_pass_consultation_but_attack_selection_remains_required() -> None:
+    client = FakeClient("パス", "襲撃対象：P0")
+    actions = OllamaActions(make_state(), client)
+
+    consultation = actions.wolf_discuss("P1", "P1", ())
+    target = actions.choose_attack(("P1",), ("P0", "P2"))
+
+    assert consultation == "パス"
+    assert target == "P0"
+    assert len(client.prompts) == 2
+
+
+def test_seer_must_use_result_before_pass_and_can_pass_after_contribution() -> None:
+    state = make_state()
+    state.seer_results["P1"] = "wolf"
+    client = FakeClient(
+        "パス",
+        "占い結果を踏まえるとP1は人狼なので警戒しています。",
+        "パス",
+    )
+    actions = OllamaActions(state, client)
+
+    first_response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
+    second_response = actions.discuss(
+        "P2",
+        1,
+        ("P0", "P1", "P2"),
+        (Message("P2", first_response),),
+    )
+
+    assert first_response == "占い結果を踏まえるとP1は人狼なので警戒しています。"
+    assert second_response == "パス"
+    assert len(client.prompts) == 3
+    assert "前回の応答は空、パス" in client.prompts[1]
+    assert "P1: 人狼" in client.prompts[0]
+    assert actions.traces[0].fallback_used is False
+    assert actions.traces[1].fallback_used is False
+
+
+def test_seer_forced_result_fallback_when_retry_does_not_use_result() -> None:
+    state = make_state()
+    state.seer_results["P1"] = "human"
+    client = FakeClient("今日はパス", "まだ意見はありません")
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
+
+    assert "P1さんは人間でした" in response
+    assert "占い結果を踏まえると" in response
+    assert len(client.prompts) == 2
     assert actions.traces[-1].fallback_used is True
 
 
