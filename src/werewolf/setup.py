@@ -1,7 +1,7 @@
 import random
 from pathlib import Path
 
-from .config import PlayerConfig, load_player_configs
+from .config import load_player_configs
 from .models import GameState, Player, Role
 
 

@@ -91,6 +91,10 @@ winner: Optional[str]
 
 ゲームの実装では、`alive_players`などの派生情報に不整合が生じないよう、死亡処理を一箇所へ集約する。
 
+フェーズは `NIGHT_WOLF`（人狼相談・襲撃）、`NIGHT_SEER`（占い）、
+`MORNING`（朝）、`DAY_DISCUSSION`（昼の議論）、`VOTING`（投票）、
+`ENDED`（終了）に分ける。
+
 ## 6. フェーズ仕様
 
 ### 6.1 夜：人狼相談と襲撃

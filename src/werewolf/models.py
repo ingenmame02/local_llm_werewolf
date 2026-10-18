@@ -10,11 +10,12 @@ class Role(str, Enum):
 
 
 class Phase(str, Enum):
-    NIGHT = "night"
-    DAWN = "dawn"
-    DAY = "day"
+    NIGHT_WOLF = "night_wolf"
+    NIGHT_SEER = "night_seer"
+    MORNING = "morning"
+    DAY_DISCUSSION = "day_discussion"
     VOTING = "voting"
-    FINISHED = "finished"
+    ENDED = "ended"
 
 
 @dataclass
@@ -36,13 +37,14 @@ class Message:
 class GameState:
     players: list[Player]
     day: int = 1
-    phase: Phase = Phase.NIGHT
+    phase: Phase = Phase.NIGHT_WOLF
     conversation_log: list[Message] = field(default_factory=list)
     wolf_chat_log: list[Message] = field(default_factory=list)
     seer_results: dict[str, str] = field(default_factory=dict)
     votes: dict[str, str] = field(default_factory=dict)
     winner: str | None = None
     seed: int | None = None
+    pending_attack: str | None = None
 
     def __post_init__(self) -> None:
         if self.day < 0:

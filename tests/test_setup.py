@@ -76,7 +76,7 @@ def test_game_state_rejects_duplicate_player_names() -> None:
 def test_game_initializes_in_night_phase() -> None:
     state = create_game(seed=7)
 
-    assert state.phase is Phase.NIGHT
+    assert state.phase is Phase.NIGHT_WOLF
     assert state.day == 1
 
 
