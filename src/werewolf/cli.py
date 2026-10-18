@@ -70,6 +70,7 @@ class GameLogger:
         self._written = False
         self._sequence = 0
         self._private_sequence = 0
+        self._model_stats: dict[str, dict[str, int | float]] = {}
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
         # 1行目にゲーム開始メタデータを書き込み
@@ -89,6 +90,30 @@ class GameLogger:
         record: dict[str, Any],
         private_record: dict[str, Any] | None = None,
     ) -> None:
+        if record.get("type") == "llm_action_completed":
+            model = record.get("model")
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(
+                    model,
+                    {
+                        "actions": 0,
+                        "retries": 0,
+                        "fallback_count": 0,
+                        "timeout_count": 0,
+                        "elapsed_seconds": 0.0,
+                    },
+                )
+                stats["actions"] += 1
+                stats["retries"] += int(record.get("total_retries", 0))
+                stats["fallback_count"] += int(bool(record.get("fallback_used")))
+                stats["elapsed_seconds"] = round(
+                    float(stats["elapsed_seconds"])
+                    + float(record.get("elapsed_seconds", 0.0)),
+                    3,
+                )
+                error = record.get("error")
+                if isinstance(error, dict) and error.get("kind") == "timeout":
+                    stats["timeout_count"] += 1
         self._append_to_file(record, self.log_file, private=False)
         if self.private_log_file is not None:
             self._append_to_file(
@@ -151,6 +176,7 @@ class GameLogger:
             "alive_players": state.alive_players,
             "conversation_log": conversation_data,
             "votes": state.votes,
+            "model_stats": self._model_stats,
         }
         private_summary = {
             **public_summary,
@@ -195,6 +221,7 @@ def run_cli_game(args: argparse.Namespace) -> int:
     options = {
         "temperature": args.temperature,
         "num_ctx": args.num_ctx,
+        "num_predict": args.num_predict,
     }
 
     # ゲーム初期化
@@ -205,6 +232,7 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "seed": args.seed,
         "options": options,
         "timeout": args.timeout,
+        "num_predict": args.num_predict,
         "base_url": args.base_url,
         "show_private": args.show_private,
     }
@@ -488,6 +516,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4096,
         help="Context window length for Ollama (num_ctx)",
+    )
+    parser.add_argument(
+        "--num-predict",
+        type=int,
+        default=512,
+        help="Maximum number of generated tokens (num_predict)",
     )
     parser.add_argument(
         "--log-dir",

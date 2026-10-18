@@ -19,6 +19,7 @@ from werewolf import (
     create_game,
     run_cli_game,
 )
+from werewolf.cli import GameLogger
 
 
 def test_cli_parser_options() -> None:
@@ -30,6 +31,7 @@ def test_cli_parser_options() -> None:
         "--timeout", "60.0",
         "--temperature", "0.5",
         "--num-ctx", "2048",
+        "--num-predict", "256",
         "--log-dir", "custom_logs",
         "--show-private",
     ])
@@ -39,10 +41,45 @@ def test_cli_parser_options() -> None:
     assert args.timeout == 60.0
     assert args.temperature == 0.5
     assert args.num_ctx == 2048
+    assert args.num_predict == 256
     assert args.log_dir == Path("custom_logs")
     assert args.show_private is True
     private_args = parser.parse_args(["--private-log"])
     assert private_args.private_log is True
+
+
+def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path: Path) -> None:
+    logger = GameLogger("stats", tmp_path, {})
+    logger.append_record(
+        {
+            "type": "llm_action_completed",
+            "model": "slow-model",
+            "total_retries": 2,
+            "fallback_used": True,
+            "elapsed_seconds": 12.5,
+            "error": {"kind": "timeout"},
+        }
+    )
+    logger.append_record(
+        {
+            "type": "llm_action_completed",
+            "model": "slow-model",
+            "total_retries": 0,
+            "fallback_used": False,
+            "elapsed_seconds": 1.25,
+            "error": None,
+        }
+    )
+    logger.finalize(create_game(seed=4))
+
+    result = json.loads(logger.log_file.read_text(encoding="utf-8").splitlines()[-1])
+    assert result["model_stats"]["slow-model"] == {
+        "actions": 2,
+        "retries": 2,
+        "fallback_count": 1,
+        "timeout_count": 1,
+        "elapsed_seconds": 13.75,
+    }
 
 
 def test_mock_actions_completes_game_via_cli(tmp_path: Path, capsys) -> None:
@@ -269,7 +306,7 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
         if "選択可能な候補:" in prompt:
             line = next(line for line in prompt.splitlines() if "選択可能な候補:" in line)
             return f"{vote_response} 投票：{line.split(':', 1)[1].split(',', 1)[0].strip()}"
-        return "PUBLIC_DAY_SPEECH"
+        return "公開発言です。PUBLIC_DAY_SPEECH"
 
     monkeypatch.setattr(OllamaClient, "ping", lambda self: True)
     monkeypatch.setattr(OllamaClient, "chat", mock_chat)

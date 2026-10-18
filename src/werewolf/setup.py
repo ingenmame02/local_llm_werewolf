@@ -31,6 +31,9 @@ def create_game(
             model=config.model,
             role=role,
             num_ctx=config.num_ctx,
+            timeout=config.timeout,
+            num_predict=config.num_predict,
+            response_language=config.response_language,
         )
         for config, role in zip(player_configs, roles, strict=True)
     ]

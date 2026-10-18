@@ -120,6 +120,50 @@ def test_player_configuration_applies_per_model_context_length(tmp_path) -> None
     assert state.players[4].num_ctx is None
 
 
+def test_player_configuration_applies_model_budgets_and_response_language(tmp_path) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[2].update(
+        {"timeout": 18.5, "num_ctx": 8192, "num_predict": 256, "response_language": "English"}
+    )
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    config = load_player_configs(config_file)[2]
+    player = create_game(seed=1, config_path=config_file).players[2]
+
+    assert config.timeout == player.timeout == 18.5
+    assert config.num_ctx == player.num_ctx == 8192
+    assert config.num_predict == player.num_predict == 256
+    assert config.response_language == player.response_language == "English"
+    assert load_player_configs(config_file)[0].response_language == "日本語"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("timeout", 0),
+        ("timeout", True),
+        ("num_predict", 0),
+        ("num_predict", 1.5),
+        ("response_language", "  "),
+    ],
+)
+def test_player_configuration_rejects_invalid_model_settings(tmp_path, key, value) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[0][key] = value
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=key):
+        load_player_configs(config_file)
+
+
 @pytest.mark.parametrize("invalid_num_ctx", [0, -1, True, "4096"])
 def test_player_configuration_rejects_invalid_context_length(
     tmp_path, invalid_num_ctx

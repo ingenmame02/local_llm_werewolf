@@ -23,6 +23,7 @@ ROLE_DESCRIPTIONS_JA: dict[Role, str] = {
     ),
     Role.SEER: (
         "あなたは占い師です。夜に1人を占って「人狼」か「人間」かを知ることができます。\n"
+        "知っているのは自分が実際に占った対象とその判定だけです。襲撃者や他者の真の役職は知りません。\n"
         "得た情報をうまく使って人狼を見つけ、村を勝利に導くのが目的です。\n"
         "ただし、自分が占い師だとバレすぎると襲撃されるリスクもあるので、情報の出し方には注意してください。"
     ),
@@ -41,6 +42,7 @@ COMMON_SYSTEM_TEMPLATE = """人狼ゲームのプレイヤーとして行動し�
 RULE_CARD = """【ルール】
 8人：人狼2・狂人1・占い師1・村人4。夜は相談/襲撃/占い、朝は死亡発表、昼議論3巡後に投票。
 狂人は襲撃不可。占い結果は人狼/人間。自分への投票不可。同票は再投票1回後に抽選。
+襲撃者は公開されません。死亡者の真役職も公開されず、役職の推測を確定事実として扱わないでください。
 昼の「パス」は有効な発言スキップで、空応答とは異なる。
 
 """
@@ -129,6 +131,21 @@ class PromptBuilder:
             if state is not None
             else ()
         )
+        death_events = (
+            sorted(
+                [
+                    (day, "襲撃死亡", name)
+                    for day, name in state.attack_deaths
+                ]
+                + [(day, "処刑", name) for day, name in state.executions]
+            )[-3:]
+            if state is not None
+            else []
+        )
+        death_ledger = "、".join(
+            f"{event_day}日目 {event}: {name}"
+            for event_day, event, name in death_events
+        ) or "なし"
         latest_attack = (
             f"Day {state.attack_deaths[-1][0]}: {state.attack_deaths[-1][1]}"
             if state is not None and state.attack_deaths
@@ -176,9 +193,12 @@ class PromptBuilder:
             f"- 直前の発言内容：{previous_message.content if previous_message else 'なし'}\n"
             f"- 現在の生存者：{', '.join(alive_players) or 'なし'}\n"
             f"- 既知の死亡者：{', '.join(dead_players) or 'なし'}\n"
+            f"- 確定した死亡履歴（直近3件）：{death_ledger}\n"
             f"- 最新の襲撃死亡者：{latest_attack}\n"
             f"- 最新の処刑者：{latest_execution}\n"
             f"- 最新の投票結果：{latest_vote}\n"
+            f"- 死亡者の真役職：非公開（推測で確定扱いしない）\n"
+            f"- 応答言語：{actor.response_language}\n"
             "\n"
             "【情報の区分】\n"
             "この欄のゲームシステム記録だけが確定事実です。プレイヤーの発言・主張・推測は未確認情報であり、"
@@ -382,6 +402,13 @@ class PromptBuilder:
                 conversation_history=player_history,
             )
             + f"- あなたへの質問・反応の可能性：{'あり' if directly_addressed else '明確な手がかりなし'}\n\n"
+            + (
+                "【直前の質問への回答】\n"
+                f"- 回答対象：{previous_message.speaker}\n"
+                f"- 質問・発言：{previous_message.content}\n\n"
+                if directly_addressed and previous_message is not None
+                else ""
+            )
             + "【これまでの公開会話】\n"
             "以下はプレイヤーの発言であり、確定事実ではありません。\n"
             f"{formatted_history}\n\n"
@@ -407,16 +434,27 @@ class PromptBuilder:
             )
             + "【指示】\n"
             "上記を踏まえて、今の状況についてあなたの考えを述べてください。\n"
-            "- 直前の発言があなたの名前や「あなた」「君」に言及している、質問している、またはあなたの発言に明らかに反応している場合、まず相手へ直接答えてください\n"
+            + (
+                f"- 最初の一文で{previous_message.speaker}への回答を明示し、その質問に直接答えてください\n"
+                if directly_addressed and previous_message is not None
+                else ""
+            )
+            + "- 直前の発言があなたの名前や「あなた」「君」に言及している、質問している、またはあなたの発言に明らかに反応している場合、まず相手へ直接答えてください\n"
             "- 答えた後に推理・反論・質問を続けても構いません\n"
             "- 答えられない場合は、無言にせず「パス」とだけ出力できます\n"
             "- 疑っている人や、怪しいと思う点があれば話してください\n"
+            "- 指定された応答言語で発言してください\n"
+            "- 2～4文を目安に、短く具体的に答えてください\n"
+            "- 新しい推理・根拠・質問・投票方針のいずれかを最低1つ加え、過去発言を単純に繰り返さないでください\n"
+            "- 自分自身を第三者として説明せず、自分がしていない発言や起きていない出来事を作らないでください\n"
             "- 自分の意見をはっきり言う必要はありません（様子を見る発言でも構いません）\n"
             "- 普段のあなたらしい話し方でお願いします\n"
             "- パスする場合は、前後に説明や句読点を付けず「パス」とだけ出力してください\n"
             + (
                 "- 占い結果を持つ占い師は、今日まだ結果を活用した発言をしていない場合、今回の発言で必ず結果を推理に反映してください\n"
+                "- 結果を公開する場合は「対象」「判定」「根拠」「次の提案」を短く示してください\n"
                 "- 結果を公開するか伏せるかは選べますが、対象への疑い・信頼・警戒など、結果を踏まえた判断を具体的に述べてください\n"
+                "- 既に公開した占い結果を再度説明する場合は、新情報か具体的な投票方針を必ず加えてください\n"
                 "- 今日の最初の情報活用発言をするまでは、パスだけを出力してはいけません\n"
                 "- 今回の結果がある場合はそれを最優先し、今回の結果がない場合は最新の過去結果を使ってください\n"
                 if actor.role is Role.SEER and own_seer_results

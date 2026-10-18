@@ -2,11 +2,12 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Callable
 
 from .action_parser import ActionKind, ActionParser
 from .engine import ActionPolicy
-from .models import GameState, Message, Player
+from .models import GameState, Message, Player, Role
 from .ollama import OllamaClient, OllamaError
 from .prompts import PromptBuilder, PromptContext
 
@@ -169,7 +170,6 @@ class OllamaActions(ActionPolicy):
             raise ValueError(f"No valid candidates for {action.value} by {actor.name}.")
 
         user_prompts = [prompt_ctx.user_prompt]
-        options = self._options_for(actor)
         raw_responses: list[str] = []
         parsed_targets: list[str | None] = []
         last_error: OllamaError | None = None
@@ -182,23 +182,14 @@ class OllamaActions(ActionPolicy):
                 {"role": "user", "content": user_prompts[-1]},
             ]
             try:
-                if options is not None:
-                    response = self.client.chat(
-                        actor.model,
-                        messages,
-                        options=options,
-                    )
-                else:
-                    response = self.client.chat(
-                        actor.model,
-                        messages,
-                    )
+                response = self._chat(actor, messages)
             except OllamaError as error:
                 last_error = error
                 transport_attempts += error.attempts
                 compacted = prompt_ctx.compact(recent_lines=2)
                 if (
                     request_number == 0
+                    and error.kind != "timeout"
                     and self._is_context_overflow(error)
                     and compacted.user_prompt != prompt_ctx.user_prompt
                 ):
@@ -308,28 +299,26 @@ class OllamaActions(ActionPolicy):
         raw_responses: list[str] = []
         last_error: OllamaError | None = None
         transport_attempts = 0
+        last_response_issue: str | None = None
         for attempt in range(2):
             user_prompt = prompt_ctx.user_prompt
             if attempt:
-                user_prompt += self._discussion_retry_instruction(action, actor)
+                user_prompt += self._discussion_retry_instruction(
+                    action, actor, last_response_issue
+                )
             messages = [
                 {"role": "system", "content": prompt_ctx.system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
             try:
-                options = self._options_for(actor)
-                if options is not None:
-                    response = self.client.chat(
-                        actor.model, messages, options=options
-                    )
-                else:
-                    response = self.client.chat(actor.model, messages)
+                response = self._chat(actor, messages)
             except OllamaError as error:
                 last_error = error
                 transport_attempts += error.attempts
                 compacted = prompt_ctx.compact(recent_lines=2)
                 if (
                     attempt == 0
+                    and error.kind != "timeout"
                     and self._is_context_overflow(error)
                     and compacted.user_prompt != prompt_ctx.user_prompt
                 ):
@@ -351,7 +340,13 @@ class OllamaActions(ActionPolicy):
             is_pass = self._is_pass(response_text)
             must_use_seer_info = self._must_use_seer_info(action, actor)
             uses_seer_info = self._references_seer_result(actor, response_text)
-            if response_text and (
+            response_issue = (
+                self._discussion_response_issue(actor, response_text)
+                if action == "discussion" and response_text and not is_pass
+                else None
+            )
+            last_response_issue = response_issue
+            if response_text and response_issue is None and (
                 not must_use_seer_info or (not is_pass and uses_seer_info)
             ):
                 if is_pass:
@@ -383,6 +378,8 @@ class OllamaActions(ActionPolicy):
                 reason = (
                     "empty_response"
                     if not response_text
+                    else response_issue
+                    if response_issue is not None
                     else "seer_result_required"
                     if must_use_seer_info
                     else "invalid_discussion_response"
@@ -480,15 +477,29 @@ class OllamaActions(ActionPolicy):
         target, result = self._latest_seer_result()
         if result == "wolf":
             return (
-                f"占い結果を踏まえると、{target}さんは人狼でした。"
-                "この情報を共有し、今日は特に警戒して議論したいです。"
+                f"対象：{target}さん／判定：人狼／根拠：占い結果を踏まえると、"
+                f"{target}さんは人狼でした。次の提案：この情報を共有し、今日は特に警戒して議論したいです。"
             )
         return (
-            f"占い結果を踏まえると、{target}さんは人間でした。"
-            "現時点ではその人への疑いを弱め、別の可能性を慎重に考えたいです。"
+            f"対象：{target}さん／判定：人間／根拠：占い結果を踏まえると、"
+            f"{target}さんは人間でした。次の提案：その人への疑いを弱め、別の可能性を慎重に考えたいです。"
         )
 
-    def _discussion_retry_instruction(self, action: str, actor: Player) -> str:
+    def _discussion_retry_instruction(
+        self, action: str, actor: Player, response_issue: str | None = None
+    ) -> str:
+        retry_guidance = {
+            "wrong_response_language": "指定された応答言語で短く発言してください。",
+            "third_person_self_reference": "自分自身を第三者のように名前で説明せず、一人称で発言してください。",
+            "unknown_player_reference": "実在しないプレイヤー名を使わず、現在のプレイヤーだけに言及してください。",
+            "unverified_game_event": "ゲーム台帳にない襲撃・処刑・死亡を事実として述べないでください。",
+            "unknown_attacker_claim": "襲撃者は公開されていません。推測を確定した事実として断言しないでください。",
+            "unverified_attributed_speech": "履歴にない発言を他人の発言として引用しないでください。",
+            "repeated_speech": "過去の自分の発言を繰り返さず、新しい根拠か提案を加えてください。",
+            "question_not_answered_first": "最初の一文で直前の発言者へ直接回答してください。",
+        }
+        if response_issue in retry_guidance:
+            return f"\n前回の応答を採用できませんでした。{retry_guidance[response_issue]}"
         if self._must_use_seer_info(action, actor):
             target, _ = self._latest_seer_result()
             return (
@@ -497,6 +508,93 @@ class OllamaActions(ActionPolicy):
                 "結果を公開せずに活用しても構いません。"
             )
         return "\n前回の応答は空または空白のみでした。内容のある発言をしてください。"
+
+    def _discussion_response_issue(self, actor: Player, response: str) -> str | None:
+        if actor.response_language == "日本語" and not re.search(
+            r"[\u3040-\u30ff\u3400-\u9fff]", response
+        ):
+            return "wrong_response_language"
+
+        history = tuple(
+            message
+            for message in self.state.conversation_log
+            if message.speaker != "system"
+        )
+        previous_message = history[-1] if history else None
+        if PromptBuilder._is_directed_to_player(actor, previous_message, history):
+            first_sentence = re.split(r"[。！？\n]", response, maxsplit=1)[0]
+            if previous_message is not None and previous_message.speaker not in first_sentence:
+                return "question_not_answered_first"
+
+        own_name = re.escape(actor.name)
+        if re.search(
+            rf"(?m)^\s*{own_name}(?:さん)?(?:は|が|も)(?=.{{0,32}}(?:人狼|村人|占い師|狂人|発言|意見|怪しい|投票))",
+            response,
+        ):
+            return "third_person_self_reference"
+
+        mentioned_players = re.findall(r"Player\s+\d+", response)
+        known_players = {player.name for player in self.state.players}
+        if any(name not in known_players for name in mentioned_players):
+            return "unknown_player_reference"
+
+        for player in self.state.players:
+            name = re.escape(player.name)
+            if actor.role is not Role.WOLF and (
+                re.search(
+                    rf"{name}(?:さん)?(?:が|は)[^。！？\n]{{0,20}}(?:襲撃した|襲撃しました|襲った|襲いました|襲撃者(?:です|だ))",
+                    response,
+                )
+                or re.search(
+                    rf"襲撃者は{name}(?:さん)?(?:です|だ)",
+                    response,
+                )
+            ):
+                return "unknown_attacker_claim"
+            if re.search(
+                rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}襲撃され(?:た|ました)",
+                response,
+            ) and not any(victim == player.name for _, victim in self.state.attack_deaths):
+                return "unverified_game_event"
+            if re.search(
+                rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}処刑され(?:た|ました)",
+                response,
+            ) and not any(executed == player.name for _, executed in self.state.executions):
+                return "unverified_game_event"
+            if re.search(
+                rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}死亡し(?:た|ました)",
+                response,
+            ) and player.is_alive:
+                return "unverified_game_event"
+
+        known_speech = history
+        for player in self.state.players:
+            attributed_quote = re.compile(
+                rf"{re.escape(player.name)}(?:さん)?(?:は|が)[^。！？\n]{{0,24}}[「『\"]([^」』\"]+)[」』\"]"
+            )
+            for match in attributed_quote.finditer(response):
+                quote = match.group(1).strip()
+                if quote and not any(
+                    message.speaker == player.name and quote in message.content
+                    for message in known_speech
+                ):
+                    return "unverified_attributed_speech"
+
+        previous_speeches = [
+            message.content
+            for message in known_speech
+            if message.speaker == actor.name
+        ]
+        normalized = re.sub(r"[\W_]+", "", response, flags=re.UNICODE)
+        for previous in previous_speeches:
+            prior_normalized = re.sub(r"[\W_]+", "", previous, flags=re.UNICODE)
+            if len(normalized) >= 20 and normalized == prior_normalized:
+                return "repeated_speech"
+            if min(len(normalized), len(prior_normalized)) >= 40 and (
+                SequenceMatcher(None, normalized, prior_normalized).ratio() >= 0.92
+            ):
+                return "repeated_speech"
+        return None
 
     def _latest_seer_result(self) -> tuple[str, str]:
         if self.state.seer_result_history:
@@ -508,7 +606,24 @@ class OllamaActions(ActionPolicy):
         options = dict(self.options) if self.options is not None else {}
         if actor.num_ctx is not None:
             options["num_ctx"] = actor.num_ctx
+        if actor.num_predict is not None:
+            options["num_predict"] = actor.num_predict
         return options or None
+
+    def _chat(
+        self, actor: Player, messages: list[dict[str, str]]
+    ) -> str:
+        options = self._options_for(actor)
+        original_timeout = getattr(self.client, "timeout", None)
+        if original_timeout is not None and actor.timeout is not None:
+            self.client.timeout = actor.timeout
+        try:
+            if options is not None:
+                return self.client.chat(actor.model, messages, options=options)
+            return self.client.chat(actor.model, messages)
+        finally:
+            if original_timeout is not None:
+                self.client.timeout = original_timeout
 
     @staticmethod
     def _is_context_overflow(error: OllamaError) -> bool:
@@ -591,6 +706,7 @@ class OllamaActions(ActionPolicy):
                     self.state.phase.value, self.state.phase.value
                 ),
                 "player": actor.name,
+                "model": actor.model,
                 "action": action_name,
                 "private": action_name
                 in {"wolf_discussion", ActionKind.ATTACK.value, ActionKind.SEER.value},

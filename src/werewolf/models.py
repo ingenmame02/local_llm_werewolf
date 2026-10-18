@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -26,6 +27,9 @@ class Player:
     is_alive: bool = True
     partner: str | None = None
     num_ctx: int | None = None
+    timeout: float | None = None
+    num_predict: int | None = None
+    response_language: str = "日本語"
 
     def __post_init__(self) -> None:
         if self.num_ctx is not None and (
@@ -34,6 +38,21 @@ class Player:
             or self.num_ctx <= 0
         ):
             raise ValueError("Player num_ctx must be a positive integer.")
+        if self.timeout is not None and (
+            not isinstance(self.timeout, (int, float))
+            or isinstance(self.timeout, bool)
+            or not math.isfinite(self.timeout)
+            or self.timeout <= 0
+        ):
+            raise ValueError("Player timeout must be a positive number.")
+        if self.num_predict is not None and (
+            not isinstance(self.num_predict, int)
+            or isinstance(self.num_predict, bool)
+            or self.num_predict <= 0
+        ):
+            raise ValueError("Player num_predict must be a positive integer.")
+        if not isinstance(self.response_language, str) or not self.response_language.strip():
+            raise ValueError("Player response_language cannot be empty.")
 
 
 @dataclass(frozen=True)

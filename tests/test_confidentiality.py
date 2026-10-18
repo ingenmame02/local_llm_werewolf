@@ -190,10 +190,14 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
         assert "- 現在の日数：4日目" in prompt
         assert "- 現在のフェーズ：昼（議論）" in prompt
         assert "【ルール】" in prompt
+        assert "襲撃者は公開されません" in prompt
+        assert "死亡者の真役職も公開されず" in prompt
         assert "- 昼議論ターン：0/3" in prompt
         assert f"- 現在の発言者：{player.name}" in prompt
         assert f"- 現在の生存者：{', '.join(state.alive_players)}" in prompt
         assert f"- 既知の死亡者：{dead_player.name}" in prompt
+        assert f"確定した死亡履歴（直近3件）" in prompt
+        assert "死亡者の真役職：非公開" in prompt
         assert "Day 3: " + dead_player.name in prompt
         assert "Day 2: " + dead_player.name in prompt
         assert "Player 1 → Player 3" in prompt
@@ -202,6 +206,7 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
         if player.role is Role.SEER:
             assert secret_result in prompt
             assert "【占い師本人だけが参照できる結果】" in prompt
+            assert "襲撃者や他者の真の役職は知りません" in PromptBuilder.build_system_prompt(player)
             assert "結果を公開するか伏せるかは選べます" in prompt
         else:
             assert secret_result not in prompt
@@ -303,6 +308,8 @@ def test_rule_card_is_present_in_every_prompt_kind() -> None:
     assert all("【ルール】" in prompt.user_prompt for prompt in prompts)
     assert all("- 直前の発言者：P3" in prompt.user_prompt for prompt in prompts)
     assert all("- 直前の発言内容：直近の公開発言です。" in prompt.user_prompt for prompt in prompts)
+    assert all("襲撃者は公開されません" in prompt.user_prompt for prompt in prompts)
+    assert all("死亡者の真役職も公開されず" in prompt.user_prompt for prompt in prompts)
 
 
 def test_discussion_prompt_separates_previous_speaker_and_detects_direct_address() -> None:

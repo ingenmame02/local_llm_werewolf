@@ -146,6 +146,7 @@ class FakeClient:
         self.responses = list(responses)
         self.prompts: list[str] = []
         self.options: list[dict[str, object] | None] = []
+        self.timeouts: list[float | None] = []
 
     def chat(
         self,
@@ -155,6 +156,7 @@ class FakeClient:
     ) -> str:
         self.prompts.append(messages[-1]["content"])
         self.options.append(options)
+        self.timeouts.append(getattr(self, "timeout", None))
         response = self.responses.pop(0)
         if isinstance(response, OllamaError):
             raise response
@@ -352,6 +354,9 @@ def test_seer_forced_result_fallback_when_retry_does_not_use_result() -> None:
 
     assert "P1さんは人間でした" in response
     assert "占い結果を踏まえると" in response
+    assert "対象：P1さん／判定：人間／根拠：" in response
+    assert "次の提案：" in response
+    assert "新情報か具体的な投票方針を必ず加えてください" in client.prompts[0]
     assert len(client.prompts) == 2
     assert actions.traces[-1].fallback_used is True
 
@@ -387,6 +392,7 @@ def test_context_overflow_compacts_old_discussion_and_retries() -> None:
 def test_model_specific_num_ctx_overrides_global_context_option() -> None:
     state = make_state()
     state.players[0].num_ctx = 16384
+    state.players[0].num_predict = 192
     client = FakeClient("議論を続けましょう。")
     actions = OllamaActions(
         state,
@@ -396,7 +402,125 @@ def test_model_specific_num_ctx_overrides_global_context_option() -> None:
 
     actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
 
-    assert client.options == [{"temperature": 0.4, "num_ctx": 16384}]
+    assert client.options == [
+        {"temperature": 0.4, "num_ctx": 16384, "num_predict": 192}
+    ]
+
+
+def test_english_discussion_is_reprompted_and_japanese_answer_is_kept() -> None:
+    client = FakeClient("I think P1 is suspicious.", "P1の投票先について確認したいです。")
+    actions = OllamaActions(make_state(), client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "P1の投票先について確認したいです。"
+    assert len(client.prompts) == 2
+    assert "指定された応答言語" in client.prompts[1]
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_self_reference_and_repeated_discussion_are_retried() -> None:
+    state = make_state()
+    state.conversation_log.append(
+        Message("P0", "P0は村人で、今日はPlayer 1に投票するべきだと思います。")
+    )
+    client = FakeClient(
+        "P0は村人なので、P1への投票を主張します。",
+        "P1への投票は早計です。発言内容をもう一度確認したいです。",
+    )
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), tuple(state.conversation_log))
+
+    assert response == "P1への投票は早計です。発言内容をもう一度確認したいです。"
+    assert len(client.prompts) == 2
+    assert "自分自身を第三者" in client.prompts[1]
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_question_target_must_be_named_in_the_first_sentence() -> None:
+    state = make_state()
+    question = Message("P1", "P0、投票の根拠を説明してください。")
+    state.conversation_log.append(question)
+    client = FakeClient(
+        "投票理由は発言が怪しかったからです。",
+        "P1さん、発言の矛盾を根拠にしました。",
+    )
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), (question,))
+
+    assert response.startswith("P1さん")
+    assert len(client.prompts) == 2
+    assert "回答対象：P1" in client.prompts[0]
+    assert "最初の一文でP1への回答" in client.prompts[1]
+
+
+def test_unrecorded_death_event_is_reprompted() -> None:
+    client = FakeClient(
+        "P1は昨夜襲撃されました。",
+        "昨夜の死亡情報は台帳にありません。P1の投票理由を確認します。",
+    )
+    actions = OllamaActions(make_state(), client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response.startswith("昨夜の死亡情報")
+    assert len(client.prompts) == 2
+    assert "台帳にない襲撃・処刑・死亡" in client.prompts[1]
+
+
+def test_villager_cannot_claim_to_know_the_attacker() -> None:
+    client = FakeClient(
+        "P1が昨夜P2を襲撃しました。",
+        "P1を疑っていますが、襲撃者は未確認なので発言の根拠を確認します。",
+    )
+    actions = OllamaActions(make_state(), client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response.startswith("P1を疑っています")
+    assert len(client.prompts) == 2
+    assert "襲撃者は公開されていません" in client.prompts[1]
+
+
+def test_fabricated_quote_and_repeated_speech_are_reprompted() -> None:
+    state = make_state()
+    state.conversation_log.extend(
+        [
+            Message("P1", "昨日は様子を見ます。"),
+            Message("P0", "Player 1は「P2に投票すると言った」と発言しました。"),
+        ]
+    )
+    client = FakeClient(
+        "P0は「同じ主張をもう一度伝えます」と説明しました。",
+        "P1の発言は投票先を明示していません。今日は発言の変化を確認します。",
+    )
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), tuple(state.conversation_log))
+
+    assert response.startswith("P1の発言")
+    assert len(client.prompts) == 2
+    assert "履歴にない発言" in client.prompts[1]
+
+
+def test_timeout_does_not_trigger_an_additional_semantic_retry() -> None:
+    state = make_state()
+    state.players[0].timeout = 7.0
+    client = FakeClient(
+        OllamaError("timeout", "prompt is too long for context window", attempts=3)
+    )
+    client.timeout = 30.0
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "P0 は発言できませんでした。"
+    assert len(client.prompts) == 1
+    assert client.timeouts == [7.0]
+    assert client.timeout == 30.0
+    assert actions.traces[-1].fallback_used is True
 
 
 def test_action_lifecycle_events_include_reprompt_fallback_and_timing() -> None:
