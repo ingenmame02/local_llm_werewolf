@@ -1,3 +1,4 @@
+import json
 from collections import Counter
 
 import pytest
@@ -16,7 +17,7 @@ def test_loads_all_eight_models_from_configuration() -> None:
         "mistral-small:24b-262000",
         "glm-4.7-flash:latest",
         "qwen3.8:27b",
-        "deepseek-r1:32b",
+        "deepseek-r1:32b-262000",
         "gpt-oss-20b-262000:latest",
         "gemma4:26b",
     ]
@@ -95,4 +96,44 @@ def test_player_configuration_rejects_duplicate_names(tmp_path) -> None:
     )
 
     with pytest.raises(ValueError, match="unique"):
+        load_player_configs(config_file)
+
+
+def test_player_configuration_applies_per_model_context_length(tmp_path) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[5]["num_ctx"] = 16384
+    config_file.write_text(
+        json.dumps({"players": players}),
+        encoding="utf-8",
+    )
+
+    configs = load_player_configs(config_file)
+    state = create_game(seed=1, config_path=config_file)
+
+    assert configs[5].num_ctx == 16384
+    assert configs[4].num_ctx is None
+    assert state.players[5].num_ctx == 16384
+    assert state.players[4].num_ctx is None
+
+
+@pytest.mark.parametrize("invalid_num_ctx", [0, -1, True, "4096"])
+def test_player_configuration_rejects_invalid_context_length(
+    tmp_path, invalid_num_ctx
+) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[0]["num_ctx"] = invalid_num_ctx
+    config_file.write_text(
+        json.dumps({"players": players}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="num_ctx"):
         load_player_configs(config_file)

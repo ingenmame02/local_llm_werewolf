@@ -26,7 +26,12 @@ def create_game(
     random.Random(seed).shuffle(roles)
 
     players = [
-        Player(name=config.name, model=config.model, role=role)
+        Player(
+            name=config.name,
+            model=config.model,
+            role=role,
+            num_ctx=config.num_ctx,
+        )
         for config, role in zip(player_configs, roles, strict=True)
     ]
     wolves = [player for player in players if player.role is Role.WOLF]

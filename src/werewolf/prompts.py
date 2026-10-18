@@ -52,6 +52,17 @@ COMMON_SYSTEM_TEMPLATE = """あなたは人狼ゲームに参加しているプ�
 このゲームでは、上記のルールと役職の目的を意識しつつ、普段のあなたらしい話し方や考え方をできるだけ残してください。
 無理に別人を演じる必要はありません。"""
 
+RULE_CARD = """【人狼ルールカード】
+- プレイヤーは8人。初期役職は人狼2、狂人1、占い師1、村人4。
+- 夜は人狼相談・襲撃・占い、朝は死亡発表、昼の議論は3ターン、その後に投票。
+- 狂人は人狼陣営だが襲撃できない。
+- 占い結果は「人狼」または「人間」。
+- 投票では自分自身に投票できない。
+- 同票時は1回だけ再投票し、それでも同票なら抽選する。
+- 「パス」は昼議論の明示的な発言スキップで、空応答とは異なる。
+
+"""
+
 
 @dataclass(frozen=True)
 class PromptContext:
@@ -64,6 +75,58 @@ class PromptContext:
             {"role": "user", "content": self.user_prompt},
         ]
 
+    def compact(self, recent_lines: int = 4) -> PromptContext:
+        return PromptContext(
+            system_prompt=self.system_prompt,
+            user_prompt=_compact_history_section(
+                self.user_prompt,
+                "【これまでの公開会話】",
+                "【直前の発言】",
+                recent_lines,
+            )
+            if "【これまでの公開会話】" in self.user_prompt
+            else _compact_history_section(
+                self.user_prompt,
+                "【これまでの相談内容（提案・意見であり、確定事実ではありません）】",
+                "【指示】",
+                recent_lines,
+            ),
+        )
+
+
+def _compact_history_section(
+    prompt: str, start_marker: str, end_marker: str, recent_lines: int
+) -> str:
+    start = prompt.find(start_marker)
+    end = prompt.find(end_marker, start + len(start_marker))
+    if start < 0 or end < 0:
+        return prompt
+    section = prompt[start:end]
+    lines = section.splitlines()
+    content_start = 2 if len(lines) > 1 and lines[1].startswith("以下は") else 1
+    history = lines[content_start:]
+    if len(history) <= recent_lines:
+        return prompt
+    older_history = history[:-recent_lines]
+    recent_history = history[-recent_lines:]
+    summary_lines = [
+        line if len(line) <= 120 else line[:117] + "..."
+        for line in older_history[-3:]
+        if line.strip()
+    ]
+    omitted = len(older_history) - len(summary_lines)
+    compressed_section = "\n".join(
+        [
+            *lines[:content_start],
+            f"（古い会話を圧縮。{omitted} 行省略、以下は短縮した未確認発言）",
+            *summary_lines,
+            "（直近の発言）",
+            *recent_history,
+            "",
+        ]
+    )
+    return prompt[:start] + compressed_section + prompt[end:]
+
 
 class PromptBuilder:
     @staticmethod
@@ -74,6 +137,7 @@ class PromptBuilder:
         phase: str,
         state: GameState | None = None,
         seer_results: Mapping[str, str] | tuple[tuple[str, str], ...] = (),
+        conversation_history: tuple[Message, ...] | None = None,
     ) -> str:
         dead_players = (
             tuple(player.name for player in state.players if not player.is_alive)
@@ -105,6 +169,11 @@ class PromptBuilder:
                     f"Day {event_day}: {target} = {result}"
                     for event_day, target, result in state.seer_result_history
                 )
+            elif state is not None and state.seer_results:
+                result_history = "\n".join(
+                    f"{target} = {result}"
+                    for target, result in state.seer_results.items()
+                )
             elif isinstance(seer_results, Mapping):
                 result_history = "\n".join(
                     f"{target} = {result}" for target, result in seer_results.items()
@@ -114,18 +183,60 @@ class PromptBuilder:
                     f"{target} = {result}" for target, result in seer_results
                 )
 
+        latest_attack = (
+            f"Day {state.attack_deaths[-1][0]}: {state.attack_deaths[-1][1]}"
+            if state is not None and state.attack_deaths
+            else "なし"
+        )
+        latest_execution = (
+            f"Day {state.executions[-1][0]}: {state.executions[-1][1]}"
+            if state is not None and state.executions
+            else "なし"
+        )
+        latest_vote = (
+            f"Day {state.vote_history[-1][0]}"
+            f"{'（決選再投票）' if state.vote_history[-1][1] else '（通常投票）'}: "
+            + "、".join(
+                f"{voter} → {target}"
+                for voter, target in state.vote_history[-1][2].items()
+            )
+            if state is not None and state.vote_history
+            else "なし"
+        )
+        current_turn = (
+            f"{state.discussion_turn}/3"
+            if state is not None and phase.startswith("昼")
+            else "該当なし"
+        )
+        source_history = (
+            conversation_history
+            if conversation_history is not None
+            else tuple(state.conversation_log) if state is not None else ()
+        )
+        previous_message = next(
+            (message for message in reversed(source_history) if message.speaker != "system"),
+            None,
+        )
         return (
-            "【ゲームシステムが確定した事実】\n"
+            RULE_CARD
+            + "【ゲームシステムが確定した事実】\n"
             f"- あなたのプレイヤー名：{actor.name}\n"
             f"- あなたの役職：{ROLE_NAMES_JA[actor.role]}\n"
             f"- 現在の日数：{day}日目\n"
             f"- 現在のフェーズ：{phase}\n"
+            f"- 昼議論ターン：{current_turn}\n"
+            f"- 現在の発言者：{actor.name}\n"
+            f"- 直前の発言者：{previous_message.speaker if previous_message else 'なし'}\n"
+            f"- 直前の発言内容：{previous_message.content if previous_message else 'なし'}\n"
             f"- 現在の生存者：{', '.join(alive_players) or 'なし'}\n"
             f"- 既知の死亡者：{', '.join(dead_players) or 'なし'}\n"
+            f"- 最新の襲撃死亡者：{latest_attack}\n"
+            f"- 最新の処刑者：{latest_execution}\n"
+            f"- 最新の投票結果：{latest_vote}\n"
             f"- 朝に発表された襲撃死亡者：\n{attack_history}\n"
             f"- 投票による処刑者：\n{execution_history}\n"
             f"- 過去の投票結果：\n{vote_history}\n"
-            f"- 過去の占い結果（占い師本人のみ）：\n{result_history}\n\n"
+            f"- 占い師本人だけが参照できる占い結果履歴：\n{result_history}\n\n"
             "【情報の区分】\n"
             "この欄のゲームシステム記録だけが確定事実です。プレイヤーの発言・主張・推測は未確認情報であり、"
             "確定事実として扱わないでください。\n\n"
@@ -236,7 +347,32 @@ class PromptBuilder:
             results_list = [f"{k}: {v}" for k, v in seer_results.items()]
         else:
             results_list = [f"{k}: {v}" for k, v in seer_results]
-        formatted_results = "\n".join(results_list) if results_list else "なし"
+        today_results = (
+            [
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for result_day, target, result in state.seer_result_history
+                if result_day == day
+            ]
+            if state is not None
+            else []
+        )
+        if state is not None and not state.seer_result_history and state.seer_results:
+            today_results = [
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for target, result in state.seer_results.items()
+            ]
+        past_results = (
+            [
+                f"Day {result_day}: {target} = "
+                f"{'人狼' if result == 'wolf' else '人間'}"
+                for result_day, target, result in state.seer_result_history
+                if result_day < day
+            ]
+            if state is not None and state.seer_result_history
+            else results_list
+        )
+        today_result_text = "\n".join(today_results) or "なし"
+        past_result_text = "\n".join(past_results) or "なし"
 
         user_prompt = (
             cls._fact_header(
@@ -246,7 +382,8 @@ class PromptBuilder:
             "- フェーズ：夜（占い）\n"
             "- あなたの役職：占い師\n"
             f"- 生存者：{', '.join(alive_players)}\n"
-            f"- これまでの占い結果：\n{formatted_results}\n\n"
+            f"- 今回（当日）の占い結果：\n{today_result_text}\n"
+            f"- 過去（当日より前）の占い結果：\n{past_result_text}\n\n"
             "【指示】\n"
             "今夜占う相手を1人選んでください。\n"
             "- なぜその人を占うのか、簡単に理由を述べても構いません\n\n"
@@ -295,6 +432,20 @@ class PromptBuilder:
                 f"{target}: {'人狼' if result == 'wolf' else '人間'}"
                 for target, result in own_seer_results.items()
             )
+        current_seer_results = (
+            [
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for result_day, target, result in state.seer_result_history
+                if result_day == day
+            ]
+            if state is not None
+            else []
+        )
+        if state is not None and not state.seer_result_history and own_seer_results:
+            current_seer_results = [
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for target, result in own_seer_results.items()
+            ]
         role_ja = ROLE_NAMES_JA[actor.role]
         user_prompt = (
             cls._fact_header(
@@ -303,6 +454,7 @@ class PromptBuilder:
                 day,
                 "昼（議論）",
                 state,
+                conversation_history=player_history,
             )
             + "【現在の状況】\n"
             "- フェーズ：昼（議論）\n"
@@ -325,8 +477,22 @@ class PromptBuilder:
                     )
                     or "なし"
                 )
-                + "\n"
-                + f"- 利用可能な最新結果：\n{seer_result_text}\n\n"
+                + "\n\n"
+                + "【今回（当日）の占い結果】\n"
+                + (
+                    "\n".join(current_seer_results) or "なし"
+                )
+                + "\n\n【過去（当日より前）の占い結果】\n"
+                + (
+                    "\n".join(
+                        f"Day {event_day}: {target} = "
+                        f"{'人狼' if result == 'wolf' else '人間'}"
+                        for event_day, target, result in state.seer_result_history
+                        if event_day < day
+                    )
+                    or "なし"
+                )
+                + f"\n\n- 利用可能な最新結果：\n{seer_result_text}\n\n"
                 if actor.role is Role.SEER and state is not None
                 else ""
             )
@@ -343,6 +509,7 @@ class PromptBuilder:
                 "- 占い結果を持つ占い師は、今日まだ結果を活用した発言をしていない場合、今回の発言で必ず結果を推理に反映してください\n"
                 "- 結果を公開するか伏せるかは選べますが、対象への疑い・信頼・警戒など、結果を踏まえた判断を具体的に述べてください\n"
                 "- 今日の最初の情報活用発言をするまでは、パスだけを出力してはいけません\n"
+                "- 占い結果が複数ある場合、今回（当日）の結果を優先して活用し、過去の結果だけで判断しないでください\n"
                 if actor.role is Role.SEER and own_seer_results
                 else ""
             )

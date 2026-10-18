@@ -145,7 +145,8 @@ class GameEngine:
 
     def run_discussion(self) -> None:
         self.state.phase = Phase.DAY_DISCUSSION
-        for _ in range(3):
+        for turn in range(1, 4):
+            self.state.discussion_turn = turn
             for player in self.state.players:
                 if not player.is_alive:
                     continue

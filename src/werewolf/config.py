@@ -7,6 +7,7 @@ from pathlib import Path
 class PlayerConfig:
     name: str
     model: str
+    num_ctx: int | None = None
 
 
 DEFAULT_CONFIG_PATH = (
@@ -30,11 +31,18 @@ def load_player_configs(
             raise ValueError(f"Player configuration at index {index} must be an object.")
         name = entry.get("name")
         model = entry.get("model")
+        num_ctx = entry.get("num_ctx")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"Player name at index {index} must be a non-empty string.")
         if not isinstance(model, str) or not model.strip():
             raise ValueError(f"Player model at index {index} must be a non-empty string.")
-        players.append(PlayerConfig(name=name, model=model))
+        if num_ctx is not None and (
+            not isinstance(num_ctx, int) or isinstance(num_ctx, bool) or num_ctx <= 0
+        ):
+            raise ValueError(
+                f"Player num_ctx at index {index} must be a positive integer."
+            )
+        players.append(PlayerConfig(name=name, model=model, num_ctx=num_ctx))
 
     if len(players) != 8:
         raise ValueError(f"Expected exactly 8 player configurations, got {len(players)}.")

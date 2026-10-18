@@ -54,13 +54,18 @@ def test_client_sends_non_streaming_chat_request_and_returns_content() -> None:
 
     client = OllamaClient(base_url="http://ollama:11434/", timeout=17, transport=transport)
 
-    assert client.chat("model-x", [{"role": "user", "content": "hello"}]) == "ok"
+    assert client.chat(
+        "model-x",
+        [{"role": "user", "content": "hello"}],
+        options={"temperature": 0.4, "num_ctx": 8192},
+    ) == "ok"
     assert received["url"] == "http://ollama:11434/api/chat"
     assert received["timeout"] == 17
     assert received["body"] == {
         "model": "model-x",
         "messages": [{"role": "user", "content": "hello"}],
         "stream": False,
+        "options": {"temperature": 0.4, "num_ctx": 8192},
     }
 
 
@@ -140,9 +145,16 @@ class FakeClient:
     def __init__(self, *responses: str | OllamaError) -> None:
         self.responses = list(responses)
         self.prompts: list[str] = []
+        self.options: list[dict[str, object] | None] = []
 
-    def chat(self, model: str, messages: list[dict[str, str]]) -> str:
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict[str, object] | None = None,
+    ) -> str:
         self.prompts.append(messages[-1]["content"])
+        self.options.append(options)
         response = self.responses.pop(0)
         if isinstance(response, OllamaError):
             raise response
@@ -294,6 +306,7 @@ def test_seer_must_use_result_before_pass_and_can_pass_after_contribution() -> N
     assert len(client.prompts) == 3
     assert "前回の応答は空、パス" in client.prompts[1]
     assert "P1: 人狼" in client.prompts[0]
+    assert "【今回（当日）の占い結果】\nP1: 人狼" in client.prompts[0]
     assert actions.traces[0].fallback_used is False
     assert actions.traces[1].fallback_used is False
 
@@ -310,6 +323,48 @@ def test_seer_forced_result_fallback_when_retry_does_not_use_result() -> None:
     assert "占い結果を踏まえると" in response
     assert len(client.prompts) == 2
     assert actions.traces[-1].fallback_used is True
+
+
+def test_context_overflow_compacts_old_discussion_and_retries() -> None:
+    state = make_state()
+    state.discussion_turn = 2
+    history = tuple(
+        Message(f"P{index % 3}", f"old statement {index}")
+        for index in range(12)
+    ) + (Message("P1", "latest direct question"),)
+    client = FakeClient(
+        OllamaError("http", "prompt is too long for context window", attempts=1),
+        "回答します。",
+    )
+    actions = OllamaActions(state, client, options={"temperature": 0.3, "num_ctx": 4096})
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), history)
+
+    assert response == "回答します。"
+    assert len(client.prompts) == 2
+    assert "old statement 0" in client.prompts[0]
+    assert "old statement 0" not in client.prompts[1]
+    assert "old statement 10" in client.prompts[1]
+    assert "old statement 4" not in client.prompts[1]
+    assert "古い会話" in client.prompts[1]
+    assert "latest direct question" in client.prompts[1]
+    assert "- 昼議論ターン：2/3" in client.prompts[1]
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_model_specific_num_ctx_overrides_global_context_option() -> None:
+    state = make_state()
+    state.players[0].num_ctx = 16384
+    client = FakeClient("議論を続けましょう。")
+    actions = OllamaActions(
+        state,
+        client,
+        options={"temperature": 0.4, "num_ctx": 4096},
+    )
+
+    actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert client.options == [{"temperature": 0.4, "num_ctx": 16384}]
 
 
 def test_action_lifecycle_events_include_reprompt_fallback_and_timing() -> None:

@@ -25,6 +25,15 @@ class Player:
     role: Role
     is_alive: bool = True
     partner: str | None = None
+    num_ctx: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.num_ctx is not None and (
+            not isinstance(self.num_ctx, int)
+            or isinstance(self.num_ctx, bool)
+            or self.num_ctx <= 0
+        ):
+            raise ValueError("Player num_ctx must be a positive integer.")
 
 
 @dataclass(frozen=True)
@@ -49,10 +58,13 @@ class GameState:
     winner: str | None = None
     seed: int | None = None
     pending_attack: str | None = None
+    discussion_turn: int = 0
 
     def __post_init__(self) -> None:
         if self.day < 0:
             raise ValueError("Day cannot be negative.")
+        if not 0 <= self.discussion_turn <= 3:
+            raise ValueError("Discussion turn must be between zero and three.")
         names = [player.name for player in self.players]
         if len(names) != len(set(names)):
             raise ValueError("Player names must be unique.")

@@ -190,6 +190,9 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
         assert f"- あなたの役職：{ROLE_NAMES_JA[player.role]}" in prompt
         assert "- 現在の日数：4日目" in prompt
         assert "- 現在のフェーズ：昼（議論）" in prompt
+        assert "【人狼ルールカード】" in prompt
+        assert "- 昼議論ターン：0/3" in prompt
+        assert f"- 現在の発言者：{player.name}" in prompt
         assert f"- 現在の生存者：{', '.join(state.alive_players)}" in prompt
         assert f"- 既知の死亡者：{dead_player.name}" in prompt
         assert "Day 3: " + dead_player.name in prompt
@@ -203,6 +206,66 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
             assert "結果を公開するか伏せるかは選べます" in prompt
         else:
             assert secret_result not in prompt
+
+
+def test_seer_discussion_separates_current_and_past_results() -> None:
+    state = create_game(seed=42)
+    state.day = 3
+    seer = next(player for player in state.players if player.role is Role.SEER)
+    state.seer_results.update({"Player 4": "wolf", "Player 6": "human"})
+    state.seer_result_history.extend(
+        [(1, "Player 4", "wolf"), (3, "Player 6", "human")]
+    )
+    prompt = PromptBuilder.build_discussion_prompt(
+        actor=seer,
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        day=state.day,
+        state=state,
+    ).user_prompt
+
+    assert "【今回（当日）の占い結果】\nPlayer 6: 人間" in prompt
+    assert "【過去（当日より前）の占い結果】\nDay 1: Player 4 = 人狼" in prompt
+    assert "今回（当日）の結果を優先" in prompt
+
+
+def test_rule_card_is_present_in_every_prompt_kind() -> None:
+    state = create_game(seed=42)
+    state.conversation_log.append(Message("P3", "直近の公開発言です。"))
+    wolf = next(player for player in state.players if player.role is Role.WOLF)
+    seer = next(player for player in state.players if player.role is Role.SEER)
+    villager = next(player for player in state.players if player.role is Role.VILLAGER)
+    alive = tuple(state.alive_players)
+    prompts = (
+        PromptBuilder.build_wolf_discuss_prompt(
+            wolf, wolf.partner or "", alive, (), day=state.day, state=state
+        ),
+        PromptBuilder.build_attack_prompt(
+            wolf, (wolf.name,), tuple(name for name in alive if name != wolf.name),
+            day=state.day, state=state,
+        ),
+        PromptBuilder.build_seer_prompt(
+            seer, alive, (), day=state.day, state=state
+        ),
+        PromptBuilder.build_discussion_prompt(
+            villager,
+            alive,
+            tuple(state.conversation_log),
+            day=state.day,
+            state=state,
+        ),
+        PromptBuilder.build_vote_prompt(
+            villager,
+            alive,
+            tuple(name for name in alive if name != villager.name),
+            day=state.day,
+            state=state,
+        ),
+    )
+
+    assert all("【人狼ルールカード】" in prompt.user_prompt for prompt in prompts)
+    assert all("- 直前の発言者：P3" in prompt.user_prompt for prompt in prompts)
+    assert all("- 直前の発言内容：直近の公開発言です。" in prompt.user_prompt for prompt in prompts)
 
 
 def test_discussion_prompt_separates_previous_speaker_and_detects_direct_address() -> None:

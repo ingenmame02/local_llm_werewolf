@@ -159,6 +159,7 @@ class OllamaActions(ActionPolicy):
             raise ValueError(f"No valid candidates for {action.value} by {actor.name}.")
 
         user_prompts = [prompt_ctx.user_prompt]
+        options = self._options_for(actor)
         raw_responses: list[str] = []
         parsed_targets: list[str | None] = []
         last_error: OllamaError | None = None
@@ -171,11 +172,11 @@ class OllamaActions(ActionPolicy):
                 {"role": "user", "content": user_prompts[-1]},
             ]
             try:
-                if self.options is not None:
+                if options is not None:
                     response = self.client.chat(
                         actor.model,
                         messages,
-                        options=self.options,
+                        options=options,
                     )
                 else:
                     response = self.client.chat(
@@ -185,6 +186,26 @@ class OllamaActions(ActionPolicy):
             except OllamaError as error:
                 last_error = error
                 transport_attempts += error.attempts
+                compacted = prompt_ctx.compact(recent_lines=2)
+                if (
+                    request_number == 0
+                    and self._is_context_overflow(error)
+                    and compacted.user_prompt != prompt_ctx.user_prompt
+                ):
+                    self._emit(
+                        "llm_action_parse_failed",
+                        action,
+                        actor,
+                        started_at,
+                        reason="context_overflow_compacted",
+                        will_retry=True,
+                    )
+                    user_prompts.append(
+                        compacted.user_prompt
+                        + "\n古い会話を圧縮しました。確定事実と直前の発言を優先してください。"
+                    )
+                    semantic_retries += 1
+                    continue
                 break
 
             transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
@@ -286,15 +307,32 @@ class OllamaActions(ActionPolicy):
                 {"role": "user", "content": user_prompt},
             ]
             try:
-                if self.options is not None:
+                options = self._options_for(actor)
+                if options is not None:
                     response = self.client.chat(
-                        actor.model, messages, options=self.options
+                        actor.model, messages, options=options
                     )
                 else:
                     response = self.client.chat(actor.model, messages)
             except OllamaError as error:
                 last_error = error
                 transport_attempts += error.attempts
+                compacted = prompt_ctx.compact(recent_lines=2)
+                if (
+                    attempt == 0
+                    and self._is_context_overflow(error)
+                    and compacted.user_prompt != prompt_ctx.user_prompt
+                ):
+                    prompt_ctx = compacted
+                    self._emit(
+                        "llm_action_parse_failed",
+                        action,
+                        actor,
+                        started_at,
+                        reason="context_overflow_compacted",
+                        will_retry=True,
+                    )
+                    continue
                 break
 
             transport_attempts += max(1, getattr(self.client, "_last_attempts", 1))
@@ -394,10 +432,14 @@ class OllamaActions(ActionPolicy):
         )
 
     def _references_seer_result(self, actor: Player, response: str) -> bool:
-        if actor.role.value != "seer" or not response:
+        if (
+            actor.role.value != "seer"
+            or not response
+            or not self.state.seer_results
+        ):
             return False
-        result_targets = set(self.state.seer_results)
-        mentions_result_target = any(target in response for target in result_targets)
+        latest_target, _ = self._latest_seer_result()
+        mentions_result_target = latest_target in response
         usage_terms = (
             "占い",
             "結果",
@@ -419,7 +461,7 @@ class OllamaActions(ActionPolicy):
     def _seer_info_fallback(self, actor: Player) -> str | None:
         if actor.role.value != "seer" or not self.state.seer_results:
             return None
-        target, result = next(reversed(self.state.seer_results.items()))
+        target, result = self._latest_seer_result()
         if result == "wolf":
             return (
                 f"占い結果を踏まえると、{target}さんは人狼でした。"
@@ -432,13 +474,42 @@ class OllamaActions(ActionPolicy):
 
     def _discussion_retry_instruction(self, action: str, actor: Player) -> str:
         if self._must_use_seer_info(action, actor):
-            target = next(reversed(self.state.seer_results))
+            target, _ = self._latest_seer_result()
             return (
                 "\n前回の応答は空、パス、または占い結果を活用していませんでした。"
                 f"今回は必ず{target}の占い結果を踏まえた判断を具体的に話してください。"
                 "結果を公開せずに活用しても構いません。"
             )
         return "\n前回の応答は空または空白のみでした。内容のある発言をしてください。"
+
+    def _latest_seer_result(self) -> tuple[str, str]:
+        if self.state.seer_result_history:
+            _, target, result = self.state.seer_result_history[-1]
+            return target, result
+        return next(reversed(self.state.seer_results.items()))
+
+    def _options_for(self, actor: Player) -> dict[str, object] | None:
+        options = dict(self.options) if self.options is not None else {}
+        if actor.num_ctx is not None:
+            options["num_ctx"] = actor.num_ctx
+        return options or None
+
+    @staticmethod
+    def _is_context_overflow(error: OllamaError) -> bool:
+        message = error.message.casefold()
+        return any(
+            marker in message
+            for marker in (
+                "context length",
+                "context window",
+                "maximum context",
+                "prompt is too long",
+                "input length",
+                "num_ctx",
+                "コンテキスト長",
+                "コンテキストが長",
+            )
+        )
 
     def _start_action(self, action: str, actor: Player) -> float:
         started_at = time.perf_counter()
