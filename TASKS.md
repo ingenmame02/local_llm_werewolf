@@ -32,6 +32,8 @@
 
 ## TASK-003 — OllamaクライアントとActionParser
 
+状態：完了
+
 担当：GitHub Copilot
 
 依頼：
