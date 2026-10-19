@@ -1,12 +1,12 @@
 {
   "players": [
-    { "name": "Player 1", "model": "werewolf-calm3-22b-8k" },
-    { "name": "Player 2", "model": "werewolf-muse-glimmer-8k" },
-    { "name": "Player 3", "model": "werewolf-mistral-small-8k" },
-    { "name": "Player 4", "model": "werewolf-glm-4.7-flash-8k" },
-    { "name": "Player 5", "model": "werewolf-qwen3.8-8k" },
-    { "name": "Player 6", "model": "werewolf-deepseek-r1-8k" },
-    { "name": "Player 7", "model": "werewolf-gpt-oss-20b-8k" },
-    { "name": "Player 8", "model": "werewolf-gemma4-8k" }
+    { "name": "Player 1", "model": "werewolf-calm3-22b-8k", "num_predict": 1024 },
+    { "name": "Player 2", "model": "werewolf-muse-glimmer-8k", "num_predict": 4096 },
+    { "name": "Player 3", "model": "werewolf-mistral-small-8k", "num_predict": 512 },
+    { "name": "Player 4", "model": "werewolf-glm-4.7-flash-8k", "num_predict": 768 },
+    { "name": "Player 5", "model": "werewolf-qwen3.8-8k", "num_predict": 768 },
+    { "name": "Player 6", "model": "werewolf-deepseek-r1-8k", "num_predict": 1536 },
+    { "name": "Player 7", "model": "werewolf-gpt-oss-20b-8k", "num_predict": 1024 },
+    { "name": "Player 8", "model": "werewolf-gemma4-8k", "num_predict": 4096 }
   ]
 }

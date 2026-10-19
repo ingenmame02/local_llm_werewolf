@@ -19,7 +19,7 @@ from .discussion_format import (
 )
 from .models import GameState, Message, Player, PublicRoleClaim, PublicSeerClaim, Role
 from .ollama import CLAIM_ROLE_TOOL, ChatResponse, OllamaClient, OllamaError, ToolCall
-from .prompts import PromptBuilder, PromptContext
+from .prompts import PromptBuilder, PromptContext, ROLE_NAMES_JA
 
 _THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 _UNCLOSED_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
@@ -139,6 +139,7 @@ class OllamaActions(ActionPolicy):
             prompt_ctx,
             f"{player} は発言できませんでした。",
             started_at,
+            recent_messages=history,
         )
 
     def vote(
@@ -229,11 +230,9 @@ class OllamaActions(ActionPolicy):
                 )
                 failure_reasons.append(failure_reason)
                 transport_attempts += error.attempts
-                compacted = prompt_ctx.compact(recent_lines=2)
                 if (
                     request_number == 0
                     and context_overflow
-                    and compacted.user_prompt != prompt_ctx.user_prompt
                 ):
                     self._emit(
                         "llm_action_parse_failed",
@@ -244,8 +243,12 @@ class OllamaActions(ActionPolicy):
                         will_retry=True,
                     )
                     user_prompts.append(
-                        compacted.user_prompt
-                        + "\n古い会話を圧縮しました。確定事実と直前の発言を優先してください。"
+                        self._target_retry_prompt(
+                            action,
+                            actor,
+                            valid_candidates,
+                            "context_overflow_compacted",
+                        )
                     )
                     semantic_retries += 1
                     continue
@@ -307,11 +310,6 @@ class OllamaActions(ActionPolicy):
 
             if response_issue is not None:
                 failure_reason = response_issue
-                retry_instruction = {
-                    "empty_content": "前回は本文が空でした。",
-                    "thinking_only_response": "前回は思考だけで最終回答がありませんでした。",
-                    "generation_truncated": "前回は生成上限で回答が途切れました。",
-                }[response_issue]
                 self._emit(
                     "llm_action_parse_failed",
                     action,
@@ -327,8 +325,12 @@ class OllamaActions(ActionPolicy):
                 if request_number == 0:
                     semantic_retries += 1
                     user_prompts.append(
-                        f"{prompt_ctx.user_prompt}\n{retry_instruction} "
-                        f"候補から1名を選び、「{self._label(action)}：名前」だけを最後まで出力してください。"
+                        self._target_retry_prompt(
+                            action,
+                            actor,
+                            valid_candidates,
+                            failure_reason,
+                        )
                     )
                 continue
 
@@ -353,8 +355,12 @@ class OllamaActions(ActionPolicy):
             if request_number == 0:
                 semantic_retries += 1
                 user_prompts.append(
-                    f"{prompt_ctx.user_prompt}\n前回の応答は形式または候補が不正でした。"
-                    f"候補から1名を選び、最後に必ず「{self._label(action)}：名前」とだけ明示してください。"
+                    self._target_retry_prompt(
+                        action,
+                        actor,
+                        valid_candidates,
+                        "invalid_target" if target is not None else "invalid_action_response",
+                    )
                 )
 
         fallback = self._rng.choice(valid_candidates)
@@ -408,6 +414,29 @@ class OllamaActions(ActionPolicy):
             and (not forbid_self or candidate != actor.name)
         )
 
+    def _target_retry_prompt(
+        self,
+        action: ActionKind,
+        actor: Player,
+        valid_candidates: tuple[str, ...],
+        failure_reason: str,
+    ) -> str:
+        corrections = {
+            "empty_content": "前回は空でした。",
+            "thinking_only_response": "前回は思考だけでした。回答だけを出してください。",
+            "generation_truncated": "前回は生成上限で途切れました。説明せず形式だけを出してください。",
+            "invalid_target": "前回の対象は候補外でした。有効候補だけから選んでください。",
+            "invalid_action_response": "前回は対象を解析できませんでした。",
+            "context_overflow_compacted": "前回は入力が長すぎました。候補だけを見て簡潔に選んでください。",
+        }
+        return (
+            f"【再回答】{corrections.get(failure_reason, '前回の回答を修正してください。')}\n"
+            f"- 行動：{self._label(action)}\n"
+            f"- あなた：{actor.name}\n"
+            f"- 有効候補：{', '.join(valid_candidates)}\n"
+            f"候補から1名だけ選び、「{self._label(action)}：名前」の1行だけを返してください。"
+        )
+
     def _free_text_with_context(
         self,
         action: str,
@@ -415,6 +444,7 @@ class OllamaActions(ActionPolicy):
         prompt_ctx: PromptContext,
         fallback: str,
         started_at: float,
+        recent_messages: tuple[Message, ...] | None = None,
     ) -> str:
         raw_responses: list[str] = []
         last_error: OllamaError | None = None
@@ -423,11 +453,20 @@ class OllamaActions(ActionPolicy):
         failure_reasons: list[str] = []
         response_metadata_history: list[dict[str, str | int | bool | None]] = []
         for attempt in range(2):
-            user_prompt = prompt_ctx.user_prompt
-            if attempt:
-                user_prompt += self._discussion_retry_instruction(
-                    action, actor, last_response_issue
+            user_prompt = (
+                self._short_discussion_retry_prompt(
+                    actor, last_response_issue, recent_messages
                 )
+                if attempt and action == "discussion"
+                else prompt_ctx.user_prompt
+                + (
+                    self._discussion_retry_instruction(
+                        action, actor, last_response_issue
+                    )
+                    if attempt
+                    else ""
+                )
+            )
             messages = [
                 {"role": "system", "content": prompt_ctx.system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -456,13 +495,10 @@ class OllamaActions(ActionPolicy):
                 )
                 failure_reasons.append(last_response_issue)
                 transport_attempts += error.attempts
-                compacted = prompt_ctx.compact(recent_lines=2)
                 if (
                     attempt == 0
                     and context_overflow
-                    and compacted.user_prompt != prompt_ctx.user_prompt
                 ):
-                    prompt_ctx = compacted
                     self._emit(
                         "llm_action_parse_failed",
                         action,
@@ -490,6 +526,9 @@ class OllamaActions(ActionPolicy):
             is_pass = self._is_pass(response_text)
             must_use_seer_info = self._must_use_seer_info(action, actor)
             uses_seer_info = self._references_seer_result(actor, response_text)
+            holds_human_seer_result = self._holds_human_seer_result(
+                action, actor, response_text
+            )
             response_issue = (
                 self._discussion_response_issue(actor, response_text)
                 if action == "discussion"
@@ -519,11 +558,17 @@ class OllamaActions(ActionPolicy):
                     will_retry=attempt == 0,
                 )
             if response_text and response_issue is None and (
-                not must_use_seer_info or (not is_pass and uses_seer_info)
+                not must_use_seer_info
+                or (
+                    not is_pass
+                    and (uses_seer_info or holds_human_seer_result)
+                )
             ):
                 if is_pass:
                     response_text = "パス"
-                elif must_use_seer_info:
+                elif must_use_seer_info and (
+                    uses_seer_info or holds_human_seer_result
+                ):
                     self._seer_info_used_day[actor.name] = self.state.day
                 self.traces.append(
                     ActionTrace(
@@ -643,6 +688,19 @@ class OllamaActions(ActionPolicy):
             and self._seer_info_used_day.get(actor.name) != self.state.day
         )
 
+    def _holds_human_seer_result(
+        self, action: str, actor: Player, response: str
+    ) -> bool:
+        structured = parse_discussion_output(response)
+        return (
+            action == "discussion"
+            and actor.role is Role.SEER
+            and structured is not None
+            and structured.claim == "保留"
+            and bool(self.state.seer_results)
+            and all(result == "human" for result in self.state.seer_results.values())
+        )
+
     def _references_seer_result(self, actor: Player, response: str) -> bool:
         if (
             actor.role.value != "seer"
@@ -730,6 +788,132 @@ class OllamaActions(ActionPolicy):
                 "結果を公開せずに活用しても構いません。"
             )
         return "\n前回の応答は空または空白のみでした。内容のある発言をしてください。"
+
+    def _short_discussion_retry_prompt(
+        self,
+        actor: Player,
+        response_issue: str | None,
+        recent_messages: tuple[Message, ...] | None = None,
+    ) -> str:
+        public_claims = list(self.state.public_role_claims)
+        recorded_seer_claims = {
+            (claim.day, claim.claimant, claim.target, claim.result)
+            for claim in public_claims
+            if claim.claimed_role == Role.SEER.value
+        }
+        for claim in self.state.seer_claims:
+            key = (claim.day, claim.claimant, claim.target, claim.result)
+            if key not in recorded_seer_claims:
+                public_claims.append(
+                    PublicRoleClaim(
+                        day=claim.day,
+                        claimant=claim.claimant,
+                        claimed_role=Role.SEER.value,
+                        target=claim.target,
+                        result=claim.result,
+                    )
+                )
+        public_claims = [
+            f"{claim.claimant}は"
+            f"{ROLE_NAMES_JA.get(Role(claim.claimed_role), claim.claimed_role)}を主張"
+            + (
+                f"（{claim.target}={'人狼' if claim.result == 'wolf' else '人間'}）"
+                if claim.target is not None and claim.result is not None
+                else ""
+            )
+            for claim in public_claims[-4:]
+        ]
+        death_events = sorted(
+            [
+                (day, "襲撃", name)
+                for day, name in self.state.attack_deaths
+            ]
+            + [(day, "処刑", name) for day, name in self.state.executions]
+        )[-3:]
+        death_summary = "、".join(
+            f"{day}日目{name}死亡（{cause}）" for day, cause, name in death_events
+        ) or "なし"
+        dead_players = tuple(
+            player.name for player in self.state.players if not player.is_alive
+        )
+        latest_vote = (
+            "、".join(
+                f"{voter}→{target}"
+                for voter, target in self.state.vote_history[-1][2].items()
+            )
+            if self.state.vote_history
+            else "なし"
+        )
+        conversation = (
+            recent_messages
+            if recent_messages is not None
+            else tuple(self.state.conversation_log)
+        )
+        recent_speech = [
+            f"{message.speaker}: {message.content[:240]}"
+            for message in conversation[-3:]
+            if message.speaker != "system"
+        ]
+        private_seer_results = (
+            [
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for _, target, result in self.state.seer_result_history[-3:]
+            ]
+            if actor.role is Role.SEER
+            else []
+        )
+        if (
+            actor.role is Role.SEER
+            and not private_seer_results
+            and self.state.seer_results
+        ):
+            private_seer_results = [
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for target, result in list(self.state.seer_results.items())[-3:]
+            ]
+        guidance = self._discussion_retry_instruction(
+            "discussion", actor, response_issue
+        ).strip()
+        previous_message = next(
+            (message for message in reversed(conversation) if message.speaker != "system"),
+            None,
+        )
+        if PromptBuilder._is_directed_to_player(
+            actor,
+            previous_message,
+            tuple(message for message in conversation if message.speaker != "system"),
+        ):
+            guidance += (
+                f" 最初の一文で{previous_message.speaker}への回答をしてください。"
+            )
+        return (
+            "短い再回答です。省略された古い会話は参照せず、次の事実と直近発言だけを使ってください。\n"
+            "【ゲームシステムが確定した事実】\n"
+            f"- あなたのプレイヤー名：{actor.name}\n"
+            f"- あなたの役職：{ROLE_NAMES_JA[actor.role]}\n"
+            f"- 現在の日数：{self.state.day}日目\n"
+            "- 現在のフェーズ：昼議論\n"
+            f"- 昼議論ターン：{self.state.discussion_turn}/3\n"
+            f"- 現在の生存者：{', '.join(self.state.alive_players)}\n"
+            f"- 既知の死亡者：{', '.join(dead_players) or 'なし'}\n"
+            f"- 確定した死亡履歴（直近3件）：{death_summary}\n"
+            f"- 最新の投票結果：{latest_vote}\n"
+            f"- 応答言語：{actor.response_language}\n"
+            "【セオリー（推論・確定事実ではない）】未公開の人狼判定は早期CO・公開を優先。"
+            "人間判定だけならCO・結果の保留も可。単独COは1巡後も対抗なしなら真寄りだが真確定ではない。"
+            "人狼・狂人の騙りや対抗COは選択肢であり必須ではない。\n"
+            f"【公開CO・結果】{'; '.join(public_claims) or 'なし'}。\n"
+            f"【直近の公開発言（未確認）】{'; '.join(recent_speech) or 'なし'}。\n"
+            "【情報区分】公開発言・CO主張は未確認情報で、確定事実として扱わないでください。\n"
+            + (
+                f"【占い師本人だけの非公開情報】{'; '.join(private_seer_results)}。\n"
+                if private_seer_results
+                else ""
+            )
+            + f"【修正指示】{guidance}\n"
+            "回答は必ず「【CO】なし/保留/CO内容」の次行に「【本文】本文」の2行構造にしてください。"
+            "本文は短く1～2文にし、直前の質問があれば本文の最初に回答してください。"
+        )
 
     def _discussion_response_issue(self, actor: Player, response: str) -> str | None:
         structured_output = parse_discussion_output(response)

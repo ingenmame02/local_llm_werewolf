@@ -7,6 +7,7 @@ import pytest
 from werewolf import (
     ActionKind,
     ActionParser,
+    ChatResponse,
     GameEngine,
     GameState,
     MockActions,
@@ -315,21 +316,29 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
             return private_wolf_text
         if "襲撃対象：" in prompt:
             line = next(line for line in prompt.splitlines() if "選択可能な襲撃対象：" in line)
-            return f"{attack_response} 襲撃対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
+            return f"{attack_response}\n襲撃対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
         if "占い対象：" in prompt:
             line = next(
                 line
                 for line in prompt.splitlines()
                 if "選択可能な占い対象：" in line
             )
-            return f"{seer_response} 占い対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
+            return f"{seer_response}\n占い対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
         if "選択可能な候補:" in prompt:
             line = next(line for line in prompt.splitlines() if "選択可能な候補:" in line)
-            return f"{vote_response} 投票：{line.split(':', 1)[1].split(',', 1)[0].strip()}"
+            return f"{vote_response}\n投票：{line.split(':', 1)[1].split(',', 1)[0].strip()}"
         return "公開発言です。PUBLIC_DAY_SPEECH"
 
     monkeypatch.setattr(OllamaClient, "ping", lambda self: True)
     monkeypatch.setattr(OllamaClient, "chat", mock_chat)
+    monkeypatch.setattr(
+        OllamaClient,
+        "chat_with_metadata",
+        lambda self, model, messages, options=None, tools=None: ChatResponse(
+            content=mock_chat(self, model, messages, options=options, tools=tools),
+            attempts=1,
+        ),
+    )
     log_dir = tmp_path / "event_logs"
     argv = [
         "--mode", "ollama",

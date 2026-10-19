@@ -12,14 +12,24 @@ def test_loads_all_eight_models_from_configuration() -> None:
 
     assert len(configs) == 8
     assert [config.model for config in configs] == [
-        "CALM3-22B-Chat-GGUF:latest",
-        "muse-glimmer:latest",
-        "mistral-small:24b-262000",
-        "glm-4.7-flash:latest",
-        "qwen3.8:27b",
-        "deepseek-r1:32b",
-        "gpt-oss-20b-262000:latest",
-        "gemma4:26b",
+        "werewolf-calm3-22b-8k",
+        "werewolf-muse-glimmer-8k",
+        "werewolf-mistral-small-8k",
+        "werewolf-glm-4.7-flash-8k",
+        "werewolf-qwen3.8-8k",
+        "werewolf-deepseek-r1-8k",
+        "werewolf-gpt-oss-20b-8k",
+        "werewolf-gemma4-8k",
+    ]
+    assert [config.num_predict for config in configs] == [
+        1024,
+        4096,
+        512,
+        768,
+        768,
+        1536,
+        1024,
+        4096,
     ]
 
 

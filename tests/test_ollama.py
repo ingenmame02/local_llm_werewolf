@@ -592,7 +592,7 @@ def test_invalid_response_is_reprompted_then_validated_before_return() -> None:
     assert target == "P1"
     assert len(client.prompts) == 2
     assert "P0" not in client.prompts[0].split("選択可能な候補: ", 1)[1].splitlines()[0]
-    assert "不正" in client.prompts[1]
+    assert "候補外" in client.prompts[1]
     assert actions.traces[-1].fallback_used is False
     assert actions.traces[-1].raw_responses == ("投票：Unknown", "投票：P1")
 
@@ -845,6 +845,47 @@ def test_two_block_discussion_accepts_co_none_and_hold_without_retry() -> None:
         assert response == expected
         assert len(client.prompts) == 1
         assert actions.traces[-1].fallback_used is False
+
+
+def test_seer_can_hold_only_human_results_without_publishing_them() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P1"] = "human"
+    response = "【CO】保留\n【本文】まだ情報を整理してから判断します。"
+    client = FakeClient(response)
+    actions = OllamaActions(state, client)
+
+    assert actions.discuss("P0", 1, ("P0", "P1", "P2"), ()) == response
+    assert len(client.prompts) == 1
+    assert actions.traces[-1].fallback_used is False
+    assert state.public_role_claims == []
+
+
+def test_discussion_retry_uses_short_context_and_seer_only_private_results() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P2"] = "human"
+    state.conversation_log.extend(
+        Message("P1", f"古い公開発言 {index}") for index in range(6)
+    )
+    state.conversation_log.append(Message("P2", "直近の公開発言です。"))
+    client = FakeClient(
+        "【CO】壊れた形式\n本文マーカーなし",
+        "【CO】保留\n【本文】結果は伏せ、発言をもう少し確認します。",
+    )
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss(
+        "P0", 1, ("P0", "P1", "P2"), tuple(state.conversation_log)
+    )
+
+    assert response.startswith("【CO】保留")
+    assert len(client.prompts) == 2
+    assert "古い公開発言 0" not in client.prompts[1]
+    assert "直近の公開発言です。" in client.prompts[1]
+    assert "P2: 人間" in client.prompts[1]
+    assert "discussion_output_format" not in client.prompts[1]
+    assert actions.traces[-1].fallback_used is False
 
 
 def test_broken_two_block_discussion_is_retried_once() -> None:

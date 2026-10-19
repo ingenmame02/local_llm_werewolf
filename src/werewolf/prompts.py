@@ -29,7 +29,8 @@ ROLE_DESCRIPTIONS_JA: dict[Role, str] = {
         "あなたは占い師です。夜に1人を占って「人狼」か「人間」かを知ることができます。\n"
         "知っているのは自分が実際に占った対象とその判定だけです。襲撃者や他者の真の役職は知りません。\n"
         "得た情報をうまく使って人狼を見つけ、村を勝利に導くのが目的です。\n"
-        "ただし、自分が占い師だとバレすぎると襲撃されるリスクもあるので、情報の出し方には注意してください。"
+        "未公開の人狼判定は、襲撃リスクより村へ伝える情報価値を優先して早期にCO・公開してください。\n"
+        "人間判定だけなら襲撃リスクを考慮し、COと結果を保留して生存を優先する選択肢があります。"
     ),
     Role.VILLAGER: (
         "あなたは村人です。特別な能力はありません。\n"
@@ -49,6 +50,15 @@ RULE_CARD = """【ルール】
 狂人は襲撃不可。占い結果は人狼/人間。自分への投票不可。同票は再投票1回後に抽選。
 襲撃者は公開されません。死亡者の真役職も公開されず、役職の推測を確定事実として扱わないでください。
 昼の「パス」は有効な発言スキップで、空応答とは異なる。
+
+"""
+
+WEREWOLF_THEORY_CARD = """【人狼セオリーカード（推論の目安・確定事実ではない）】
+- 占い師COが1人だけで、生存者全員の1巡目の発言後も対抗COがなければ、そのCOは「真寄り」と評価できます。ただし真確定ではありません。結果の一貫性、投票、襲撃との整合も見てください。
+- 真占い師の人狼判定は、襲撃リスクより村への情報価値を優先し、早期にCO・結果公開するのが基本です。
+- 人間判定だけなら、早期COが襲撃を招くリスクを考慮し、CO・結果を保留して生存する選択肢があります。
+- 人狼・狂人は占い師騙りや対抗COを選択肢として検討できますが、必須ではありません。村人は対抗COがないことだけで真確定しないでください。
+- これらは状況依存の推論規則です。ゲームシステムの確定事実や公開記録と区別し、発言では推測として述べてください。
 
 """
 
@@ -190,13 +200,24 @@ class PromptBuilder:
             if state is not None
             else []
         )
+        completed_discussion_round = (
+            state is not None
+            and state.discussion_turn >= 2
+            and phase.startswith("昼")
+        )
         claimant_status = "なし" if not seer_claimants else "、".join(
             f"{name}（{'生存' if name in alive_players else '死亡'}）"
             for name in seer_claimants
         )
         claimant_guidance = (
-            f"単独COの{seer_claimants[0]}を現時点の唯一の占い師候補として結果を検討材料にできますが、"
-            "真役職や結果の正しさが確定したわけではありません。\n"
+            f"1巡目終了後も対抗COがないため、{seer_claimants[0]}のCOは現時点で真寄りですが真確定ではありません。"
+            "結果の一貫性・投票・襲撃と合わせて検証してください。\n"
+            if len(seer_claimants) == 1
+            and seer_claimants[0] in alive_players
+            and completed_discussion_round
+            else f"単独COの{seer_claimants[0]}を現時点の唯一の占い師候補として結果を検討材料にできますが、"
+            "まだ1巡目の確認前、またはCO者が死亡しているため真寄りとも真確定とも扱わず、"
+            "結果・投票・襲撃を検証してください。\n"
             if len(seer_claimants) == 1
             else "複数の占い師CO主張がある場合は対抗候補として比較し、どちらも未確認情報として扱ってください。\n"
             if len(seer_claimants) > 1
@@ -296,6 +317,7 @@ class PromptBuilder:
             "【情報の区分】\n"
             "この欄のゲームシステム記録だけが確定事実です。プレイヤーの発言・主張・推測は未確認情報であり、"
             "確定事実として扱わないでください。\n\n"
+            + WEREWOLF_THEORY_CARD
         )
 
     @staticmethod
@@ -494,6 +516,11 @@ class PromptBuilder:
             if state is not None
             else []
         )
+        human_results_can_be_held = (
+            bool(own_seer_results)
+            and all(result == "human" for result in own_seer_results.values())
+            and not pending_wolf_results
+        )
         current_seer_results = (
             [
                 f"{target}: {'人狼' if result == 'wolf' else '人間'}"
@@ -547,6 +574,13 @@ class PromptBuilder:
                 )
                 + "\n\n"
                 if actor.role is Role.SEER and state is not None
+                else ""
+            )
+            + (
+                "人狼判定は襲撃リスクより情報価値を優先し、早期にCO・結果を公開してください。\n"
+                if pending_wolf_results
+                else "人間判定だけなら、襲撃リスクを考慮してCO・結果を保留し、生存を優先しても構いません。\n"
+                if human_results_can_be_held
                 else ""
             )
             + "【指示】\n"

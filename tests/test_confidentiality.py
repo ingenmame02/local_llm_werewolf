@@ -24,7 +24,12 @@ class RecordingPromptClient:
         self.canned_response = canned_response
         self.recorded_calls: list[dict[str, object]] = []
 
-    def chat(self, model: str, messages: list[dict[str, str]]) -> str:
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict[str, object] | None = None,
+    ) -> str:
         self.recorded_calls.append({"model": model, "messages": messages})
         return self.canned_response
 
@@ -430,6 +435,53 @@ def test_public_seer_claims_are_claims_not_system_confirmed_roles() -> None:
     assert "複数の占い師CO主張がある場合は対抗候補として比較" in counterclaim_prompt
 
 
+def test_theory_card_qualifies_single_seer_claim_and_keeps_private_results_hidden() -> None:
+    state = create_game(seed=42)
+    seer = next(player for player in state.players if player.role is Role.SEER)
+    wolf = next(player for player in state.players if player.role is Role.WOLF)
+    villager = next(player for player in state.players if player.role is Role.VILLAGER)
+    state.seer_claims.append(PublicSeerClaim(day=1, claimant=seer.name))
+    state.seer_results[wolf.name] = "wolf"
+
+    early_prompt = PromptBuilder.build_discussion_prompt(
+        actor=villager,
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        day=1,
+        state=state,
+    ).user_prompt
+    assert "【人狼セオリーカード（推論の目安・確定事実ではない）】" in early_prompt
+    assert "まだ1巡目の確認前" in early_prompt
+    assert "現時点で真寄り" not in early_prompt
+    assert f"{wolf.name}：人狼" not in early_prompt
+
+    state.discussion_turn = 2
+    after_round_prompt = PromptBuilder.build_discussion_prompt(
+        actor=villager,
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        day=1,
+        state=state,
+    ).user_prompt
+    assert f"{seer.name}のCOは現時点で真寄りですが真確定ではありません" in after_round_prompt
+    assert f"{wolf.name}：人狼" not in after_round_prompt
+
+    opponent = next(
+        player for player in state.players
+        if player.name not in {seer.name, villager.name}
+    )
+    state.seer_claims.append(PublicSeerClaim(day=1, claimant=opponent.name))
+    counterclaim_prompt = PromptBuilder.build_discussion_prompt(
+        actor=villager,
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        day=1,
+        state=state,
+    ).user_prompt
+    assert "複数の占い師CO主張がある場合は対抗候補として比較" in counterclaim_prompt
+    assert "COは現時点で真寄りですが真確定ではありません" not in counterclaim_prompt
+
+
 def test_seer_prompt_prioritizes_publication_of_wolf_result_and_allows_human_result_choice() -> None:
     state = create_game(seed=42)
     seer = next(player for player in state.players if player.role is Role.SEER)
@@ -505,6 +557,10 @@ def test_eight_players_prompt_snapshot_inspection() -> None:
         assert "人狼ゲームのプレイヤーとして行動してください。" in sys_msg
         assert "【ゲームの基本ルール】" not in sys_msg
         user_msg = next(m["content"] for m in messages if m["role"] == "user")
+        if user_msg.startswith("【再回答】"):
+            assert "- あなた：" in user_msg
+            assert "- 有効候補：" in user_msg
+            continue
         assert "【ゲームシステムが確定した事実】" in user_msg
         player_name = user_msg.split("- あなたのプレイヤー名：", 1)[1].splitlines()[0]
         assert player_name in state.alive_players
