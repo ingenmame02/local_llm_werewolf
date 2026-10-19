@@ -445,9 +445,11 @@ def test_seer_prompt_prioritizes_publication_of_wolf_result_and_allows_human_res
         state=state,
     ).user_prompt
 
-    assert "初回の昼議論でclaim_roleツールを使用し" in prompt
+    assert "初回の昼議論で上記の占い師CO形式を通常発言として出し" in prompt
     assert f"対象：{wolf.name}／判定：人狼" in prompt
-    assert "公開理由・投票提案" in prompt
+    assert "対象・判定・理由・投票提案を公開してください" in prompt
+    assert "文章でのCOを省略しないでください" in prompt
+    assert "占い師CO：対象=Player X、判定=人狼/人間" in prompt
 
     state.seer_results[wolf.name] = "human"
     state.seer_result_history[:] = [(1, wolf.name, "human")]
@@ -458,7 +460,7 @@ def test_seer_prompt_prioritizes_publication_of_wolf_result_and_allows_human_res
         day=1,
         state=state,
     ).user_prompt
-    assert "人間判定だけの場合は、襲撃リスクを考慮してclaim_roleツールで占い結果を公開するか" in human_result_prompt
+    assert "人間判定だけの場合は、襲撃リスクを考慮して上記の占い師CO形式で結果を公開するか" in human_result_prompt
 
 
 def test_eight_players_prompt_snapshot_inspection() -> None:

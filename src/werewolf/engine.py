@@ -22,13 +22,26 @@ _CLAIMED_ROLE_NAMES = {
 
 def extract_public_role_claim(content: str) -> str | None:
     role_pattern = "|".join(_CLAIMED_ROLE_NAMES)
-    match = re.search(
-        rf"^\s*(?:(?:私|僕|俺|自分|わたし|ぼく)(?:は|が)?\s*)?"
-        rf"({role_pattern})(?:\s*CO(?:です)?|\s*(?:です|だ|として)?)"
-        rf"(?=[。\s、,，／/]|$)",
+    match = re.match(
+        rf"^\s*(?:対抗\s*)?"
+        rf"(?:(?:私|僕|俺|自分|わたし|ぼく)(?:は|が)?\s*)?"
+        rf"(?P<role>{role_pattern})",
         content,
     )
-    return _CLAIMED_ROLE_NAMES[match.group(1)] if match is not None else None
+    if match is None:
+        return None
+
+    remainder = content[match.end() :]
+    explicit_claim = re.match(
+        r"\s*(?:CO(?:です|します)?|です|だ|として"
+        r"(?:名乗(?:る|ります|りました)|CO(?:です|します)?))"
+        r"(?=\s*[:：、,，／/。]|$|\s+(?:対象|判定|結果))",
+        remainder,
+    )
+    claim_separator = re.match(r"\s*(?:[:：、,，／/。]|$)", remainder)
+    if explicit_claim is None and claim_separator is None:
+        return None
+    return _CLAIMED_ROLE_NAMES[match.group("role")]
 
 
 def is_public_seer_claim(content: str) -> bool:
@@ -43,13 +56,17 @@ def extract_public_seer_result(
             name
             for name in sorted(player_names, key=len, reverse=True)
             if re.search(
-                rf"(?:占い)?対象\s*[：:]\s*{re.escape(name)}(?:さん)?(?:\s|[／/、。]|$)",
+                rf"(?:占い)?対象\s*[：:=＝]\s*{re.escape(name)}"
+                rf"(?:さん)?(?:\s|[／/、。,，]|$)",
                 content,
             )
         ),
         None,
     )
-    result = re.search(r"(?:判定|占い結果|結果)\s*[：:]\s*(人狼|人間)", content)
+    result = re.search(
+        r"(?:判定|占い結果|結果)\s*[：:=＝]\s*(人狼|人間)",
+        content,
+    )
     if target is None or result is None:
         return None
     return target, "wolf" if result.group(1) == "人狼" else "human"
@@ -355,9 +372,11 @@ class GameEngine:
                 previous_role=prior_role,
             )
             return
-        reason_match = re.search(r"(?:理由|根拠)\s*[：:]\s*([^。\n]+)", content)
+        reason_match = re.search(
+            r"(?:理由|根拠)\s*[：:=＝]\s*([^、,，。\n]+)", content
+        )
         vote_match = re.search(
-            r"(?:投票提案|次の提案)\s*[：:]\s*([^。\n]+)", content
+            r"(?:投票提案|次の提案)\s*[：:=＝]\s*([^。\n]+)", content
         )
         if existing is None:
             self.state.public_role_claims.append(

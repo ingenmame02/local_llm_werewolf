@@ -1,4 +1,14 @@
-from werewolf import GameEngine, GameState, MockActions, Phase, Player, Role
+import pytest
+
+from werewolf import (
+    GameEngine,
+    GameState,
+    MockActions,
+    Phase,
+    Player,
+    Role,
+)
+from werewolf.engine import extract_public_role_claim, extract_public_seer_result
 
 
 def make_state(*roles: Role, seed: int = 11) -> GameState:
@@ -212,6 +222,30 @@ def test_discussion_records_public_seer_claim_and_report_without_truth_leak() ->
     assert events[5]["target"] == "P2"
     assert events[5]["claimed_result"] == "human"
     assert all("role" not in event for event in events)
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_role"),
+    [
+        ("私は占い師", "seer"),
+        ("占い師CO：対象=Player 1、判定=人狼", "seer"),
+        ("対抗占い師CO：対象=Player 1、判定=人間", "seer"),
+        ("占い師として名乗る", "seer"),
+        ("狂人CO：理由=対抗します", "madman"),
+        ("私は村人です。", "villager"),
+    ],
+)
+def test_public_role_claim_parser_accepts_natural_language_and_template_variants(
+    content: str, expected_role: str
+) -> None:
+    assert extract_public_role_claim(content) == expected_role
+
+
+def test_structured_seer_report_parser_accepts_equals_delimiters() -> None:
+    assert extract_public_seer_result(
+        "占い師CO：対象=Player 2、判定=人狼、理由=夜の占い、投票提案=投票",
+        ("Player 1", "Player 2"),
+    ) == ("Player 2", "wolf")
 
 
 def test_text_compatible_claim_records_conflicts_without_overwriting_prior_claim() -> None:

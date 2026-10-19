@@ -896,14 +896,33 @@ class OllamaActions(ActionPolicy):
             and callable(getattr(self.client, "chat_with_metadata", None))
             else None
         )
-        response = self._chat(
-            actor,
-            messages,
-            increase_generation=increase_generation,
-            tools=tools,
-            action=action,
-            started_at=started_at,
-        )
+        try:
+            response = self._chat(
+                actor,
+                messages,
+                increase_generation=increase_generation,
+                tools=tools,
+                action=action,
+                started_at=started_at,
+            )
+        except OllamaError as error:
+            if tools is None or not self._is_tool_call_unsupported(error):
+                raise
+            self._emit(
+                "claim_tool_unavailable",
+                action,
+                actor,
+                started_at,
+                reason="model_does_not_support_tools",
+            )
+            tools = None
+            response = self._chat(
+                actor,
+                messages,
+                increase_generation=increase_generation,
+                action=action,
+                started_at=started_at,
+            )
         for _ in range(2):
             if not response.tool_calls:
                 return response
@@ -949,6 +968,22 @@ class OllamaActions(ActionPolicy):
                 thinking_present=response.thinking_present,
             )
         return response
+
+    @staticmethod
+    def _is_tool_call_unsupported(error: OllamaError) -> bool:
+        message = error.message.casefold()
+        return any(
+            marker in message
+            for marker in (
+                "does not support tools",
+                "doesn't support tools",
+                "tool calling is not supported",
+                "tool calls are not supported",
+                "tools are not supported",
+                "ツールに対応していません",
+                "ツール呼び出しに対応していません",
+            )
+        )
 
     def _handle_public_tool_call(
         self,

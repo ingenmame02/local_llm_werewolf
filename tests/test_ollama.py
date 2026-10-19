@@ -9,6 +9,7 @@ from werewolf import (
     ActionKind,
     ActionParser,
     ChatResponse,
+    GameEngine,
     GameState,
     Message,
     OllamaActions,
@@ -241,6 +242,132 @@ def make_state(seed: int = 23) -> GameState:
         ],
         seed=seed,
     )
+
+
+def test_text_claims_have_identical_public_state_with_tool_and_non_tool_clients() -> None:
+    seer_report = (
+        "占い師CO：対象=P2、判定=人狼、理由=夜の占い結果、"
+        "投票提案=P2へ投票します。"
+    )
+    counterclaim = (
+        "対抗占い師CO：対象=P2、判定=人間、理由=独自の占い結果、"
+        "投票提案=P2への投票は保留します。"
+    )
+
+    class ScriptedClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompt_by_actor: dict[str, str] = {}
+            self.counts: dict[str, int] = {}
+
+        def response_for(self, messages):
+            prompt = messages[-1]["content"]
+            actor = prompt.split("- あなたのプレイヤー名：", 1)[1].splitlines()[0]
+            self.prompt_by_actor.setdefault(actor, prompt)
+            count = self.counts.get(actor, 0)
+            self.counts[actor] = count + 1
+            if actor == "P0" and count == 0:
+                return seer_report
+            if actor == "P1" and count == 0:
+                return counterclaim
+            return "公開情報を踏まえて投票先を考えます。"
+
+        def chat(self, model, messages, options=None):
+            return self.response_for(messages)
+
+    # The metadata client returns the same ordinary text as the non-tool client.
+    class ToolCapableClient(ScriptedClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool_arguments: list[object] = []
+
+        def chat_with_metadata(self, model, messages, options=None, tools=None):
+            self.tool_arguments.append(tools)
+            content = self.response_for(messages)
+            return ChatResponse(
+                content=content,
+                attempts=1,
+                content_length=len(content),
+            )
+
+    def run_game(client):
+        state = make_state()
+        state.players[0].role = Role.SEER
+        state.players[2].role = Role.VILLAGER
+        state.seer_results["P2"] = "wolf"
+        state.seer_result_history.append((1, "P2", "wolf"))
+        GameEngine(state, OllamaActions(state, client)).run_discussion()
+        return state, client
+
+    no_tool_state, no_tool_client = run_game(ScriptedClient())
+    tool_state, tool_client = run_game(ToolCapableClient())
+
+    assert no_tool_state.public_role_claims == tool_state.public_role_claims
+    assert no_tool_state.seer_claims == tool_state.seer_claims
+    assert [
+        (claim.claimant, claim.claimed_role, claim.target, claim.result)
+        for claim in no_tool_state.public_role_claims
+    ] == [
+        ("P0", "seer", None, None),
+        ("P0", "seer", "P2", "wolf"),
+        ("P1", "seer", None, None),
+        ("P1", "seer", "P2", "human"),
+    ]
+    assert no_tool_state.public_role_claims[1].reason == "夜の占い結果"
+    assert no_tool_state.public_role_claims[1].vote_proposal == "P2へ投票します"
+    assert no_tool_state.public_role_claims[3].reason == "独自の占い結果"
+    assert no_tool_client.prompt_by_actor["P1"] == tool_client.prompt_by_actor["P1"]
+    assert no_tool_client.prompt_by_actor["P2"] == tool_client.prompt_by_actor["P2"]
+    assert "P0は占い師を主張（P2：人狼）" in no_tool_client.prompt_by_actor["P1"]
+    assert "P0は占い師を主張（P2：人狼）" in no_tool_client.prompt_by_actor["P2"]
+    assert "P1は占い師を主張（P2：人間）" in no_tool_client.prompt_by_actor["P2"]
+    assert not callable(getattr(no_tool_client, "chat_with_metadata", None))
+    assert any(tools is not None for tools in tool_client.tool_arguments)
+
+
+def test_model_rejecting_tool_calls_retries_the_same_request_as_plain_text() -> None:
+    class ToolUnsupportedClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.plain_requests = 0
+
+        def chat_with_metadata(self, model, messages, options=None, tools=None):
+            assert tools is not None
+            raise OllamaError(
+                "http",
+                "model does not support tools",
+                attempts=1,
+                status_code=400,
+            )
+
+        def chat(self, model, messages, options=None):
+            self.plain_requests += 1
+            prompt = messages[-1]["content"]
+            actor = prompt.split("- あなたのプレイヤー名：", 1)[1].splitlines()[0]
+            if actor == "P0" and self.plain_requests == 1:
+                return (
+                    "占い師CO：対象=P1、判定=人狼、理由=占い結果、"
+                    "投票提案=P1へ投票します。"
+                )
+            return "公開情報を確認して投票先を考えます。"
+
+    state = make_state()
+    state.players[0].role = Role.SEER
+    events: list[dict[str, object]] = []
+    client = ToolUnsupportedClient()
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    GameEngine(state, actions, event_callback=events.append).run_discussion()
+
+    assert any(
+        claim.claimant == "P0"
+        and claim.claimed_role == "seer"
+        and claim.target == "P1"
+        and claim.result == "wolf"
+        for claim in state.public_role_claims
+    )
+    assert client.plain_requests > 0
+    assert any(event["type"] == "claim_tool_unavailable" for event in events)
 
 
 class FakeClient:
