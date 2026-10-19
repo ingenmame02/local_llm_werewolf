@@ -51,10 +51,11 @@ def is_public_seer_claim(content: str) -> bool:
 def extract_public_seer_result(
     content: str, player_names: tuple[str, ...]
 ) -> tuple[str, str] | None:
+    names = sorted(player_names, key=len, reverse=True)
     target = next(
         (
             name
-            for name in sorted(player_names, key=len, reverse=True)
+            for name in names
             if re.search(
                 rf"(?:占い)?対象\s*[：:=＝]\s*{re.escape(name)}"
                 rf"(?:さん)?(?:\s|[／/、。,，]|$)",
@@ -67,9 +68,19 @@ def extract_public_seer_result(
         r"(?:判定|占い結果|結果)\s*[：:=＝]\s*(人狼|人間)",
         content,
     )
-    if target is None or result is None:
-        return None
-    return target, "wolf" if result.group(1) == "人狼" else "human"
+    if target is not None and result is not None:
+        return target, "wolf" if result.group(1) == "人狼" else "human"
+
+    for name in names:
+        natural_result = re.search(
+            rf"{re.escape(name)}(?:さん)?\s*(?:は|が)\s*"
+            rf"(?:(?:占い結果|判定)で\s*)?(人狼|人間)"
+            rf"(?:と(?:判定(?:された|です|でした)?)?)?",
+            content,
+        )
+        if natural_result is not None:
+            return name, "wolf" if natural_result.group(1) == "人狼" else "human"
+    return None
 
 
 class ActionPolicy(Protocol):

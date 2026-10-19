@@ -501,6 +501,15 @@ class OllamaActions(ActionPolicy):
                     else "empty_content"
                 )
             last_response_issue = response_issue
+            if response_issue == "seer_result_without_claim":
+                self._emit(
+                    "seer_result_claim_missing",
+                    action,
+                    actor,
+                    started_at,
+                    reason=response_issue,
+                    will_retry=attempt == 0,
+                )
             if response_text and response_issue is None and (
                 not must_use_seer_info or (not is_pass and uses_seer_info)
             ):
@@ -556,10 +565,22 @@ class OllamaActions(ActionPolicy):
         forced_seer_message = (
             self._seer_info_fallback(actor)
             if self._must_use_seer_info(action, actor)
+            or (
+                action == "discussion"
+                and "seer_result_without_claim" in failure_reasons
+            )
             else None
         )
         if forced_seer_message is not None:
             self._seer_info_used_day[actor.name] = self.state.day
+            if "seer_result_without_claim" in failure_reasons:
+                self._emit(
+                    "seer_result_claim_fallback",
+                    action,
+                    actor,
+                    started_at,
+                    reason="seer_result_without_claim",
+                )
         fallback_response = forced_seer_message or "パス"
         self.traces.append(
             ActionTrace(
@@ -654,12 +675,13 @@ class OllamaActions(ActionPolicy):
         target, result = self._latest_seer_result()
         if result == "wolf":
             return (
-                f"占い師CO。対象：{target}／判定：人狼／根拠：実際の占い結果です。"
-                f"次の提案：{target}に投票することを提案します。"
+                f"占い師CO：対象={target}、判定=人狼、"
+                f"理由=実際の占い結果です、投票提案={target}に投票します。"
             )
         return (
-            f"対象：{target}さん／判定：人間／根拠：占い結果を踏まえると、"
-            f"{target}さんは人間でした。次の提案：その人への疑いを弱め、別の可能性を慎重に考えたいです。"
+            f"占い師CO：対象={target}、判定=人間、"
+            f"理由=実際の占い結果を踏まえ、その人への疑いを弱めます、"
+            "投票提案=別の可能性を慎重に考えます。"
         )
 
     def _discussion_retry_instruction(
@@ -681,6 +703,7 @@ class OllamaActions(ActionPolicy):
             "repeated_speech": "過去の自分の発言を繰り返さず、新しい根拠か提案を加えてください。",
             "question_not_answered_first": "最初の一文で直前の発言者へ直接回答してください。",
             "wolf_result_not_disclosed": "真占い師として占い師COを行い、未公開の人狼判定を対象・判定・理由・投票提案とともに公開してください。",
+            "seer_result_without_claim": "占い結果の対象や判定を発言したため、同じ発言内で明示的に占い師COしてください。定型文「占い師CO：対象=対象名、判定=人狼/人間、理由=理由、投票提案=提案」を使ってください。結果を公開しない場合は対象名と判定を述べず、結果を伏せた発言にしてください。",
             "inconsistent_seer_result": "あなた自身が以前に主張した占い対象の判定を変更せず、過去の主張と一貫させてください。",
             "inconsistent_role_claim": "以前の役職主張を別の役職へ変更せず、一貫させてください。",
         }
@@ -753,6 +776,18 @@ class OllamaActions(ActionPolicy):
                 for claim in self.state.public_role_claims
             ):
                 return "inconsistent_seer_result"
+            if (
+                actor.role is Role.SEER
+                and self.state.seer_results.get(target) == result
+                and not is_public_seer_claim(response)
+                and not any(
+                    claim.claimant == actor.name
+                    and claim.target == target
+                    and claim.result == result
+                    for claim in self.state.seer_claims
+                )
+            ):
+                return "seer_result_without_claim"
         if actor.role is Role.SEER:
             unpublished_wolf_results = [
                 target

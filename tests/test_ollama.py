@@ -853,10 +853,9 @@ def test_seer_forced_result_fallback_when_retry_does_not_use_result() -> None:
 
     response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
 
-    assert "P1さんは人間でした" in response
-    assert "占い結果を踏まえると" in response
-    assert "対象：P1さん／判定：人間／根拠：" in response
-    assert "次の提案：" in response
+    assert response.startswith("占い師CO：対象=P1、判定=人間")
+    assert "理由=実際の占い結果" in response
+    assert "投票提案=" in response
     assert "新情報か具体的な投票方針を必ず加えてください" in client.prompts[0]
     assert len(client.prompts) == 2
     assert actions.traces[-1].fallback_used is True
@@ -870,10 +869,95 @@ def test_seer_wolf_result_fallback_is_a_structured_public_report() -> None:
 
     response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
 
-    assert response.startswith("占い師CO。対象：P1／判定：人狼")
-    assert "根拠：" in response
-    assert "次の提案：" in response
+    assert response.startswith("占い師CO：対象=P1、判定=人狼")
+    assert "理由=" in response
+    assert "投票提案=" in response
     assert actions.traces[-1].fallback_used is True
+
+
+@pytest.mark.parametrize(
+    ("result", "spoken_result"),
+    [("human", "人間"), ("wolf", "人狼")],
+)
+def test_seer_result_without_claim_is_reprompted_and_explicit_claim_is_accepted(
+    result: str, spoken_result: str
+) -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P2"] = result
+    state.seer_result_history.append((1, "P2", result))
+    client = FakeClient(
+        f"P2は{spoken_result}と判定された。",
+        f"占い師CO：対象=P2、判定={spoken_result}、"
+        "理由=夜の占い結果、投票提案=P2への投票を提案します。",
+    )
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response.startswith("占い師CO：対象=P2")
+    assert len(client.prompts) == 2
+    assert "同じ発言内で明示的に占い師COしてください" in client.prompts[1]
+    assert actions.traces[-1].fallback_used is False
+    assert [
+        event["will_retry"]
+        for event in events
+        if event["type"] == "seer_result_claim_missing"
+    ] == [True]
+
+
+def test_missing_seer_claim_falls_back_and_is_published_to_next_player() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P2"] = "human"
+    state.seer_result_history.append((1, "P2", "human"))
+    client = FakeClient(
+        "P2は人間と判定された。",
+        "P2は人間と判定された。",
+        "状況を確認します。",
+        "発言を見て投票先を考えます。",
+        "P2への占い結果を踏まえ、別の発言も確認したいです。",
+        "引き続き状況を確認します。",
+        "投票先を考えます。",
+        "ほかの発言も見たいです。",
+        "今日は全体を見て判断します。",
+        "ほかの意見も確認します。",
+        "投票先を改めて考えます。",
+        "議論を続けましょう。",
+    )
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+    GameEngine(state, actions, event_callback=events.append).run_discussion()
+
+    seer_claim = next(
+        claim
+        for claim in state.public_role_claims
+        if claim.claimant == "P0" and claim.target == "P2"
+    )
+    assert (seer_claim.claimed_role, seer_claim.result) == ("seer", "human")
+    assert "P0は占い師を主張（P2：人間）" in client.prompts[2]
+    assert [
+        event["will_retry"]
+        for event in events
+        if event["type"] == "seer_result_claim_missing"
+    ] == [True, False]
+    assert any(event["type"] == "seer_result_claim_fallback" for event in events)
+    assert actions.traces[0].fallback_used is True
+
+
+def test_seer_can_use_result_without_publicly_disclosing_it() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P2"] = "human"
+    client = FakeClient("P2への疑いは弱め、別の発言を確認したいです。")
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "P2への疑いは弱め、別の発言を確認したいです。"
+    assert len(client.prompts) == 1
+    assert actions.traces[-1].fallback_used is False
 
 
 def test_seer_retries_until_unpublished_wolf_result_is_publicly_reported() -> None:

@@ -246,6 +246,10 @@ def test_structured_seer_report_parser_accepts_equals_delimiters() -> None:
         "占い師CO：対象=Player 2、判定=人狼、理由=夜の占い、投票提案=投票",
         ("Player 1", "Player 2"),
     ) == ("Player 2", "wolf")
+    assert extract_public_seer_result(
+        "Player 2が人間と判定された。",
+        ("Player 1", "Player 2"),
+    ) == ("Player 2", "human")
 
 
 def test_text_compatible_claim_records_conflicts_without_overwriting_prior_claim() -> None:
