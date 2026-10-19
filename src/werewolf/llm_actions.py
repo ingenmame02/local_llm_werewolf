@@ -1,6 +1,7 @@
 import random
 import re
 import time
+import json
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Callable
@@ -8,11 +9,12 @@ from typing import Callable
 from .action_parser import ActionKind, ActionParser
 from .engine import (
     ActionPolicy,
+    extract_public_role_claim,
     extract_public_seer_result,
     is_public_seer_claim,
 )
-from .models import GameState, Message, Player, Role
-from .ollama import ChatResponse, OllamaClient, OllamaError
+from .models import GameState, Message, Player, PublicRoleClaim, PublicSeerClaim, Role
+from .ollama import CLAIM_ROLE_TOOL, ChatResponse, OllamaClient, OllamaError, ToolCall
 from .prompts import PromptBuilder, PromptContext
 
 _THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
@@ -427,14 +429,16 @@ class OllamaActions(ActionPolicy):
                 {"role": "user", "content": user_prompt},
             ]
             try:
-                chat_response = self._chat(
+                chat_response = self._chat_with_claim_tools(
                     actor,
                     messages,
+                    action,
                     increase_generation=(
                         attempt == 1
                         and last_response_issue
                         in {"empty_content", "thinking_only_response", "generation_truncated"}
                     ),
+                    started_at=started_at,
                 )
             except OllamaError as error:
                 last_error = error
@@ -618,6 +622,13 @@ class OllamaActions(ActionPolicy):
         ):
             return False
         latest_target, _ = self._latest_seer_result()
+        if any(
+            claim.claimant == actor.name
+            and claim.claimed_role == Role.SEER.value
+            and claim.target == latest_target
+            for claim in self.state.public_role_claims
+        ):
+            return True
         mentions_result_target = latest_target in response
         usage_terms = (
             "占い",
@@ -671,6 +682,7 @@ class OllamaActions(ActionPolicy):
             "question_not_answered_first": "最初の一文で直前の発言者へ直接回答してください。",
             "wolf_result_not_disclosed": "真占い師として占い師COを行い、未公開の人狼判定を対象・判定・理由・投票提案とともに公開してください。",
             "inconsistent_seer_result": "あなた自身が以前に主張した占い対象の判定を変更せず、過去の主張と一貫させてください。",
+            "inconsistent_role_claim": "以前の役職主張を別の役職へ変更せず、一貫させてください。",
         }
         if response_issue in retry_guidance:
             return f"\n前回の応答を採用できませんでした。{retry_guidance[response_issue]}"
@@ -711,6 +723,16 @@ class OllamaActions(ActionPolicy):
         known_players = {player.name for player in self.state.players}
         if any(name not in known_players for name in mentioned_players):
             return "unknown_player_reference"
+        claimed_role = extract_public_role_claim(response)
+        public_claims = [
+            claim
+            for claim in self.state.public_role_claims
+            if claim.claimant == actor.name
+        ]
+        if claimed_role is not None and any(
+            claim.claimed_role != claimed_role for claim in public_claims
+        ):
+            return "inconsistent_role_claim"
         public_result = extract_public_seer_result(
             response, tuple(known_players)
         )
@@ -722,6 +744,13 @@ class OllamaActions(ActionPolicy):
                 and claim.result is not None
                 and claim.result != result
                 for claim in self.state.seer_claims
+            ) or any(
+                claim.claimant == actor.name
+                and claim.claimed_role == Role.SEER.value
+                and claim.target == target
+                and claim.result is not None
+                and claim.result != result
+                for claim in self.state.public_role_claims
             ):
                 return "inconsistent_seer_result"
         if actor.role is Role.SEER:
@@ -837,18 +866,293 @@ class OllamaActions(ActionPolicy):
         return next(reversed(self.state.seer_results.items()))
 
     def _options_for(self, actor: Player) -> dict[str, object] | None:
-        options = dict(self.options) if self.options is not None else {}
+        options = (
+            {
+                key: value
+                for key, value in self.options.items()
+                if value is not None
+            }
+            if self.options is not None
+            else {}
+        )
         if actor.num_ctx is not None:
             options["num_ctx"] = actor.num_ctx
         if actor.num_predict is not None:
             options["num_predict"] = actor.num_predict
         return options or None
 
+    def _chat_with_claim_tools(
+        self,
+        actor: Player,
+        messages: list[dict[str, object]],
+        action: str,
+        *,
+        increase_generation: bool,
+        started_at: float,
+    ) -> ChatResponse:
+        tools = (
+            [CLAIM_ROLE_TOOL]
+            if action == "discussion"
+            and callable(getattr(self.client, "chat_with_metadata", None))
+            else None
+        )
+        response = self._chat(
+            actor,
+            messages,
+            increase_generation=increase_generation,
+            tools=tools,
+            action=action,
+            started_at=started_at,
+        )
+        for _ in range(2):
+            if not response.tool_calls:
+                return response
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content,
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                        }
+                        for call in response.tool_calls
+                    ],
+                }
+            )
+            for call in response.tool_calls:
+                result = self._handle_public_tool_call(
+                    actor, call, action, started_at
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_name": call.name,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    }
+                )
+            response = self._chat(
+                actor,
+                messages,
+                tools=tools,
+                action=action,
+                started_at=started_at,
+            )
+        if response.tool_calls:
+            return ChatResponse(
+                content="",
+                attempts=response.attempts,
+                done_reason=response.done_reason,
+                content_length=0,
+                thinking_present=response.thinking_present,
+            )
+        return response
+
+    def _handle_public_tool_call(
+        self,
+        actor: Player,
+        call: ToolCall,
+        action: str,
+        started_at: float,
+    ) -> dict[str, str]:
+        if call.name != "claim_role":
+            return {
+                "status": "rejected",
+                "message": "この公開ツールは利用できません。",
+            }
+        if action != "discussion" or not actor.is_alive:
+            self._emit(
+                "claim_role_rejected",
+                action,
+                actor,
+                started_at,
+                rejection_reason=(
+                    "dead_player" if not actor.is_alive else "invalid_phase"
+                ),
+            )
+            return {
+                "status": "rejected",
+                "message": "現在のフェーズでは主張を公開できません。",
+            }
+
+        def reject(message: str, reason: str) -> dict[str, str]:
+            self._emit(
+                "claim_role_rejected",
+                action,
+                actor,
+                started_at,
+                rejection_reason=reason,
+            )
+            return {"status": "rejected", "message": message}
+
+        args = call.arguments
+        role = args.get("role")
+        if not isinstance(role, str) or role not in {item.value for item in Role}:
+            return reject("roleの指定が不正です。", "invalid_role")
+        target = args.get("target")
+        result = args.get("result")
+        reason = args.get("reason")
+        vote_proposal = args.get("vote_proposal")
+        for field_name, value, max_length in (
+            ("target", target, 128),
+            ("reason", reason, 500),
+            ("vote_proposal", vote_proposal, 300),
+        ):
+            if value is not None and (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > max_length
+            ):
+                return reject(
+                    f"{field_name}の指定が不正です。",
+                    f"invalid_{field_name}",
+                )
+        if result is not None and (
+            not isinstance(result, str) or result not in {"wolf", "human"}
+        ):
+            return reject("resultの指定が不正です。", "invalid_result")
+        if role == Role.SEER.value:
+            if (target is None) != (result is None):
+                return reject(
+                    "占い結果にはtargetとresultの両方が必要です。",
+                    "incomplete_seer_result",
+                )
+            if target is not None and target not in {
+                player.name for player in self.state.players
+            }:
+                return reject(
+                    "対象プレイヤーが存在しません。",
+                    "unknown_target",
+                )
+        elif target is not None or result is not None:
+            return reject(
+                "占い結果は占い師主張でのみ公開できます。",
+                "non_seer_result",
+            )
+
+        existing_claims = [
+            claim
+            for claim in self.state.public_role_claims
+            if claim.claimant == actor.name
+        ]
+        previous_seer_claims = [
+            claim
+            for claim in self.state.seer_claims
+            if claim.claimant == actor.name
+        ]
+        prior_role = next(
+            (
+                claim.claimed_role
+                for claim in existing_claims
+            ),
+            Role.SEER.value if previous_seer_claims else None,
+        )
+        if prior_role is not None and prior_role != role:
+            return reject(
+                "以前の役職主張と矛盾しています。",
+                "inconsistent_role_claim",
+            )
+        previous_result = next(
+            (
+                claim.result
+                for claim in [*existing_claims, *previous_seer_claims]
+                if role == Role.SEER.value
+                and claim.target == target
+                and claim.result is not None
+            ),
+            None,
+        )
+        if previous_result is not None and previous_result != result:
+            return reject(
+                "以前の占い結果主張と矛盾しています。",
+                "inconsistent_seer_result",
+            )
+        duplicate = next(
+            (
+                claim
+                for claim in existing_claims
+                if claim.claimed_role == role
+                and claim.target == target
+                and claim.result == result
+            ),
+            None,
+        )
+        if duplicate is not None or (
+            role == Role.SEER.value
+            and target is not None
+            and any(
+                claim.target == target and claim.result == result
+                for claim in previous_seer_claims
+            )
+        ):
+            self._emit(
+                "claim_role_rejected",
+                action,
+                actor,
+                started_at,
+                rejection_reason="duplicate_claim",
+            )
+            return {
+                "status": "already_published",
+                "message": "同一の公開主張はすでに記録されています。",
+            }
+
+        self.state.public_role_claims.append(
+            PublicRoleClaim(
+                day=self.state.day,
+                claimant=actor.name,
+                claimed_role=role,
+                target=target,
+                result=result,
+                reason=reason.strip() if isinstance(reason, str) else None,
+                vote_proposal=(
+                    vote_proposal.strip()
+                    if isinstance(vote_proposal, str)
+                    else None
+                ),
+            )
+        )
+        if role == Role.SEER.value:
+            if not previous_seer_claims:
+                self.state.seer_claims.append(
+                    PublicSeerClaim(day=self.state.day, claimant=actor.name)
+                )
+            if target is not None and result is not None:
+                self.state.seer_claims.append(
+                    PublicSeerClaim(
+                        day=self.state.day,
+                        claimant=actor.name,
+                        target=target,
+                        result=result,
+                    )
+                )
+        self._emit(
+            "claim_role_published",
+            action,
+            actor,
+            started_at,
+            claimed_role=role,
+            target=target,
+            claimed_result=result,
+            reason=reason,
+            vote_proposal=vote_proposal,
+            source="tool",
+        )
+        return {
+            "status": "published",
+            "message": "公開主張を記録しました。",
+        }
+
     def _chat(
         self,
         actor: Player,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         increase_generation: bool = False,
+        tools: list[dict[str, object]] | None = None,
+        action: str | None = None,
+        started_at: float | None = None,
     ) -> ChatResponse:
         options = self._options_for(actor)
         if increase_generation:
@@ -857,11 +1161,50 @@ class OllamaActions(ActionPolicy):
                 options = dict(options or {})
                 options["num_predict"] = max(current_limit, min(current_limit * 2, 8192))
         original_timeout = getattr(self.client, "timeout", None)
+        effective_timeout = (
+            actor.timeout
+            if actor.timeout is not None
+            else original_timeout
+        )
         if original_timeout is not None and actor.timeout is not None:
             self.client.timeout = actor.timeout
+        if (
+            action is not None
+            and started_at is not None
+            and callable(getattr(self.client, "context_diagnostics", None))
+        ):
+            context_diagnostics = self.client.context_diagnostics(actor.model)
+            requested_num_ctx = options.get("num_ctx") if options else None
+            if actor.num_ctx is not None:
+                num_ctx_source = "player_setting"
+            elif self.options is not None and self.options.get("num_ctx") is not None:
+                num_ctx_source = "cli_setting"
+            elif requested_num_ctx is not None:
+                num_ctx_source = "api_request"
+            else:
+                num_ctx_source = "ollama_service_default_or_environment"
+            self._emit(
+                "llm_request_configuration",
+                action,
+                actor,
+                started_at,
+                request_options=options or {},
+                request_timeout_seconds=effective_timeout,
+                num_ctx_source=num_ctx_source,
+                context_diagnostics=context_diagnostics,
+            )
         try:
             if hasattr(self.client, "_last_chat_response"):
                 delattr(self.client, "_last_chat_response")
+            if tools is not None and callable(
+                getattr(self.client, "chat_with_metadata", None)
+            ):
+                return self.client.chat_with_metadata(
+                    actor.model,
+                    messages,
+                    options=options,
+                    tools=tools,
+                )
             if options is not None:
                 content = self.client.chat(actor.model, messages, options=options)
             else:

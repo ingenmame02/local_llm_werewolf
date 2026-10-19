@@ -1,5 +1,6 @@
 import json
 from io import BytesIO
+from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from werewolf import (
     ActionKind,
     ActionParser,
+    ChatResponse,
     GameState,
     Message,
     OllamaActions,
@@ -15,6 +17,7 @@ from werewolf import (
     Player,
     PublicSeerClaim,
     Role,
+    ToolCall,
 )
 
 
@@ -152,6 +155,82 @@ def test_client_chat_with_metadata_tracks_completion_and_thinking_fields() -> No
     }
 
 
+def test_client_sends_claim_tool_and_parses_tool_calls() -> None:
+    received: dict[str, object] = {}
+
+    def transport(request, timeout):
+        received["body"] = json.loads(request.data)
+        return json.dumps(
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "claim_role",
+                                "arguments": {
+                                    "role": "seer",
+                                    "target": "P1",
+                                    "result": "wolf",
+                                },
+                            },
+                        }
+                    ],
+                },
+                "done_reason": "stop",
+            }
+        ).encode("utf-8")
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "claim_role",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    response = OllamaClient(transport=transport).chat_with_metadata(
+        "model-x",
+        [{"role": "user", "content": "公開CO"}],
+        tools=tools,
+    )
+
+    assert received["body"]["tools"] == tools
+    assert response.tool_calls == (
+        ToolCall(
+            name="claim_role",
+            arguments={"role": "seer", "target": "P1", "result": "wolf"},
+            call_id="call-1",
+        ),
+    )
+
+
+def test_context_diagnostics_parse_ollama_ps_and_report_process_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "12288")
+    monkeypatch.setattr(
+        "werewolf.ollama.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "NAME              ID              SIZE      PROCESSOR    CONTEXT    UNTIL\n"
+                "model-x:latest    abc123          4.7 GB    100% GPU     8192       4 minutes from now\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    diagnostics = OllamaClient().context_diagnostics("model-x")
+
+    assert diagnostics["process_ollama_context_length_env"] == "12288"
+    assert diagnostics["ollama_ps_context"] == 8192
+    assert diagnostics["ollama_ps_error"] is None
+
+
+
 
 def make_state(seed: int = 23) -> GameState:
     return GameState(
@@ -184,6 +263,161 @@ class FakeClient:
         if isinstance(response, OllamaError):
             raise response
         return response
+
+
+@pytest.mark.parametrize("role", list(Role))
+def test_all_roles_can_publish_claims_without_revealing_true_role(role) -> None:
+    class ToolClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.responses = [
+                ChatResponse(
+                    content="",
+                    attempts=1,
+                    tool_calls=(
+                        ToolCall(
+                            "claim_role",
+                            {"role": "villager", "reason": "公開情報を整理"},
+                        ),
+                    ),
+                ),
+                ChatResponse(
+                    content="今日は発言を確認して投票先を考えます。",
+                    attempts=1,
+                ),
+            ]
+            self.requests: list[tuple[list[dict[str, object]], object]] = []
+
+        def chat_with_metadata(self, model, messages, options=None, tools=None):
+            self.requests.append((list(messages), tools))
+            self.prompts.append(messages[-1]["content"])
+            return self.responses.pop(0)
+
+    state = make_state()
+    state.players[0].role = role
+    client = ToolClient()
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    assert actions.discuss("P0", 1, tuple(state.alive_players), ()) == (
+        "今日は発言を確認して投票先を考えます。"
+    )
+    assert state.public_role_claims[0].claimant == "P0"
+    assert state.public_role_claims[0].claimed_role == "villager"
+    assert client.requests[0][1] is not None
+    assert client.requests[1][1] is not None
+    tool_result = json.loads(client.requests[1][0][-1]["content"])
+    assert tool_result == {
+        "status": "published",
+        "message": "公開主張を記録しました。",
+    }
+    assert "role" not in tool_result
+    assert [event["type"] for event in events if "claim_role" in event["type"]] == [
+        "claim_role_published"
+    ]
+    assert all(
+        "role" not in event
+        for event in events
+        if event["type"] == "claim_role_published"
+    )
+
+
+def test_claim_tool_rejects_conflicting_and_duplicate_public_claims() -> None:
+    class ToolClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.responses = [
+                ChatResponse(
+                    content="",
+                    attempts=1,
+                    tool_calls=(
+                        ToolCall(
+                            "claim_role",
+                            {
+                                "role": "seer",
+                                "target": "P1",
+                                "result": "wolf",
+                                "reason": "占い結果",
+                                "vote_proposal": "P1に投票",
+                            },
+                        ),
+                    ),
+                ),
+                ChatResponse(content="考えを整理します。", attempts=1),
+                ChatResponse(
+                    content="",
+                    attempts=1,
+                    tool_calls=(
+                        ToolCall(
+                            "claim_role",
+                            {
+                                "role": "seer",
+                                "target": "P1",
+                                "result": "human",
+                            },
+                        ),
+                    ),
+                ),
+                ChatResponse(content="今日は投票先を考えます。", attempts=1),
+                ChatResponse(
+                    content="",
+                    attempts=1,
+                    tool_calls=(
+                        ToolCall(
+                            "claim_role",
+                            {
+                                "role": "seer",
+                                "target": "P1",
+                                "result": "wolf",
+                            },
+                        ),
+                    ),
+                ),
+                ChatResponse(content="もう一度状況を確認します。", attempts=1),
+            ]
+
+        def chat_with_metadata(self, model, messages, options=None, tools=None):
+            self.prompts.append(messages[-1]["content"])
+            return self.responses.pop(0)
+
+    state = make_state()
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, ToolClient(), event_callback=events.append)
+
+    actions.discuss("P0", 1, tuple(state.alive_players), ())
+    assert len(state.public_role_claims) == 1
+    assert state.public_role_claims[0].reason == "占い結果"
+    assert state.public_role_claims[0].vote_proposal == "P1に投票"
+    actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert len(state.public_role_claims) == 1
+    assert any(
+        event["type"] == "claim_role_rejected"
+        and event["rejection_reason"] == "inconsistent_seer_result"
+        for event in events
+    )
+    actions.discuss("P0", 1, tuple(state.alive_players), ())
+    assert sum(
+        event.get("rejection_reason") == "duplicate_claim" for event in events
+    ) == 1
+
+
+def test_dead_player_cannot_publish_a_role_claim() -> None:
+    state = make_state()
+    state.mark_dead("P0")
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, FakeClient(), event_callback=events.append)
+
+    result = actions._handle_public_tool_call(
+        state.players[0],
+        ToolCall("claim_role", {"role": "seer"}),
+        "discussion",
+        0.0,
+    )
+
+    assert result["status"] == "rejected"
+    assert state.public_role_claims == []
+    assert events[0]["rejection_reason"] == "dead_player"
 
 
 def test_invalid_response_is_reprompted_then_validated_before_return() -> None:
@@ -600,6 +834,105 @@ def test_model_specific_num_ctx_overrides_global_context_option() -> None:
     assert client.options == [
         {"temperature": 0.4, "num_ctx": 16384, "num_predict": 192}
     ]
+
+
+def test_request_configuration_records_effective_options_and_timeout() -> None:
+    class DiagnosticClient(FakeClient):
+        timeout = 30.0
+
+        def context_diagnostics(self, model):
+            return {
+                "process_ollama_context_length_env": "12288",
+                "ollama_ps_context": 8192,
+                "ollama_ps_error": None,
+            }
+
+    state = make_state()
+    state.players[0].num_ctx = 16384
+    state.players[0].num_predict = 192
+    state.players[0].timeout = 7.5
+    client = DiagnosticClient("議論を続けましょう。")
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(
+        state,
+        client,
+        options={"temperature": 0.4, "num_ctx": 4096, "num_predict": 512},
+        event_callback=events.append,
+    )
+
+    actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    configuration = next(
+        event for event in events if event["type"] == "llm_request_configuration"
+    )
+    assert configuration["request_options"] == {
+        "temperature": 0.4,
+        "num_ctx": 16384,
+        "num_predict": 192,
+    }
+    assert configuration["request_timeout_seconds"] == 7.5
+    assert configuration["num_ctx_source"] == "player_setting"
+    assert configuration["context_diagnostics"]["ollama_ps_context"] == 8192
+    assert configuration["context_diagnostics"][
+        "process_ollama_context_length_env"
+    ] == "12288"
+    assert client.options == [configuration["request_options"]]
+    assert client.timeouts == [7.5]
+
+
+def test_unset_context_is_not_sent_even_when_process_environment_is_set() -> None:
+    class DiagnosticClient(FakeClient):
+        def context_diagnostics(self, model):
+            return {
+                "process_ollama_context_length_env": "12288",
+                "ollama_ps_context": 8192,
+                "ollama_ps_error": None,
+            }
+
+    events: list[dict[str, object]] = []
+    client = DiagnosticClient("発言します。")
+    actions = OllamaActions(
+        make_state(),
+        client,
+        event_callback=events.append,
+    )
+
+    actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    configuration = next(
+        event for event in events if event["type"] == "llm_request_configuration"
+    )
+    assert "num_ctx" not in configuration["request_options"]
+    assert configuration["num_ctx_source"] == "ollama_service_default_or_environment"
+    assert configuration["context_diagnostics"][
+        "process_ollama_context_length_env"
+    ] == "12288"
+
+
+def test_global_context_option_is_reported_as_cli_setting() -> None:
+    class DiagnosticClient(FakeClient):
+        def context_diagnostics(self, model):
+            return {
+                "process_ollama_context_length_env": None,
+                "ollama_ps_context": 4096,
+                "ollama_ps_error": None,
+            }
+
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(
+        make_state(),
+        DiagnosticClient("議論を続けます。"),
+        options={"num_ctx": 4096, "num_predict": 128},
+        event_callback=events.append,
+    )
+
+    actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    configuration = next(
+        event for event in events if event["type"] == "llm_request_configuration"
+    )
+    assert configuration["request_options"]["num_ctx"] == 4096
+    assert configuration["num_ctx_source"] == "cli_setting"
 
 
 def test_english_discussion_is_reprompted_and_japanese_answer_is_kept() -> None:

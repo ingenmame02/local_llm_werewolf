@@ -17,7 +17,7 @@ def test_loads_all_eight_models_from_configuration() -> None:
         "mistral-small:24b-262000",
         "glm-4.7-flash:latest",
         "qwen3.8:27b",
-        "deepseek-r1:32b-262000",
+        "deepseek-r1:32b",
         "gpt-oss-20b-262000:latest",
         "gemma4:26b",
     ]

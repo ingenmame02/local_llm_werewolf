@@ -8,6 +8,7 @@ from werewolf import (
     Player,
     PromptBuilder,
     PromptContext,
+    PublicRoleClaim,
     PublicSeerClaim,
     ROLE_DESCRIPTIONS_JA,
     ROLE_NAMES_JA,
@@ -444,10 +445,9 @@ def test_seer_prompt_prioritizes_publication_of_wolf_result_and_allows_human_res
         state=state,
     ).user_prompt
 
-    assert "初回の昼議論で占い師COを行い" in prompt
-    assert f"対象：{wolf.name}" in prompt
-    assert "判定：人狼" in prompt
-    assert "次の提案" in prompt
+    assert "初回の昼議論でclaim_roleツールを使用し" in prompt
+    assert f"対象：{wolf.name}／判定：人狼" in prompt
+    assert "公開理由・投票提案" in prompt
 
     state.seer_results[wolf.name] = "human"
     state.seer_result_history[:] = [(1, wolf.name, "human")]
@@ -458,7 +458,7 @@ def test_seer_prompt_prioritizes_publication_of_wolf_result_and_allows_human_res
         day=1,
         state=state,
     ).user_prompt
-    assert "襲撃リスクを考慮して占い結果を公開または保留" in human_result_prompt
+    assert "人間判定だけの場合は、襲撃リスクを考慮してclaim_roleツールで占い結果を公開するか" in human_result_prompt
 
 
 def test_eight_players_prompt_snapshot_inspection() -> None:
@@ -516,3 +516,31 @@ def test_eight_players_prompt_snapshot_inspection() -> None:
         assert "- 既知の死亡者：なし" in user_msg
         assert "- 最新の投票結果：なし" in user_msg
         assert "確定事実として扱わないでください" in user_msg
+
+
+def test_public_role_claim_details_are_immediately_available_to_discussion() -> None:
+    state = create_game(seed=42)
+    state.public_role_claims.append(
+        PublicRoleClaim(
+            day=1,
+            claimant="Player 1",
+            claimed_role=Role.SEER.value,
+            target="Player 2",
+            result="wolf",
+            reason="夜の占い結果",
+            vote_proposal="Player 2へ投票",
+        )
+    )
+
+    prompt = PromptBuilder.build_discussion_prompt(
+        actor=state.players[1],
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        state=state,
+    ).user_prompt
+
+    assert "Player 1は占い師を主張" in prompt
+    assert "Player 2：人狼" in prompt
+    assert "理由：夜の占い結果" in prompt
+    assert "投票提案：Player 2へ投票" in prompt
+    assert "真役職の確定を意味しません" in prompt

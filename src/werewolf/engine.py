@@ -2,17 +2,37 @@ import random
 import re
 from typing import Callable, Protocol
 
-from .models import GameState, Message, Phase, Player, PublicSeerClaim, Role
+from .models import (
+    GameState,
+    Message,
+    Phase,
+    Player,
+    PublicRoleClaim,
+    PublicSeerClaim,
+    Role,
+)
+
+_CLAIMED_ROLE_NAMES = {
+    "占い師": "seer",
+    "人狼": "wolf",
+    "狂人": "madman",
+    "村人": "villager",
+}
+
+
+def extract_public_role_claim(content: str) -> str | None:
+    role_pattern = "|".join(_CLAIMED_ROLE_NAMES)
+    match = re.search(
+        rf"^\s*(?:(?:私|僕|俺|自分|わたし|ぼく)(?:は|が)?\s*)?"
+        rf"({role_pattern})(?:\s*CO(?:です)?|\s*(?:です|だ|として)?)"
+        rf"(?=[。\s、,，／/]|$)",
+        content,
+    )
+    return _CLAIMED_ROLE_NAMES[match.group(1)] if match is not None else None
 
 
 def is_public_seer_claim(content: str) -> bool:
-    return bool(
-        re.search(
-            r"^\s*(?:(?:私|僕|俺|自分|わたし|ぼく)(?:は|が)?\s*)?"
-            r"占い師(?:\s*CO(?:です)?|です|だ|として)(?:[。\s、]|$)",
-            content,
-        )
-    )
+    return extract_public_role_claim(content) == Role.SEER.value
 
 
 def extract_public_seer_result(
@@ -198,7 +218,7 @@ class GameEngine:
                     tuple(self.state.conversation_log),
                 )
                 self.state.conversation_log.append(Message(player.name, content))
-                self._record_public_seer_claim(player.name, content)
+                self._record_public_role_claim(player.name, content)
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:
@@ -300,13 +320,70 @@ class GameEngine:
                 )
         return self.state.winner
 
-    def _record_public_seer_claim(self, speaker: str, content: str) -> None:
+    def _record_public_role_claim(self, speaker: str, content: str) -> None:
+        claimed_role = extract_public_role_claim(content)
+        if claimed_role is None:
+            return
+
         names = tuple(player.name for player in self.state.players)
-        is_claim = is_public_seer_claim(content)
+        existing = next(
+            (
+                claim
+                for claim in self.state.public_role_claims
+                if claim.claimant == speaker and claim.claimed_role == claimed_role
+            ),
+            None,
+        )
+        prior_role = next(
+            (
+                claim.claimed_role
+                for claim in self.state.public_role_claims
+                if claim.claimant == speaker
+            ),
+            (
+                Role.SEER.value
+                if any(claim.claimant == speaker for claim in self.state.seer_claims)
+                else None
+            ),
+        )
+        if prior_role is not None and prior_role != claimed_role:
+            self._emit_public_claim(
+                "claim_role_conflict",
+                day=self.state.day,
+                claimant=speaker,
+                claimed_role=claimed_role,
+                previous_role=prior_role,
+            )
+            return
+        reason_match = re.search(r"(?:理由|根拠)\s*[：:]\s*([^。\n]+)", content)
+        vote_match = re.search(
+            r"(?:投票提案|次の提案)\s*[：:]\s*([^。\n]+)", content
+        )
+        if existing is None:
+            self.state.public_role_claims.append(
+                PublicRoleClaim(
+                    day=self.state.day,
+                    claimant=speaker,
+                    claimed_role=claimed_role,
+                    reason=reason_match.group(1).strip() if reason_match else None,
+                    vote_proposal=vote_match.group(1).strip() if vote_match else None,
+                )
+            )
+            self._emit_public_claim(
+                "claim_role_published",
+                day=self.state.day,
+                claimant=speaker,
+                claimed_role=claimed_role,
+                source="text_compatibility",
+            )
+
+        if claimed_role != Role.SEER.value:
+            return
+
         has_claimed = any(
             claim.claimant == speaker for claim in self.state.seer_claims
         )
-        if is_claim and not has_claimed:
+        if not has_claimed:
             self.state.seer_claims.append(
                 PublicSeerClaim(day=self.state.day, claimant=speaker)
             )
@@ -317,9 +394,40 @@ class GameEngine:
             )
 
         result = extract_public_seer_result(content, names)
-        if result is None or not (is_claim or has_claimed):
+        if result is None:
             return
         target, claimed_result = result
+        previous_result = next(
+            (
+                claim.result
+                for claim in self.state.public_role_claims
+                if claim.claimant == speaker
+                and claim.claimed_role == Role.SEER.value
+                and claim.target == target
+                and claim.result is not None
+            ),
+            next(
+                (
+                    claim.result
+                    for claim in self.state.seer_claims
+                    if claim.claimant == speaker
+                    and claim.target == target
+                    and claim.result is not None
+                ),
+                None,
+            ),
+        )
+        if previous_result is not None and previous_result != claimed_result:
+            self._emit_public_claim(
+                "claim_role_conflict",
+                day=self.state.day,
+                claimant=speaker,
+                claimed_role=claimed_role,
+                target=target,
+                claimed_result=claimed_result,
+                previous_result=previous_result,
+            )
+            return
         if any(
             claim.claimant == speaker
             and claim.target == target
@@ -333,6 +441,17 @@ class GameEngine:
                 claimant=speaker,
                 target=target,
                 result=claimed_result,
+            )
+        )
+        self.state.public_role_claims.append(
+            PublicRoleClaim(
+                day=self.state.day,
+                claimant=speaker,
+                claimed_role=Role.SEER.value,
+                target=target,
+                result=claimed_result,
+                reason=reason_match.group(1).strip() if reason_match else None,
+                vote_proposal=vote_match.group(1).strip() if vote_match else None,
             )
         )
         self._emit_public_claim(

@@ -44,6 +44,7 @@ def test_cli_parser_options() -> None:
     assert args.num_predict == 256
     assert args.log_dir == Path("custom_logs")
     assert args.show_private is True
+    assert parser.parse_args([]).num_ctx is None
     private_args = parser.parse_args(["--private-log"])
     assert private_args.private_log is True
 
@@ -243,7 +244,7 @@ def test_ollama_mode_invalid_response_uses_fallback_and_records_trace(
     # Ollama が形式不正な回答（またはMarkdown装飾）を返した場合の動作を検証
     call_count = 0
 
-    def mock_chat(self, model, messages, options=None):
+    def mock_chat(self, model, messages, options=None, tools=None):
         nonlocal call_count
         call_count += 1
         last_user = messages[-1]["content"]
@@ -308,7 +309,7 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
     seer_response = "SEER_RAW_RESPONSE_MARKER"
     vote_response = "VOTE_RAW_RESPONSE_MARKER"
 
-    def mock_chat(self, model, messages, options=None):
+    def mock_chat(self, model, messages, options=None, tools=None):
         prompt = messages[-1]["content"]
         if "これまでの相談内容" in prompt:
             return private_wolf_text
@@ -462,7 +463,7 @@ def test_ctrl_c_records_current_llm_action_before_finalizing(
 ) -> None:
     monkeypatch.setattr(OllamaClient, "ping", lambda self: True)
 
-    def interrupt_chat(self, model, messages, options=None):
+    def interrupt_chat(self, model, messages, options=None, tools=None):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(OllamaClient, "chat", interrupt_chat)

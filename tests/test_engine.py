@@ -164,7 +164,7 @@ def test_discussion_records_public_seer_claim_and_report_without_truth_leak() ->
                 message.speaker == player for message in history
             ):
                 return (
-                    "占い師CO。対象：P1／判定：人狼／根拠：占い結果。"
+                    "私は占い師です。対象：P1／判定：人狼／根拠：占い結果。"
                     "次の提案：P1に投票したいです。"
                 )
             if player == "P1" and not any(
@@ -188,19 +188,56 @@ def test_discussion_records_public_seer_claim_and_report_without_truth_leak() ->
         (1, "P1", None, None),
         (1, "P1", "P2", "human"),
     ]
+    assert [
+        (claim.claimant, claim.claimed_role, claim.target, claim.result)
+        for claim in state.public_role_claims
+    ] == [
+        ("P0", "seer", None, None),
+        ("P0", "seer", "P1", "wolf"),
+        ("P1", "seer", None, None),
+        ("P1", "seer", "P2", "human"),
+    ]
     assert [event["type"] for event in events] == [
+        "claim_role_published",
         "seer_claim",
         "seer_result_claim",
+        "claim_role_published",
         "seer_claim",
         "seer_result_claim",
     ]
     assert events[0]["claimant"] == "P0"
-    assert events[1]["target"] == "P1"
-    assert events[1]["claimed_result"] == "wolf"
-    assert events[2]["claimant"] == "P1"
-    assert events[3]["target"] == "P2"
-    assert events[3]["claimed_result"] == "human"
+    assert events[2]["target"] == "P1"
+    assert events[2]["claimed_result"] == "wolf"
+    assert events[3]["claimant"] == "P1"
+    assert events[5]["target"] == "P2"
+    assert events[5]["claimed_result"] == "human"
     assert all("role" not in event for event in events)
+
+
+def test_text_compatible_claim_records_conflicts_without_overwriting_prior_claim() -> None:
+    state = make_state(Role.VILLAGER, Role.WOLF, Role.SEER)
+
+    class ConflictingClaimActions(MockActions):
+        def discuss(self, player, day, alive, history):
+            if player != "P0":
+                return "状況を確認します。"
+            if not any(message.speaker == player for message in history):
+                return "私は占い師です。"
+            return "私は村人です。"
+
+    events: list[dict[str, object]] = []
+    GameEngine(
+        state,
+        ConflictingClaimActions(),
+        event_callback=events.append,
+    ).run_discussion()
+
+    assert [
+        claim.claimed_role
+        for claim in state.public_role_claims
+        if claim.claimant == "P0"
+    ] == ["seer"]
+    assert any(event["type"] == "claim_role_conflict" for event in events)
 
 
 def test_madman_is_not_an_attacker_but_can_be_a_target() -> None:

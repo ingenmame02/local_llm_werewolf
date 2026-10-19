@@ -213,6 +213,9 @@ class GameLogger:
             "players": public_players_data,
             "alive_players": state.alive_players,
             "seer_claims": [asdict(claim) for claim in state.seer_claims],
+            "public_role_claims": [
+                asdict(claim) for claim in state.public_role_claims
+            ],
             "conversation_log": conversation_data,
             "votes": state.votes,
             "model_stats": self._model_stats,
@@ -257,11 +260,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
     print(f"プレイヤー設定: {args.models_file}")
     print(f"ログ保存先: {log_dir / f'game_{game_id}.jsonl'}")
 
-    options = {
+    options: dict[str, object] = {
         "temperature": args.temperature,
-        "num_ctx": args.num_ctx,
         "num_predict": args.num_predict,
     }
+    if args.num_ctx is not None:
+        options["num_ctx"] = args.num_ctx
 
     # ゲーム初期化
     state = create_game(seed=args.seed, config_path=Path(args.models_file))
@@ -325,6 +329,28 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 print(f"{prefix} 応答を解析できません。再要求します。", flush=True)
             else:
                 print(f"{prefix} 再要求後も解析できません。", flush=True)
+        elif event_type == "llm_request_configuration":
+            request_options = event.get("request_options")
+            request_options = (
+                request_options if isinstance(request_options, dict) else {}
+            )
+            context = event.get("context_diagnostics")
+            context = context if isinstance(context, dict) else {}
+            requested_context = request_options.get("num_ctx", "未指定")
+            loaded_context = context.get("ollama_ps_context", "不明")
+            process_env_context = context.get(
+                "process_ollama_context_length_env", "未設定"
+            )
+            print(
+                f"{prefix} Ollama設定: num_ctx={requested_context} "
+                f"(優先元={event.get('num_ctx_source')}), "
+                f"ollama ps CONTEXT={loaded_context}, "
+                f"PythonプロセスのOLLAMA_CONTEXT_LENGTH={process_env_context} "
+                "(Ollamaサーバー側と異なる場合があります), "
+                f"num_predict={request_options.get('num_predict', '未指定')}, "
+                f"timeout={event.get('request_timeout_seconds')}秒",
+                flush=True,
+            )
         elif event_type == "llm_action_completed":
             retries = int(event["total_retries"])
             fallback = "有" if event["fallback_used"] else "無"
@@ -582,8 +608,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--num-ctx",
         type=int,
-        default=4096,
-        help="Context window length for Ollama (num_ctx)",
+        default=None,
+        help=(
+            "Context window length sent to Ollama (num_ctx); when omitted, "
+            "Ollama server defaults apply"
+        ),
     )
     parser.add_argument(
         "--num-predict",

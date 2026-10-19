@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Mapping
 
-from .models import GameState, Message, Player, Role
+from .models import GameState, Message, Player, PublicRoleClaim, Role
 
 ROLE_NAMES_JA: dict[Role, str] = {
     Role.WOLF: "人狼",
@@ -177,7 +177,16 @@ class PromptBuilder:
             else "該当なし"
         )
         seer_claimants = (
-            list(dict.fromkeys(claim.claimant for claim in state.seer_claims))
+            list(
+                dict.fromkeys(
+                    [
+                        claim.claimant
+                        for claim in state.public_role_claims
+                        if claim.claimed_role == Role.SEER.value
+                    ]
+                    + [claim.claimant for claim in state.seer_claims]
+                )
+            )
             if state is not None
             else []
         )
@@ -193,16 +202,41 @@ class PromptBuilder:
             if len(seer_claimants) > 1
             else "占い師COがないことは、真占い師が存在しない証拠ではありません。\n"
         )
-        public_seer_results = (
-            [
-                f"{claim.claimant} → {claim.target}: "
-                f"{'人狼' if claim.result == 'wolf' else '人間'}"
-                for claim in state.seer_claims
-                if claim.target is not None and claim.result is not None
-            ]
-            if state is not None
-            else []
-        )
+        public_claims = list(state.public_role_claims) if state is not None else []
+        if state is not None:
+            recorded_seer_claims = {
+                (claim.day, claim.claimant, claim.target, claim.result)
+                for claim in public_claims
+                if claim.claimed_role == Role.SEER.value
+            }
+            for claim in state.seer_claims:
+                key = (claim.day, claim.claimant, claim.target, claim.result)
+                if key not in recorded_seer_claims:
+                    public_claims.append(
+                        PublicRoleClaim(
+                            day=claim.day,
+                            claimant=claim.claimant,
+                            claimed_role=Role.SEER.value,
+                            target=claim.target,
+                            result=claim.result,
+                        )
+                    )
+        public_role_claims = []
+        for claim in public_claims:
+            description = (
+                f"{claim.day}日目 {claim.claimant}は"
+                f"{ROLE_NAMES_JA.get(Role(claim.claimed_role), claim.claimed_role)}を主張"
+            )
+            if claim.target is not None and claim.result is not None:
+                description += (
+                    f"（{claim.target}："
+                    f"{'人狼' if claim.result == 'wolf' else '人間'}）"
+                )
+            if claim.reason:
+                description += f" 理由：{claim.reason}"
+            if claim.vote_proposal:
+                description += f" 投票提案：{claim.vote_proposal}"
+            public_role_claims.append(description)
         if phase.startswith("昼"):
             available_actions = (
                 "発言またはパス。投票では生存している他者のみを選択（自己・死亡者への投票不可）"
@@ -253,7 +287,7 @@ class PromptBuilder:
             f"- 最新の処刑者：{latest_execution}\n"
             f"- 最新の投票結果：{latest_vote}\n"
             f"- 占い師CO主張者：{claimant_status}\n"
-            f"- 公開された占い結果の主張：{'、'.join(public_seer_results) or 'なし'}\n"
+            f"- 公開された役職・占い結果の主張：{'、'.join(public_role_claims) or 'なし'}\n"
             "- 単独COは真役職の確定を意味しません。COがないことも真占い師の不存在を意味しません。\n"
             f"- CO候補の扱い：{claimant_guidance}"
             f"- 死亡者の真役職：非公開（推測で確定扱いしない）\n"
@@ -530,18 +564,20 @@ class PromptBuilder:
             "- 2～4文を目安に、短く具体的に答えてください\n"
             "- 新しい推理・根拠・質問・投票方針のいずれかを最低1つ加え、過去発言を単純に繰り返さないでください\n"
             "- 自分自身を第三者として説明せず、自分がしていない発言や起きていない出来事を作らないでください\n"
+            "- 昼議論中です。「夜です」など現在フェーズを取り違える発言はせず、確定事実欄のフェーズを確認してください\n"
             "- 自分の意見をはっきり言う必要はありません（様子を見る発言でも構いません）\n"
             "- 普段のあなたらしい話し方でお願いします\n"
             "- パスする場合は、前後に説明や句読点を付けず「パス」とだけ出力してください\n"
+            "- 役職を公開主張する場合は、文章だけでなく公開ツールclaim_roleを優先して使用してください。ツール結果に真役職は含まれません\n"
             + (
-                "- 真占い師として、未公開の人狼判定がある場合は初回の昼議論で占い師COを行い、対象・判定・公開理由・投票提案を明示してください\n"
+                "- 真占い師として、未公開の人狼判定がある場合は初回の昼議論でclaim_roleツールを使用し、対象・判定・公開理由・投票提案を公開してください\n"
                 + "\n".join(f"  - 対象：{target}／判定：人狼" for target in pending_wolf_results)
                 + "\n"
                 if pending_wolf_results
                 else ""
             )
             + (
-                "- 人間判定だけの場合は、襲撃リスクを考慮して占い結果を公開または保留してください\n"
+                "- 人間判定だけの場合は、襲撃リスクを考慮してclaim_roleツールで占い結果を公開するか、占い師COを保留してください\n"
                 if own_seer_results
                 and all(result == "human" for result in own_seer_results.values())
                 else ""

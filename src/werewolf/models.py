@@ -69,6 +69,17 @@ class PublicSeerClaim:
     result: str | None = None
 
 
+@dataclass(frozen=True)
+class PublicRoleClaim:
+    day: int
+    claimant: str
+    claimed_role: str
+    target: str | None = None
+    result: str | None = None
+    reason: str | None = None
+    vote_proposal: str | None = None
+
+
 @dataclass
 class GameState:
     players: list[Player]
@@ -90,6 +101,7 @@ class GameState:
     completed_vote_phases: set[str] = field(default_factory=set)
     voting_completed_day: int | None = None
     seer_claims: list[PublicSeerClaim] = field(default_factory=list)
+    public_role_claims: list[PublicRoleClaim] = field(default_factory=list)
     winner_reason: str | None = None
     winner_counts: dict[str, int] = field(default_factory=dict)
 
