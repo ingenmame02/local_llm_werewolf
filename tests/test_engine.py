@@ -59,19 +59,155 @@ def test_village_wins_when_the_last_wolf_is_executed() -> None:
     assert not state.players[0].is_alive
 
 
-def test_madman_counts_for_werewolf_parity() -> None:
+def test_madman_is_excluded_from_winner_parity_counts() -> None:
+    state = make_state(Role.WOLF, Role.MADMAN, Role.VILLAGER, Role.VILLAGER)
+
+    winner = GameEngine(state, MockActions()).check_winner()
+
+    assert winner is None
+    assert state.winner_counts == {
+        "living_wolves": 1,
+        "living_madmen": 1,
+        "living_village": 2,
+    }
+    assert state.winner_reason is None
+
+
+def test_werewolf_wins_at_parity_without_counting_madmen() -> None:
     state = make_state(Role.WOLF, Role.MADMAN, Role.VILLAGER)
 
     winner = GameEngine(state, MockActions()).check_winner()
 
     assert winner == "werewolf"
+    assert state.winner_reason == "living_wolves_reached_village_parity"
+    assert state.winner_counts == {
+        "living_wolves": 1,
+        "living_madmen": 1,
+        "living_village": 1,
+    }
     assert state.phase is Phase.ENDED
+
+
+def test_village_wins_when_no_wolves_remain_even_if_madman_is_alive() -> None:
+    state = make_state(Role.MADMAN, Role.VILLAGER)
+
+    winner = GameEngine(state, MockActions()).check_winner()
+
+    assert winner == "village"
+    assert state.winner_reason == "no_living_wolves"
+
+
+def test_first_night_skips_wolf_discussion_and_attack_but_keeps_seer_action() -> None:
+    class FirstNightActions(MockActions):
+        wolf_discussions = 0
+        attacks = 0
+        seer_actions = 0
+
+        def wolf_discuss(self, wolf, partner, history):
+            self.wolf_discussions += 1
+            return super().wolf_discuss(wolf, partner, history)
+
+        def choose_attack(self, wolves, candidates):
+            self.attacks += 1
+            return super().choose_attack(wolves, candidates)
+
+        def choose_seer_target(self, seer, candidates, results):
+            self.seer_actions += 1
+            return "P2"
+
+    state = make_state(
+        Role.WOLF, Role.WOLF, Role.SEER, Role.VILLAGER, Role.VILLAGER
+    )
+    actions = FirstNightActions()
+    engine = GameEngine(state, actions)
+
+    engine.run_wolf_phase()
+
+    assert state.pending_attack is None
+    assert actions.wolf_discussions == 0
+    assert actions.attacks == 0
+
+    engine.run_seer_phase()
+    engine.resolve_morning()
+
+    assert actions.seer_actions == 1
+    assert state.attack_deaths == []
+    assert state.day == 1
+    assert state.phase is Phase.DAY_DISCUSSION
+    assert state.seer_results == {"P2": "human"}
+
+
+def test_second_night_runs_normal_wolf_attack() -> None:
+    class AttackActions(MockActions):
+        attacks = 0
+
+        def choose_attack(self, wolves, candidates):
+            self.attacks += 1
+            return candidates[0]
+
+    state = make_state(Role.WOLF, Role.SEER, Role.VILLAGER)
+    state.day = 2
+    actions = AttackActions()
+
+    GameEngine(state, actions).run_wolf_phase()
+
+    assert actions.attacks == 1
+    assert state.pending_attack == "P1"
+
+
+def test_discussion_records_public_seer_claim_and_report_without_truth_leak() -> None:
+    state = make_state(Role.SEER, Role.WOLF, Role.VILLAGER)
+
+    class ClaimActions(MockActions):
+        def discuss(self, player, day, alive, history):
+            if player == "P0" and not any(
+                message.speaker == player for message in history
+            ):
+                return (
+                    "占い師CO。対象：P1／判定：人狼／根拠：占い結果。"
+                    "次の提案：P1に投票したいです。"
+                )
+            if player == "P1" and not any(
+                message.speaker == player for message in history
+            ):
+                return (
+                    "占い師CO。対象：P2／判定：人間／根拠：占い結果。"
+                    "次の提案：P2は一旦保留したいです。"
+                )
+            return "まだ判断を保留します。"
+
+    events: list[dict[str, object]] = []
+    GameEngine(state, ClaimActions(), event_callback=events.append).run_discussion()
+
+    assert [
+        (claim.day, claim.claimant, claim.target, claim.result)
+        for claim in state.seer_claims
+    ] == [
+        (1, "P0", None, None),
+        (1, "P0", "P1", "wolf"),
+        (1, "P1", None, None),
+        (1, "P1", "P2", "human"),
+    ]
+    assert [event["type"] for event in events] == [
+        "seer_claim",
+        "seer_result_claim",
+        "seer_claim",
+        "seer_result_claim",
+    ]
+    assert events[0]["claimant"] == "P0"
+    assert events[1]["target"] == "P1"
+    assert events[1]["claimed_result"] == "wolf"
+    assert events[2]["claimant"] == "P1"
+    assert events[3]["target"] == "P2"
+    assert events[3]["claimed_result"] == "human"
+    assert all("role" not in event for event in events)
 
 
 def test_madman_is_not_an_attacker_but_can_be_a_target() -> None:
     state = make_state(
         Role.WOLF, Role.WOLF, Role.MADMAN, Role.SEER, Role.VILLAGER, Role.VILLAGER
     )
+    state.day = 2
 
     class RecordingAttackActions(MockActions):
         wolves: tuple[str, ...] = ()
@@ -240,6 +376,7 @@ def test_still_tied_runoff_uses_repeatable_seeded_tiebreak() -> None:
 
 def test_dead_seer_does_not_act_and_single_wolf_skips_consultation() -> None:
     state = make_state(Role.WOLF, Role.SEER, Role.VILLAGER, Role.VILLAGER)
+    state.day = 2
     actions = ScriptedActions()
     engine = GameEngine(state, actions)
 

@@ -124,8 +124,14 @@ def test_mock_actions_completes_game_via_cli(tmp_path: Path, capsys) -> None:
 
     assert lines[-1]["type"] == "game_result"
     assert lines[-1]["winner"] == "village"
+    assert lines[-1]["winner_reason"] == "no_living_wolves"
+    assert lines[-1]["winner_counts"]["living_wolves"] == 0
+    assert "living_madmen" in lines[-1]["winner_counts"]
+    assert "living_village" in lines[-1]["winner_counts"]
     assert lines[-1]["phase"] == Phase.ENDED.value
     assert len(lines[-1]["players"]) == 8
+    assert any(line["type"] == "first_night_no_attack" for line in lines)
+    assert "初夜のため人狼の相談・襲撃はありません" in captured
 
     voting_records = [line for line in lines if line["type"] == "voting_result"]
     assert voting_records
@@ -335,7 +341,7 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
     assert run_cli_game(build_parser().parse_args(argv)) == 0
 
     output = capsys.readouterr().out
-    assert "[Day 1][夜・人狼相談][Player " in output
+    assert "[Day 2][夜・人狼相談][Player " in output
     assert "応答待ち..." in output
     assert "PUBLIC_DAY_SPEECH" in output
     assert (private_wolf_text in output) is show_private
@@ -484,5 +490,5 @@ def test_ctrl_c_records_current_llm_action_before_finalizing(
     assert interrupted["active_action"]["player"] in {
         player["name"] for player in records[-1]["players"]
     }
-    assert interrupted["active_action"]["action"] == "wolf_discussion"
+    assert interrupted["active_action"]["action"] == "seer"
     assert records[-1]["error_occurred"] is True

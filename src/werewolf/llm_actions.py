@@ -6,7 +6,11 @@ from difflib import SequenceMatcher
 from typing import Callable
 
 from .action_parser import ActionKind, ActionParser
-from .engine import ActionPolicy
+from .engine import (
+    ActionPolicy,
+    extract_public_seer_result,
+    is_public_seer_claim,
+)
 from .models import GameState, Message, Player, Role
 from .ollama import ChatResponse, OllamaClient, OllamaError
 from .prompts import PromptBuilder, PromptContext
@@ -639,8 +643,8 @@ class OllamaActions(ActionPolicy):
         target, result = self._latest_seer_result()
         if result == "wolf":
             return (
-                f"対象：{target}さん／判定：人狼／根拠：占い結果を踏まえると、"
-                f"{target}さんは人狼でした。次の提案：この情報を共有し、今日は特に警戒して議論したいです。"
+                f"占い師CO。対象：{target}／判定：人狼／根拠：実際の占い結果です。"
+                f"次の提案：{target}に投票することを提案します。"
             )
         return (
             f"対象：{target}さん／判定：人間／根拠：占い結果を踏まえると、"
@@ -665,6 +669,8 @@ class OllamaActions(ActionPolicy):
             "unverified_attributed_speech": "履歴にない発言を他人の発言として引用しないでください。",
             "repeated_speech": "過去の自分の発言を繰り返さず、新しい根拠か提案を加えてください。",
             "question_not_answered_first": "最初の一文で直前の発言者へ直接回答してください。",
+            "wolf_result_not_disclosed": "真占い師として占い師COを行い、未公開の人狼判定を対象・判定・理由・投票提案とともに公開してください。",
+            "inconsistent_seer_result": "あなた自身が以前に主張した占い対象の判定を変更せず、過去の主張と一貫させてください。",
         }
         if response_issue in retry_guidance:
             return f"\n前回の応答を採用できませんでした。{retry_guidance[response_issue]}"
@@ -705,6 +711,37 @@ class OllamaActions(ActionPolicy):
         known_players = {player.name for player in self.state.players}
         if any(name not in known_players for name in mentioned_players):
             return "unknown_player_reference"
+        public_result = extract_public_seer_result(
+            response, tuple(known_players)
+        )
+        if public_result is not None:
+            target, result = public_result
+            if any(
+                claim.claimant == actor.name
+                and claim.target == target
+                and claim.result is not None
+                and claim.result != result
+                for claim in self.state.seer_claims
+            ):
+                return "inconsistent_seer_result"
+        if actor.role is Role.SEER:
+            unpublished_wolf_results = [
+                target
+                for target, result in self.state.seer_results.items()
+                if result == "wolf"
+                and not any(
+                    claim.claimant == actor.name
+                    and claim.target == target
+                    and claim.result == "wolf"
+                    for claim in self.state.seer_claims
+                )
+            ]
+            if unpublished_wolf_results and (
+                not is_public_seer_claim(response)
+                or public_result
+                not in {(target, "wolf") for target in unpublished_wolf_results}
+            ):
+                return "wolf_result_not_disclosed"
         dead_players = {
             player.name for player in self.state.players if not player.is_alive
         }

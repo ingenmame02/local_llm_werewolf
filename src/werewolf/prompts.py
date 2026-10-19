@@ -14,12 +14,16 @@ ROLE_DESCRIPTIONS_JA: dict[Role, str] = {
     Role.WOLF: (
         "あなたは人狼です。夜に村人を襲撃して減らしていくのが目的です。\n"
         "相方の人狼と協力し、昼は村人のふりをして疑われないように立ち回ってください。\n"
-        "最終的に人狼陣営の数が村人陣営以上になれば勝利です。"
+        "公開された占い師COや占い結果の主張を確認し、必要なら占い師騙りを提案できます。"
+        "騙る場合は対象・判定・理由を一貫させ、真の役職一覧や非公開情報を知っているふりをしないでください。\n"
+        "生存人狼数が生存村人陣営数以上になれば勝利です。狂人は勝敗人数に含みません。"
     ),
     Role.MADMAN: (
         "あなたは狂人です。人狼陣営の仲間ですが、特殊能力はありません。\n"
         "昼は村人のふりをして、人狼が有利になるように村を混乱させたり、誤った方向に議論を誘導したりしてください。\n"
-        "自分が処刑されても、人狼陣営が勝てばあなたの勝ちです。"
+        "状況に応じて占い師を騙ることもできますが、真の役職一覧や人狼の相方は知りません。"
+        "自分が主張した占い対象と判定は一貫させてください。\n"
+        "狂人は勝敗人数には含まれませんが、人狼が勝てばあなたの勝ちです。"
     ),
     Role.SEER: (
         "あなたは占い師です。夜に1人を占って「人狼」か「人間」かを知ることができます。\n"
@@ -41,6 +45,7 @@ COMMON_SYSTEM_TEMPLATE = """人狼ゲームのプレイヤーとして行動し�
 
 RULE_CARD = """【ルール】
 8人：人狼2・狂人1・占い師1・村人4。夜は相談/襲撃/占い、朝は死亡発表、昼議論3巡後に投票。
+初夜は襲撃・人狼相談なしで占いのみ。生存人狼数が0なら村人勝利、または生存人狼数が生存村人陣営数以上なら人狼勝利。狂人は勝敗人数に含めない。
 狂人は襲撃不可。占い結果は人狼/人間。自分への投票不可。同票は再投票1回後に抽選。
 襲撃者は公開されません。死亡者の真役職も公開されず、役職の推測を確定事実として扱わないでください。
 昼の「パス」は有効な発言スキップで、空応答とは異なる。
@@ -171,6 +176,33 @@ class PromptBuilder:
             if state is not None and phase.startswith("昼")
             else "該当なし"
         )
+        seer_claimants = (
+            list(dict.fromkeys(claim.claimant for claim in state.seer_claims))
+            if state is not None
+            else []
+        )
+        claimant_status = "なし" if not seer_claimants else "、".join(
+            f"{name}（{'生存' if name in alive_players else '死亡'}）"
+            for name in seer_claimants
+        )
+        claimant_guidance = (
+            f"単独COの{seer_claimants[0]}を現時点の唯一の占い師候補として結果を検討材料にできますが、"
+            "真役職や結果の正しさが確定したわけではありません。\n"
+            if len(seer_claimants) == 1
+            else "複数の占い師CO主張がある場合は対抗候補として比較し、どちらも未確認情報として扱ってください。\n"
+            if len(seer_claimants) > 1
+            else "占い師COがないことは、真占い師が存在しない証拠ではありません。\n"
+        )
+        public_seer_results = (
+            [
+                f"{claim.claimant} → {claim.target}: "
+                f"{'人狼' if claim.result == 'wolf' else '人間'}"
+                for claim in state.seer_claims
+                if claim.target is not None and claim.result is not None
+            ]
+            if state is not None
+            else []
+        )
         if phase.startswith("昼"):
             available_actions = (
                 "発言またはパス。投票では生存している他者のみを選択（自己・死亡者への投票不可）"
@@ -220,6 +252,10 @@ class PromptBuilder:
             f"- 最新の襲撃死亡者：{latest_attack}\n"
             f"- 最新の処刑者：{latest_execution}\n"
             f"- 最新の投票結果：{latest_vote}\n"
+            f"- 占い師CO主張者：{claimant_status}\n"
+            f"- 公開された占い結果の主張：{'、'.join(public_seer_results) or 'なし'}\n"
+            "- 単独COは真役職の確定を意味しません。COがないことも真占い師の不存在を意味しません。\n"
+            f"- CO候補の扱い：{claimant_guidance}"
             f"- 死亡者の真役職：非公開（推測で確定扱いしない）\n"
             f"- 応答言語：{actor.response_language}\n"
             "\n"
@@ -265,6 +301,9 @@ class PromptBuilder:
             "【指示】\n"
             "相方と相談して、今夜襲撃する相手を決めたいです。\n"
             "- 誰を襲撃したいか、その理由を話してください\n"
+            "- 襲撃先、占い師騙りの有無、昼の投票誘導を別々の判断として検討してください\n"
+            "- 占い師を騙る場合は、公開済みCOと結果の主張を確認し、対象・判定・理由を過去の主張と一貫させてください\n"
+            "- 公開されていない真の役職や占い結果を、システム上の事実として扱わないでください\n"
             "- 相方の意見も踏まえて調整して構いません\n\n"
             "最後に必ず以下の形式で襲撃対象を明示してください：\n"
             "襲撃対象：プレイヤー名"
@@ -406,6 +445,21 @@ class PromptBuilder:
             if actor.role is Role.SEER and state is not None
             else {}
         )
+        pending_wolf_results = (
+            [
+                target
+                for target, result in own_seer_results.items()
+                if result == "wolf"
+                and not any(
+                    claim.claimant == actor.name
+                    and claim.target == target
+                    and claim.result == "wolf"
+                    for claim in state.seer_claims
+                )
+            ]
+            if state is not None
+            else []
+        )
         current_seer_results = (
             [
                 f"{target}: {'人狼' if result == 'wolf' else '人間'}"
@@ -479,6 +533,19 @@ class PromptBuilder:
             "- 自分の意見をはっきり言う必要はありません（様子を見る発言でも構いません）\n"
             "- 普段のあなたらしい話し方でお願いします\n"
             "- パスする場合は、前後に説明や句読点を付けず「パス」とだけ出力してください\n"
+            + (
+                "- 真占い師として、未公開の人狼判定がある場合は初回の昼議論で占い師COを行い、対象・判定・公開理由・投票提案を明示してください\n"
+                + "\n".join(f"  - 対象：{target}／判定：人狼" for target in pending_wolf_results)
+                + "\n"
+                if pending_wolf_results
+                else ""
+            )
+            + (
+                "- 人間判定だけの場合は、襲撃リスクを考慮して占い結果を公開または保留してください\n"
+                if own_seer_results
+                and all(result == "human" for result in own_seer_results.values())
+                else ""
+            )
             + (
                 "- 占い結果を持つ占い師は、今日まだ結果を活用した発言をしていない場合、今回の発言で必ず結果を推理に反映してください\n"
                 "- 結果を公開する場合は「対象」「判定」「根拠」「次の提案」を短く示してください\n"

@@ -1,7 +1,38 @@
 import random
+import re
 from typing import Callable, Protocol
 
-from .models import GameState, Message, Phase, Player, Role
+from .models import GameState, Message, Phase, Player, PublicSeerClaim, Role
+
+
+def is_public_seer_claim(content: str) -> bool:
+    return bool(
+        re.search(
+            r"^\s*(?:(?:私|僕|俺|自分|わたし|ぼく)(?:は|が)?\s*)?"
+            r"占い師(?:\s*CO(?:です)?|です|だ|として)(?:[。\s、]|$)",
+            content,
+        )
+    )
+
+
+def extract_public_seer_result(
+    content: str, player_names: tuple[str, ...]
+) -> tuple[str, str] | None:
+    target = next(
+        (
+            name
+            for name in sorted(player_names, key=len, reverse=True)
+            if re.search(
+                rf"(?:占い)?対象\s*[：:]\s*{re.escape(name)}(?:さん)?(?:\s|[／/、。]|$)",
+                content,
+            )
+        ),
+        None,
+    )
+    result = re.search(r"(?:判定|占い結果|結果)\s*[：:]\s*(人狼|人間)", content)
+    if target is None or result is None:
+        return None
+    return target, "wolf" if result.group(1) == "人狼" else "human"
 
 
 class ActionPolicy(Protocol):
@@ -92,6 +123,9 @@ class GameEngine:
         if not wolves:
             self.check_winner()
             return
+        if self.state.day == 1:
+            self.state.pending_attack = None
+            return
 
         if len(wolves) == 2:
             for wolf in wolves:
@@ -164,6 +198,7 @@ class GameEngine:
                     tuple(self.state.conversation_log),
                 )
                 self.state.conversation_log.append(Message(player.name, content))
+                self._record_public_seer_claim(player.name, content)
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:
@@ -230,23 +265,87 @@ class GameEngine:
         living_wolves = sum(
             player.is_alive and player.role is Role.WOLF for player in self.state.players
         )
+        living_madmen = sum(
+            player.is_alive and player.role is Role.MADMAN
+            for player in self.state.players
+        )
+        living_village = sum(
+            player.is_alive and player.role in (Role.SEER, Role.VILLAGER)
+            for player in self.state.players
+        )
+        self.state.winner_counts = {
+            "living_wolves": living_wolves,
+            "living_madmen": living_madmen,
+            "living_village": living_village,
+        }
+        previous_winner = self.state.winner
         if living_wolves == 0:
             self.state.winner = "village"
+            self.state.winner_reason = "no_living_wolves"
         else:
-            wolf_faction = sum(
-                player.is_alive and player.role in (Role.WOLF, Role.MADMAN)
-                for player in self.state.players
-            )
-            village_faction = sum(
-                player.is_alive and player.role in (Role.SEER, Role.VILLAGER)
-                for player in self.state.players
-            )
-            if wolf_faction >= village_faction:
+            if living_wolves >= living_village:
                 self.state.winner = "werewolf"
+                self.state.winner_reason = "living_wolves_reached_village_parity"
 
         if self.state.winner is not None:
             self.state.phase = Phase.ENDED
+            if previous_winner is None and self.event_callback is not None:
+                self.event_callback(
+                    {
+                        "type": "winner_decided",
+                        "winner": self.state.winner,
+                        "reason": self.state.winner_reason,
+                        "counts": dict(self.state.winner_counts),
+                    }
+                )
         return self.state.winner
+
+    def _record_public_seer_claim(self, speaker: str, content: str) -> None:
+        names = tuple(player.name for player in self.state.players)
+        is_claim = is_public_seer_claim(content)
+        has_claimed = any(
+            claim.claimant == speaker for claim in self.state.seer_claims
+        )
+        if is_claim and not has_claimed:
+            self.state.seer_claims.append(
+                PublicSeerClaim(day=self.state.day, claimant=speaker)
+            )
+            self._emit_public_claim(
+                "seer_claim",
+                day=self.state.day,
+                claimant=speaker,
+            )
+
+        result = extract_public_seer_result(content, names)
+        if result is None or not (is_claim or has_claimed):
+            return
+        target, claimed_result = result
+        if any(
+            claim.claimant == speaker
+            and claim.target == target
+            and claim.result == claimed_result
+            for claim in self.state.seer_claims
+        ):
+            return
+        self.state.seer_claims.append(
+            PublicSeerClaim(
+                day=self.state.day,
+                claimant=speaker,
+                target=target,
+                result=claimed_result,
+            )
+        )
+        self._emit_public_claim(
+            "seer_result_claim",
+            day=self.state.day,
+            claimant=speaker,
+            target=target,
+            claimed_result=claimed_result,
+        )
+
+    def _emit_public_claim(self, event_type: str, **details: object) -> None:
+        if self.event_callback is not None:
+            self.event_callback({"type": event_type, **details})
 
     def _collect_votes(
         self,

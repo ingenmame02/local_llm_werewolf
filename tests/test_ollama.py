@@ -13,6 +13,7 @@ from werewolf import (
     OllamaClient,
     OllamaError,
     Player,
+    PublicSeerClaim,
     Role,
 )
 
@@ -453,12 +454,19 @@ def test_seer_must_use_result_before_pass_and_can_pass_after_contribution() -> N
     state.seer_results["P1"] = "wolf"
     client = FakeClient(
         "パス",
-        "占い結果を踏まえるとP1は人狼なので警戒しています。",
+        "占い師CO。対象：P1／判定：人狼／根拠：占い結果です。"
+        "次の提案：P1に投票したいです。",
         "パス",
     )
     actions = OllamaActions(state, client)
 
     first_response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
+    state.seer_claims.extend(
+        [
+            PublicSeerClaim(day=1, claimant="P2"),
+            PublicSeerClaim(day=1, claimant="P2", target="P1", result="wolf"),
+        ]
+    )
     second_response = actions.discuss(
         "P2",
         1,
@@ -466,7 +474,7 @@ def test_seer_must_use_result_before_pass_and_can_pass_after_contribution() -> N
         (Message("P2", first_response),),
     )
 
-    assert first_response == "占い結果を踏まえるとP1は人狼なので警戒しています。"
+    assert first_response.startswith("占い師CO。対象：P1／判定：人狼")
     assert second_response == "パス"
     assert len(client.prompts) == 3
     assert "前回の応答は空、パス" in client.prompts[1]
@@ -491,6 +499,61 @@ def test_seer_forced_result_fallback_when_retry_does_not_use_result() -> None:
     assert "新情報か具体的な投票方針を必ず加えてください" in client.prompts[0]
     assert len(client.prompts) == 2
     assert actions.traces[-1].fallback_used is True
+
+
+def test_seer_wolf_result_fallback_is_a_structured_public_report() -> None:
+    state = make_state()
+    state.seer_results["P1"] = "wolf"
+    client = FakeClient("パス", "まだ意見はありません")
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
+
+    assert response.startswith("占い師CO。対象：P1／判定：人狼")
+    assert "根拠：" in response
+    assert "次の提案：" in response
+    assert actions.traces[-1].fallback_used is True
+
+
+def test_seer_retries_until_unpublished_wolf_result_is_publicly_reported() -> None:
+    state = make_state()
+    state.seer_results["P1"] = "wolf"
+    state.seer_result_history.append((1, "P1", "wolf"))
+    client = FakeClient(
+        "P1は怪しいので投票したいです。",
+        "占い師CO。対象：P1／判定：人狼／根拠：占い結果です。"
+        "次の提案：P1に投票したいです。",
+    )
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
+
+    assert response.startswith("占い師CO。対象：P1／判定：人狼")
+    assert len(client.prompts) == 2
+    assert "未公開の人狼判定" in client.prompts[1]
+    assert "wolf_result_not_disclosed" in actions.traces[-1].failure_reasons
+
+
+def test_claimant_cannot_change_its_published_seer_result() -> None:
+    state = make_state()
+    state.seer_claims.extend(
+        [
+            PublicSeerClaim(day=1, claimant="P1"),
+            PublicSeerClaim(day=1, claimant="P1", target="P2", result="human"),
+        ]
+    )
+    client = FakeClient(
+        "占い師CO。対象：P2／判定：人狼／根拠：占い結果です。",
+        "今日はP0の発言をもう少し見たいです。",
+    )
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P1", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "今日はP0の発言をもう少し見たいです。"
+    assert len(client.prompts) == 2
+    assert "過去の主張と一貫" in client.prompts[1]
+    assert "inconsistent_seer_result" in actions.traces[-1].failure_reasons
 
 
 def test_context_overflow_compacts_old_discussion_and_retries() -> None:

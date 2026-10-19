@@ -207,9 +207,12 @@ class GameLogger:
             "day": state.day,
             "phase": state.phase.value,
             "winner": state.winner,
+            "winner_reason": state.winner_reason,
+            "winner_counts": dict(state.winner_counts),
             "error_occurred": error is not None,
             "players": public_players_data,
             "alive_players": state.alive_players,
+            "seer_claims": [asdict(claim) for claim in state.seer_claims],
             "conversation_log": conversation_data,
             "votes": state.votes,
             "model_stats": self._model_stats,
@@ -421,6 +424,13 @@ def run_cli_game(args: argparse.Namespace) -> int:
                     "day": state.day,
                     "target": state.pending_attack,
                 })
+            elif state.day == 1:
+                print("初夜のため人狼の相談・襲撃はありません。", flush=True)
+                logger.append_record({
+                    "type": "first_night_no_attack",
+                    "day": state.day,
+                    "reason": "first_night_rule",
+                })
             if state.winner is not None:
                 break
 
@@ -509,6 +519,20 @@ def run_cli_game(args: argparse.Namespace) -> int:
     # ゲーム終了表示
     winner_str = "村人陣営 (village)" if state.winner == "village" else "人狼陣営 (werewolf)"
     print_banner(f"ゲーム終了！ 勝者: {winner_str}")
+    print(
+        "勝敗判定人数: "
+        f"人狼 {state.winner_counts.get('living_wolves', 0)}名 / "
+        f"狂人 {state.winner_counts.get('living_madmen', 0)}名（勝敗判定から除外） / "
+        f"村人陣営 {state.winner_counts.get('living_village', 0)}名"
+    )
+    winner_reason_labels = {
+        "no_living_wolves": "生存している人狼が0名",
+        "living_wolves_reached_village_parity": "生存人狼数が村人陣営人数以上",
+    }
+    if state.winner_reason is None:
+        raise RuntimeError("The game ended without a winner reason.")
+    reason_label = winner_reason_labels[state.winner_reason]
+    print(f"勝敗理由: {reason_label} ({state.winner_reason})")
 
     print("\n【最終プレイヤー一覧】")
     for p in state.players:

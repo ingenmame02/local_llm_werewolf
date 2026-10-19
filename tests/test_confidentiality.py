@@ -8,6 +8,7 @@ from werewolf import (
     Player,
     PromptBuilder,
     PromptContext,
+    PublicSeerClaim,
     ROLE_DESCRIPTIONS_JA,
     ROLE_NAMES_JA,
     Role,
@@ -385,6 +386,79 @@ def test_dead_players_cannot_receive_prompts() -> None:
                 alive_players=tuple(state.alive_players),
                 seer_results={},
             )
+
+
+def test_public_seer_claims_are_claims_not_system_confirmed_roles() -> None:
+    state = create_game(seed=42)
+    seer = next(player for player in state.players if player.role is Role.SEER)
+    villager = next(player for player in state.players if player.role is Role.VILLAGER)
+    other_players = tuple(
+        player.name for player in state.players if player.name != villager.name
+    )
+
+    state.seer_claims.append(PublicSeerClaim(day=1, claimant=seer.name))
+    prompt = PromptBuilder.build_discussion_prompt(
+        actor=villager,
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        day=1,
+        state=state,
+    ).user_prompt
+
+    assert f"占い師CO主張者：{seer.name}" in prompt
+    assert f"唯一の占い師候補として結果を検討材料にできます" in prompt
+    assert "単独COは真役職の確定を意味しません" in prompt
+    assert f"{seer.name}：占い師" not in prompt
+    assert all(name in prompt for name in other_players)
+
+    second_claimant = next(
+        player
+        for player in state.players
+        if player.name != seer.name and player.name != villager.name
+    )
+    state.seer_claims.append(
+        PublicSeerClaim(day=1, claimant=second_claimant.name)
+    )
+    counterclaim_prompt = PromptBuilder.build_discussion_prompt(
+        actor=villager,
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        day=1,
+        state=state,
+    ).user_prompt
+    assert "複数の占い師CO主張がある場合は対抗候補として比較" in counterclaim_prompt
+
+
+def test_seer_prompt_prioritizes_publication_of_wolf_result_and_allows_human_result_choice() -> None:
+    state = create_game(seed=42)
+    seer = next(player for player in state.players if player.role is Role.SEER)
+    wolf = next(player for player in state.players if player.role is Role.WOLF)
+    state.seer_results[wolf.name] = "wolf"
+    state.seer_result_history.append((1, wolf.name, "wolf"))
+
+    prompt = PromptBuilder.build_discussion_prompt(
+        actor=seer,
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        day=1,
+        state=state,
+    ).user_prompt
+
+    assert "初回の昼議論で占い師COを行い" in prompt
+    assert f"対象：{wolf.name}" in prompt
+    assert "判定：人狼" in prompt
+    assert "次の提案" in prompt
+
+    state.seer_results[wolf.name] = "human"
+    state.seer_result_history[:] = [(1, wolf.name, "human")]
+    human_result_prompt = PromptBuilder.build_discussion_prompt(
+        actor=seer,
+        alive_players=tuple(state.alive_players),
+        conversation_history=(),
+        day=1,
+        state=state,
+    ).user_prompt
+    assert "襲撃リスクを考慮して占い結果を公開または保留" in human_result_prompt
 
 
 def test_eight_players_prompt_snapshot_inspection() -> None:

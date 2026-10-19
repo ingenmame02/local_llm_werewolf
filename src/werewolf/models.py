@@ -61,6 +61,14 @@ class Message:
     content: str
 
 
+@dataclass(frozen=True)
+class PublicSeerClaim:
+    day: int
+    claimant: str
+    target: str | None = None
+    result: str | None = None
+
+
 @dataclass
 class GameState:
     players: list[Player]
@@ -81,6 +89,9 @@ class GameState:
     vote_phase_results: dict[str, dict[str, str]] = field(default_factory=dict)
     completed_vote_phases: set[str] = field(default_factory=set)
     voting_completed_day: int | None = None
+    seer_claims: list[PublicSeerClaim] = field(default_factory=list)
+    winner_reason: str | None = None
+    winner_counts: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.day < 0:
