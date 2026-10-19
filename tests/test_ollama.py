@@ -212,6 +212,20 @@ def test_context_diagnostics_parse_ollama_ps_and_report_process_environment(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "12288")
+    def transport(request, timeout):
+        assert request.full_url.endswith("/api/ps")
+        return json.dumps(
+            {
+                "models": [
+                    {
+                        "name": "model-x:latest",
+                        "context_length": 8192,
+                        "processor": "100% GPU",
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
     monkeypatch.setattr(
         "werewolf.ollama.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(
@@ -224,11 +238,33 @@ def test_context_diagnostics_parse_ollama_ps_and_report_process_environment(
         ),
     )
 
-    diagnostics = OllamaClient().context_diagnostics("model-x")
+    diagnostics = OllamaClient(transport=transport).context_diagnostics("model-x")
 
     assert diagnostics["process_ollama_context_length_env"] == "12288"
     assert diagnostics["ollama_ps_context"] == 8192
+    assert diagnostics["ollama_ps_processor"] == "100% GPU"
+    assert diagnostics["ollama_ps_source"] == "api"
     assert diagnostics["ollama_ps_error"] is None
+
+
+def test_api_ps_parser_returns_none_for_model_not_loaded() -> None:
+    response = {"models": [{"name": "other:latest", "context_length": 4096}]}
+
+    assert OllamaClient.parse_api_ps_model(response, "model-x") is None
+
+
+def test_ollama_context_parsers_read_modelfile_default_and_loaded_processor() -> None:
+    assert OllamaClient.parse_modelfile_num_ctx(
+        "FROM model-x\nPARAMETER temperature 0.7\nPARAMETER num_ctx 4096\n"
+    ) == 4096
+    ps_output = (
+        "NAME              ID              SIZE      PROCESSOR    CONTEXT    UNTIL\n"
+        "model-x:latest    abc123          4.7 GB    70%/30% CPU/GPU    8192    4 minutes from now\n"
+    )
+    assert (
+        OllamaClient.parse_ollama_ps_column(ps_output, "model-x", "PROCESSOR")
+        == "70%/30% CPU/GPU"
+    )
 
 
 
@@ -346,10 +382,10 @@ def test_model_rejecting_tool_calls_retries_the_same_request_as_plain_text() -> 
             actor = prompt.split("- あなたのプレイヤー名：", 1)[1].splitlines()[0]
             if actor == "P0" and self.plain_requests == 1:
                 return (
-                    "占い師CO：対象=P1、判定=人狼、理由=占い結果、"
-                    "投票提案=P1へ投票します。"
+                    "【CO】占い師CO：対象=P1、判定=人狼、理由=占い結果、"
+                    "投票提案=P1へ投票します。\n【本文】P1への投票を提案します。"
                 )
-            return "公開情報を確認して投票先を考えます。"
+            return "【CO】なし\n【本文】公開情報を確認して投票先を考えます。"
 
     state = make_state()
     state.players[0].role = Role.SEER
@@ -798,6 +834,66 @@ def test_pass_after_think_tag_is_valid_and_only_final_text_is_recorded() -> None
     assert actions.traces[-1].fallback_used is False
 
 
+def test_two_block_discussion_accepts_co_none_and_hold_without_retry() -> None:
+    for co_value in ("なし", "保留"):
+        expected = f"【CO】{co_value}\n【本文】意見を整理して投票先を考えます。"
+        client = FakeClient(expected)
+        actions = OllamaActions(make_state(), client)
+
+        response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+        assert response == expected
+        assert len(client.prompts) == 1
+        assert actions.traces[-1].fallback_used is False
+
+
+def test_broken_two_block_discussion_is_retried_once() -> None:
+    client = FakeClient(
+        "【CO】なし\n本文にマーカーがありません。",
+        "【CO】なし\n【本文】意見を整理して投票先を考えます。",
+    )
+    actions = OllamaActions(make_state(), client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response.startswith("【CO】なし\n【本文】")
+    assert len(client.prompts) == 2
+    assert "前回は二層形式が不正でした" in client.prompts[1]
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_repeated_two_block_markers_fall_back_to_safe_pass() -> None:
+    malformed = (
+        "【CO】なし\n【本文】発言します。\n【本文】もう一度発言します。"
+    )
+    client = FakeClient(malformed, malformed)
+    actions = OllamaActions(make_state(), client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response == "パス"
+    assert len(client.prompts) == 2
+    assert actions.traces[-1].fallback_used is True
+
+
+def test_two_block_seer_result_without_co_uses_task19_retry() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P2"] = "human"
+    client = FakeClient(
+        "【CO】なし\n【本文】P2は人間と判定されました。",
+        "【CO】占い師CO：対象=P2、判定=人間、理由=夜の占い、"
+        "投票提案=別の発言を確認\n【本文】P2への疑いを弱めます。",
+    )
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    assert response.startswith("【CO】占い師CO")
+    assert len(client.prompts) == 2
+    assert "同じ発言内で明示的に占い師COしてください" in client.prompts[1]
+
+
 def test_wolf_can_pass_consultation_but_attack_selection_remains_required() -> None:
     client = FakeClient("パス", "襲撃対象：P0")
     actions = OllamaActions(make_state(), client)
@@ -853,7 +949,7 @@ def test_seer_forced_result_fallback_when_retry_does_not_use_result() -> None:
 
     response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
 
-    assert response.startswith("占い師CO：対象=P1、判定=人間")
+    assert response.startswith("【CO】占い師CO：対象=P1、判定=人間")
     assert "理由=実際の占い結果" in response
     assert "投票提案=" in response
     assert "新情報か具体的な投票方針を必ず加えてください" in client.prompts[0]
@@ -869,7 +965,7 @@ def test_seer_wolf_result_fallback_is_a_structured_public_report() -> None:
 
     response = actions.discuss("P2", 1, ("P0", "P1", "P2"), ())
 
-    assert response.startswith("占い師CO：対象=P1、判定=人狼")
+    assert response.startswith("【CO】占い師CO：対象=P1、判定=人狼")
     assert "理由=" in response
     assert "投票提案=" in response
     assert actions.traces[-1].fallback_used is True

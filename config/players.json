@@ -1,12 +1,12 @@
 {
   "players": [
-    { "name": "Player 1", "model": "CALM3-22B-Chat-GGUF:latest" },
-    { "name": "Player 2", "model": "muse-glimmer:latest" },
-    { "name": "Player 3", "model": "mistral-small:24b-262000" },
-    { "name": "Player 4", "model": "glm-4.7-flash:latest" },
-    { "name": "Player 5", "model": "qwen3.8:27b" },
-    { "name": "Player 6", "model": "deepseek-r1:32b" },
-    { "name": "Player 7", "model": "gpt-oss-20b-262000:latest" },
-    { "name": "Player 8", "model": "gemma4:26b" }
+    { "name": "Player 1", "model": "werewolf-calm3-22b-8k" },
+    { "name": "Player 2", "model": "werewolf-muse-glimmer-8k" },
+    { "name": "Player 3", "model": "werewolf-mistral-small-8k" },
+    { "name": "Player 4", "model": "werewolf-glm-4.7-flash-8k" },
+    { "name": "Player 5", "model": "werewolf-qwen3.8-8k" },
+    { "name": "Player 6", "model": "werewolf-deepseek-r1-8k" },
+    { "name": "Player 7", "model": "werewolf-gpt-oss-20b-8k" },
+    { "name": "Player 8", "model": "werewolf-gemma4-8k" }
   ]
 }

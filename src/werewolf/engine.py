@@ -11,6 +11,7 @@ from .models import (
     PublicSeerClaim,
     Role,
 )
+from .discussion_format import parse_discussion_output
 
 _CLAIMED_ROLE_NAMES = {
     "占い師": "seer",
@@ -245,8 +246,19 @@ class GameEngine:
                     tuple(self.state.alive_players),
                     tuple(self.state.conversation_log),
                 )
-                self.state.conversation_log.append(Message(player.name, content))
-                self._record_public_role_claim(player.name, content)
+                structured_output = parse_discussion_output(content)
+                if structured_output is None:
+                    self.state.conversation_log.append(Message(player.name, content))
+                    self._record_public_role_claim(player.name, content)
+                else:
+                    self.state.conversation_log.append(
+                        Message(player.name, structured_output.body)
+                    )
+                    if structured_output.claim not in {"なし", "保留"}:
+                        claim_content = (
+                            f"{structured_output.claim}\n{structured_output.body}"
+                        )
+                        self._record_public_role_claim(player.name, claim_content)
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:

@@ -1,0 +1,95 @@
+{
+  "recorded_at": "2026-10-19T08:41:25.150805+00:00",
+  "api_request_num_ctx": null,
+  "api_request_num_ctx_source": "omitted",
+  "models": {
+    "CALM3-22B-Chat-GGUF:latest": {
+      "process_ollama_context_length_env": "4096",
+      "process_ollama_num_parallel_env": "1",
+      "modelfile_num_ctx": 262000,
+      "modelfile_num_ctx_error": null,
+      "ollama_ps_context": null,
+      "ollama_ps_processor": null,
+      "ollama_ps_runner": null,
+      "ollama_ps_error": "model is not currently loaded",
+      "ollama_ps_source": "api"
+    },
+    "muse-glimmer:latest": {
+      "process_ollama_context_length_env": "4096",
+      "process_ollama_num_parallel_env": "1",
+      "modelfile_num_ctx": null,
+      "modelfile_num_ctx_error": null,
+      "ollama_ps_context": null,
+      "ollama_ps_processor": null,
+      "ollama_ps_runner": null,
+      "ollama_ps_error": "model is not currently loaded",
+      "ollama_ps_source": "api"
+    },
+    "mistral-small:24b-262000": {
+      "process_ollama_context_length_env": "4096",
+      "process_ollama_num_parallel_env": "1",
+      "modelfile_num_ctx": 262000,
+      "modelfile_num_ctx_error": null,
+      "ollama_ps_context": null,
+      "ollama_ps_processor": null,
+      "ollama_ps_runner": null,
+      "ollama_ps_error": "model is not currently loaded",
+      "ollama_ps_source": "api"
+    },
+    "glm-4.7-flash:latest": {
+      "process_ollama_context_length_env": "4096",
+      "process_ollama_num_parallel_env": "1",
+      "modelfile_num_ctx": null,
+      "modelfile_num_ctx_error": null,
+      "ollama_ps_context": null,
+      "ollama_ps_processor": null,
+      "ollama_ps_runner": null,
+      "ollama_ps_error": "model is not currently loaded",
+      "ollama_ps_source": "api"
+    },
+    "qwen3.8:27b": {
+      "process_ollama_context_length_env": "4096",
+      "process_ollama_num_parallel_env": "1",
+      "modelfile_num_ctx": null,
+      "modelfile_num_ctx_error": null,
+      "ollama_ps_context": null,
+      "ollama_ps_processor": null,
+      "ollama_ps_runner": null,
+      "ollama_ps_error": "model is not currently loaded",
+      "ollama_ps_source": "api"
+    },
+    "deepseek-r1:32b": {
+      "process_ollama_context_length_env": "4096",
+      "process_ollama_num_parallel_env": "1",
+      "modelfile_num_ctx": null,
+      "modelfile_num_ctx_error": null,
+      "ollama_ps_context": null,
+      "ollama_ps_processor": null,
+      "ollama_ps_runner": null,
+      "ollama_ps_error": "model is not currently loaded",
+      "ollama_ps_source": "api"
+    },
+    "gpt-oss-20b-262000:latest": {
+      "process_ollama_context_length_env": "4096",
+      "process_ollama_num_parallel_env": "1",
+      "modelfile_num_ctx": 262000,
+      "modelfile_num_ctx_error": null,
+      "ollama_ps_context": null,
+      "ollama_ps_processor": null,
+      "ollama_ps_runner": null,
+      "ollama_ps_error": "model is not currently loaded",
+      "ollama_ps_source": "api"
+    },
+    "gemma4:26b": {
+      "process_ollama_context_length_env": "4096",
+      "process_ollama_num_parallel_env": "1",
+      "modelfile_num_ctx": null,
+      "modelfile_num_ctx_error": null,
+      "ollama_ps_context": 4096,
+      "ollama_ps_processor": null,
+      "ollama_ps_runner": "llamacpp",
+      "ollama_ps_error": null,
+      "ollama_ps_source": "api"
+    }
+  }
+}

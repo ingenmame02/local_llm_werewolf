@@ -13,6 +13,10 @@ from .engine import (
     extract_public_seer_result,
     is_public_seer_claim,
 )
+from .discussion_format import (
+    has_discussion_output_markers,
+    parse_discussion_output,
+)
 from .models import GameState, Message, Player, PublicRoleClaim, PublicSeerClaim, Role
 from .ollama import CLAIM_ROLE_TOOL, ChatResponse, OllamaClient, OllamaError, ToolCall
 from .prompts import PromptBuilder, PromptContext
@@ -488,7 +492,11 @@ class OllamaActions(ActionPolicy):
             uses_seer_info = self._references_seer_result(actor, response_text)
             response_issue = (
                 self._discussion_response_issue(actor, response_text)
-                if action == "discussion" and response_text and not is_pass
+                if action == "discussion"
+                and response_text
+                and (
+                    not is_pass or has_discussion_output_markers(response_text)
+                )
                 else None
             )
             if metadata.get("done_reason") == "length" and attempt == 0:
@@ -675,13 +683,17 @@ class OllamaActions(ActionPolicy):
         target, result = self._latest_seer_result()
         if result == "wolf":
             return (
+                "【CO】"
                 f"占い師CO：対象={target}、判定=人狼、"
-                f"理由=実際の占い結果です、投票提案={target}に投票します。"
+                f"理由=実際の占い結果です、投票提案={target}に投票します。\n"
+                f"【本文】{target}への投票を提案します。"
             )
         return (
+            "【CO】"
             f"占い師CO：対象={target}、判定=人間、"
             f"理由=実際の占い結果を踏まえ、その人への疑いを弱めます、"
-            "投票提案=別の可能性を慎重に考えます。"
+            "投票提案=別の可能性を慎重に考えます。\n"
+            f"【本文】{target}への疑いは弱め、別の可能性を慎重に考えたいです。"
         )
 
     def _discussion_retry_instruction(
@@ -691,6 +703,7 @@ class OllamaActions(ActionPolicy):
             "empty_content": "前回は本文が空でした。短い最終回答だけを生成してください。",
             "thinking_only_response": "前回は思考だけで最終回答がありませんでした。思考を出さず、最終回答だけを生成してください。",
             "generation_truncated": "前回は生成上限で途切れました。結論だけを短く最後まで出力してください。",
+            "discussion_output_format": "前回は二層形式が不正でした。必ず「【CO】なし または CO内容」の次行に「【本文】議論本文」を出力してください。CO保留は「【CO】保留」とし、本文は空にしないでください。",
             "wrong_response_language": "指定された応答言語で短く発言してください。",
             "third_person_self_reference": "自分自身を第三者のように名前で説明せず、一人称で発言してください。",
             "unknown_player_reference": "実在しないプレイヤー名を使わず、現在のプレイヤーだけに言及してください。",
@@ -719,8 +732,23 @@ class OllamaActions(ActionPolicy):
         return "\n前回の応答は空または空白のみでした。内容のある発言をしてください。"
 
     def _discussion_response_issue(self, actor: Player, response: str) -> str | None:
+        structured_output = parse_discussion_output(response)
+        if has_discussion_output_markers(response) and structured_output is None:
+            return "discussion_output_format"
+        body = structured_output.body if structured_output is not None else response
+        claim_content = (
+            structured_output.claim
+            if structured_output is not None
+            and structured_output.claim not in {"なし", "保留"}
+            else ""
+            if structured_output is not None
+            else response
+        )
+        result_content = (
+            f"{claim_content}\n{body}" if structured_output is not None else response
+        )
         if actor.response_language == "日本語" and not re.search(
-            r"[\u3040-\u30ff\u3400-\u9fff]", response
+            r"[\u3040-\u30ff\u3400-\u9fff]", body
         ):
             return "wrong_response_language"
 
@@ -731,14 +759,14 @@ class OllamaActions(ActionPolicy):
         )
         previous_message = history[-1] if history else None
         if PromptBuilder._is_directed_to_player(actor, previous_message, history):
-            first_sentence = re.split(r"[。！？\n]", response, maxsplit=1)[0]
+            first_sentence = re.split(r"[。！？\n]", body, maxsplit=1)[0]
             if previous_message is not None and previous_message.speaker not in first_sentence:
                 return "question_not_answered_first"
 
         own_name = re.escape(actor.name)
         if re.search(
             rf"(?m)^\s*{own_name}(?:さん)?(?:は|が|も)(?=.{{0,32}}(?:人狼|村人|占い師|狂人|発言|意見|怪しい|投票))",
-            response,
+            body,
         ):
             return "third_person_self_reference"
 
@@ -746,7 +774,7 @@ class OllamaActions(ActionPolicy):
         known_players = {player.name for player in self.state.players}
         if any(name not in known_players for name in mentioned_players):
             return "unknown_player_reference"
-        claimed_role = extract_public_role_claim(response)
+        claimed_role = extract_public_role_claim(claim_content)
         public_claims = [
             claim
             for claim in self.state.public_role_claims
@@ -757,7 +785,7 @@ class OllamaActions(ActionPolicy):
         ):
             return "inconsistent_role_claim"
         public_result = extract_public_seer_result(
-            response, tuple(known_players)
+            result_content, tuple(known_players)
         )
         if public_result is not None:
             target, result = public_result
@@ -779,7 +807,7 @@ class OllamaActions(ActionPolicy):
             if (
                 actor.role is Role.SEER
                 and self.state.seer_results.get(target) == result
-                and not is_public_seer_claim(response)
+                and not is_public_seer_claim(claim_content)
                 and not any(
                     claim.claimant == actor.name
                     and claim.target == target
@@ -801,7 +829,7 @@ class OllamaActions(ActionPolicy):
                 )
             ]
             if unpublished_wolf_results and (
-                not is_public_seer_claim(response)
+                not is_public_seer_claim(claim_content)
                 or public_result
                 not in {(target, "wolf") for target in unpublished_wolf_results}
             ):
@@ -814,7 +842,7 @@ class OllamaActions(ActionPolicy):
             if re.search(
                 rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,16}}"
                 rf"(?:人狼|狂人|占い師|村人)(?:だった|でした|です|だ|と判明|と確定)",
-                response,
+                body,
             ):
                 return "unverified_dead_role"
             if re.search(
@@ -822,17 +850,17 @@ class OllamaActions(ActionPolicy):
                 rf"(?:投票(?:する|したい|すべき|しよう)?|"
                 rf"票を入れる(?:べき|べきです|べきだ|たい)?|"
                 rf"処刑(?:する|したい|すべき)?|吊(?:る|りたい|るべき))",
-                response,
+                body,
             ) or re.search(
                 rf"(?:投票先|処刑対象)(?:は|として|に)\s*{name}(?:さん)?",
-                response,
+                body,
             ):
                 return "dead_player_action_target"
 
         if re.search(
             r"(?:今夜|夜に)(?:は)?(?:私は|僕は|私が|僕が)?"
             r"(?:占う|占います|襲撃する|襲撃します)",
-            response,
+            body,
         ):
             return "out_of_phase_action_claim"
 
@@ -841,27 +869,27 @@ class OllamaActions(ActionPolicy):
             if actor.role is not Role.WOLF and (
                 re.search(
                     rf"{name}(?:さん)?(?:が|は)[^。！？\n]{{0,20}}(?:襲撃した|襲撃しました|襲った|襲いました|襲撃者(?:です|だ))",
-                    response,
+                    body,
                 )
                 or re.search(
                     rf"襲撃者は{name}(?:さん)?(?:です|だ)",
-                    response,
+                    body,
                 )
             ):
                 return "unknown_attacker_claim"
             if re.search(
                 rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}襲撃され(?:た|ました)",
-                response,
+                body,
             ) and not any(victim == player.name for _, victim in self.state.attack_deaths):
                 return "unverified_game_event"
             if re.search(
                 rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}処刑され(?:た|ました)",
-                response,
+                body,
             ) and not any(executed == player.name for _, executed in self.state.executions):
                 return "unverified_game_event"
             if re.search(
                 rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}死亡し(?:た|ました)",
-                response,
+                body,
             ) and player.is_alive:
                 return "unverified_game_event"
 
@@ -870,7 +898,7 @@ class OllamaActions(ActionPolicy):
             attributed_quote = re.compile(
                 rf"{re.escape(player.name)}(?:さん)?(?:は|が)[^。！？\n]{{0,24}}[「『\"]([^」』\"]+)[」』\"]"
             )
-            for match in attributed_quote.finditer(response):
+            for match in attributed_quote.finditer(body):
                 quote = match.group(1).strip()
                 if quote and not any(
                     message.speaker == player.name and quote in message.content
@@ -883,7 +911,7 @@ class OllamaActions(ActionPolicy):
             for message in known_speech
             if message.speaker == actor.name
         ]
-        normalized = re.sub(r"[\W_]+", "", response, flags=re.UNICODE)
+        normalized = re.sub(r"[\W_]+", "", body, flags=re.UNICODE)
         for previous in previous_speeches:
             prior_normalized = re.sub(r"[\W_]+", "", previous, flags=re.UNICODE)
             if len(normalized) >= 20 and normalized == prior_normalized:

@@ -252,6 +252,45 @@ def test_structured_seer_report_parser_accepts_equals_delimiters() -> None:
     ) == ("Player 2", "human")
 
 
+def test_discussion_output_records_claim_separately_from_body() -> None:
+    state = make_state(Role.SEER, Role.WOLF, Role.VILLAGER)
+    state.seer_results["P2"] = "human"
+    state.seer_result_history.append((1, "P2", "human"))
+
+    class TwoBlockActions(MockActions):
+        def discuss(self, player, day, alive, history):
+            if player == "P0" and not any(message.speaker == player for message in history):
+                return (
+                    "【CO】占い師CO：対象=P2、判定=人間、理由=夜の占い、"
+                    "投票提案=P1を確認\n【本文】P2は人間と判定されました。"
+                )
+            if player == "P1" and not any(message.speaker == player for message in history):
+                assert history[-1].speaker == "P0"
+                assert history[-1].content == "P2は人間と判定されました。"
+                assert any(
+                    claim.claimant == "P0"
+                    and claim.claimed_role == "seer"
+                    and claim.target == "P2"
+                    and claim.result == "human"
+                    for claim in state.public_role_claims
+                )
+                return (
+                    "【CO】なし\n"
+                    "【本文】P0の占い師COは確認したので推理を続けます。"
+                )
+            return "【CO】保留\n【本文】ほかの発言も確認します。"
+
+    GameEngine(state, TwoBlockActions()).run_discussion()
+
+    assert state.conversation_log[0].content == "P2は人間と判定されました。"
+    assert all(
+        "【CO】" not in message.content and "【本文】" not in message.content
+        for message in state.conversation_log
+        if message.speaker != "system"
+    )
+    assert not any(claim.claimant == "P1" for claim in state.public_role_claims)
+
+
 def test_text_compatible_claim_records_conflicts_without_overwriting_prior_claim() -> None:
     state = make_state(Role.VILLAGER, Role.WOLF, Role.SEER)
 

@@ -1,0 +1,6 @@
+
+[benchmark]
+psutil>=5.9
+
+[test]
+pytest>=8.0

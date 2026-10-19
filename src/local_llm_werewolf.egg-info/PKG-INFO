@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: local-llm-werewolf
+Version: 0.1.0
+Summary: A turn-based werewolf game for local language models
+Requires-Python: >=3.10
+Provides-Extra: test
+Requires-Dist: pytest>=8.0; extra == "test"
+Provides-Extra: benchmark
+Requires-Dist: psutil>=5.9; extra == "benchmark"

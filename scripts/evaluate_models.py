@@ -30,6 +30,10 @@ from werewolf import (
     Role,
     load_player_configs,
 )
+from werewolf.discussion_format import (
+    has_discussion_output_markers,
+    parse_discussion_output,
+)
 
 
 @dataclass
@@ -153,6 +157,7 @@ def evaluate_scenario(
     parsed_target: str | None = None
     is_format_compliant = False
     is_parse_valid = False
+    result_format = "invalid"
 
     current_user_prompt = user_prompt
 
@@ -200,8 +205,21 @@ def evaluate_scenario(
             )
         else:
             # discussion
-            is_format_compliant = bool(content.strip())
-            is_parse_valid = is_format_compliant
+            structured_output = parse_discussion_output(content)
+            if has_discussion_output_markers(content):
+                is_format_compliant = structured_output is not None
+                is_parse_valid = (
+                    structured_output is not None
+                    and bool(structured_output.body.strip())
+                )
+                discussion_format = (
+                    "two_block" if is_format_compliant else "invalid"
+                )
+            else:
+                is_format_compliant = bool(content.strip())
+                is_parse_valid = is_format_compliant
+                discussion_format = "legacy" if is_parse_valid else "invalid"
+            result_format = discussion_format
 
         if is_parse_valid:
             break
@@ -217,7 +235,8 @@ def evaluate_scenario(
             else:
                 current_user_prompt = (
                     f"{user_prompt}\n前回の応答は空または不正でした。"
-                    f"発言内容を入力してください。"
+                    "「【CO】なし または CO内容」の次行に"
+                    "「【本文】議論本文」を出力してください。"
                 )
 
     elapsed_seconds = round(time.perf_counter() - start_time, 4)
@@ -233,6 +252,9 @@ def evaluate_scenario(
         "model": model,
         "player_name": scenario.actor_name,
         "action_type": scenario.action_type,
+        "discussion_format": (
+            result_format if scenario.action_type == "discussion" else None
+        ),
         "options": options,
         "elapsed_seconds": elapsed_seconds,
         "status": status,
@@ -457,4 +479,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

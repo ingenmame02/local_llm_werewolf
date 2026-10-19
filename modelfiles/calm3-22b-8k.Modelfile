@@ -1,0 +1,2 @@
+FROM CALM3-22B-Chat-GGUF:latest
+PARAMETER num_ctx 8192

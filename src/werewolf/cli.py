@@ -341,12 +341,21 @@ def run_cli_game(args: argparse.Namespace) -> int:
             process_env_context = context.get(
                 "process_ollama_context_length_env", "未設定"
             )
+            modelfile_context = context.get("modelfile_num_ctx", "未設定")
+            loaded_processor = context.get("ollama_ps_processor", "不明")
+            loaded_runner = context.get("ollama_ps_runner", "不明")
+            process_parallel = context.get(
+                "process_ollama_num_parallel_env", "未設定"
+            )
             print(
-                f"{prefix} Ollama設定: num_ctx={requested_context} "
+                f"{prefix} Ollama設定: API要求num_ctx={requested_context}, "
+                f"Modelfile PARAMETER num_ctx={modelfile_context}, "
                 f"(優先元={event.get('num_ctx_source')}), "
-                f"ollama ps CONTEXT={loaded_context}, "
+                f"/api/ps CONTEXT={loaded_context}, PROCESSOR={loaded_processor}, "
+                f"RUNNER={loaded_runner}, "
                 f"PythonプロセスのOLLAMA_CONTEXT_LENGTH={process_env_context} "
-                "(Ollamaサーバー側と異なる場合があります), "
+                f"(サーバー側と異なる場合があります), OLLAMA_NUM_PARALLEL="
+                f"{process_parallel} (サーバー環境とは異なる場合があります), "
                 f"num_predict={request_options.get('num_predict', '未指定')}, "
                 f"timeout={event.get('request_timeout_seconds')}秒",
                 flush=True,

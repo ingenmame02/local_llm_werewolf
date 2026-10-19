@@ -42,6 +42,50 @@ def test_evaluate_scenario_success() -> None:
     assert result["retry_count"] == 0
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        "CALM3-22B-Chat-GGUF:latest",
+        "deepseek-r1:32b",
+        "gemma4:26b",
+        "glm-4.7-flash:latest",
+        "gpt-oss-20b-262000:latest",
+        "mistral-small:24b-262000",
+        "muse-glimmer:latest",
+        "qwen3.8:27b",
+    ],
+)
+def test_discussion_formats_are_measured_for_all_eight_configured_models(
+    model: str,
+) -> None:
+    client = MagicMock(spec=OllamaClient)
+    player = Player(name="Player 1", model=model, role=Role.VILLAGER)
+    all_names = tuple(f"Player {i}" for i in range(1, 9))
+    scenario = next(
+        item
+        for item in generate_scenarios(player, all_names)
+        if item.action_type == "discussion"
+    )
+    responses = (
+        "【CO】なし\n【本文】発言を確認して投票先を考えます。",
+        "私は村人です。発言を確認して投票先を考えます。",
+        "【CO】なし\n【本文】新しい発言を確認します。",
+    )
+
+    results = []
+    for response in responses:
+        client.chat.return_value = response
+        results.append(evaluate_scenario(client, model, scenario, {"num_ctx": 4096}))
+
+    assert [result["discussion_format"] for result in results] == [
+        "two_block",
+        "legacy",
+        "two_block",
+    ]
+    assert all(result["is_format_compliant"] for result in results)
+    assert all(result["is_parse_valid"] for result in results)
+
+
 def test_evaluate_scenario_invalid_target_format_reprompts_and_fails() -> None:
     client = MagicMock(spec=OllamaClient)
     # 1回目：形式不遵守、2回目：依然として形式不遵守

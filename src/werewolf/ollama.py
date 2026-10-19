@@ -82,9 +82,11 @@ class OllamaClient:
 
         self.endpoint = f"{base_url.rstrip('/')}/api/chat"
         self.tags_endpoint = f"{base_url.rstrip('/')}/api/tags"
+        self.ps_endpoint = f"{base_url.rstrip('/')}/api/ps"
         self.timeout = timeout
         self.max_retries = max_retries
         self._transport = transport or _urlopen_transport
+        self._modelfile_context_cache: dict[str, int | None] = {}
 
     def ping(self) -> bool:
         request = Request(self.tags_endpoint, headers={"Content-Type": "application/json"}, method="GET")
@@ -254,36 +256,139 @@ class OllamaClient:
         process_env_context = os.environ.get("OLLAMA_CONTEXT_LENGTH")
         diagnostics: dict[str, object] = {
             "process_ollama_context_length_env": process_env_context,
+            "process_ollama_num_parallel_env": os.environ.get("OLLAMA_NUM_PARALLEL"),
+            "modelfile_num_ctx": None,
+            "modelfile_num_ctx_error": None,
             "ollama_ps_context": None,
+            "ollama_ps_processor": None,
+            "ollama_ps_runner": None,
             "ollama_ps_error": None,
+            "ollama_ps_source": "api",
         }
         try:
-            result = subprocess.run(
-                ["ollama", "ps"],
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
-            )
+            if model in self._modelfile_context_cache:
+                diagnostics["modelfile_num_ctx"] = (
+                    self._modelfile_context_cache[model]
+                )
+            else:
+                modelfile = subprocess.run(
+                    ["ollama", "show", "--modelfile", model],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5.0,
+                    check=False,
+                )
+                if modelfile.returncode == 0:
+                    parsed_context = self.parse_modelfile_num_ctx(
+                        modelfile.stdout
+                    )
+                    self._modelfile_context_cache[model] = parsed_context
+                    diagnostics["modelfile_num_ctx"] = parsed_context
+                else:
+                    diagnostics["modelfile_num_ctx_error"] = (
+                        modelfile.stderr.strip()
+                        or f"ollama show exited with {modelfile.returncode}"
+                    )
         except FileNotFoundError:
-            diagnostics["ollama_ps_error"] = "ollama executable not found"
-            return diagnostics
+            diagnostics["modelfile_num_ctx_error"] = "ollama executable not found"
         except subprocess.TimeoutExpired:
-            diagnostics["ollama_ps_error"] = "ollama ps timed out"
-            return diagnostics
+            diagnostics["modelfile_num_ctx_error"] = "ollama show --modelfile timed out"
+        except OSError as error:
+            diagnostics["modelfile_num_ctx_error"] = str(error)
+
+        request = Request(
+            self.ps_endpoint,
+            headers={"Content-Type": "application/json"},
+            method="GET",
+        )
+        try:
+            response_body = self._transport(request, min(self.timeout, 3.0))
+            response = json.loads(response_body)
+            api_model = self.parse_api_ps_model(response, model)
+            if api_model is None:
+                diagnostics["ollama_ps_error"] = "model is not currently loaded"
+            else:
+                diagnostics["ollama_ps_context"] = api_model.get("context_length")
+                diagnostics["ollama_ps_processor"] = api_model.get("processor")
+                diagnostics["ollama_ps_runner"] = api_model.get("runner")
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as error:
+            diagnostics["ollama_ps_error"] = f"invalid /api/ps response: {error}"
+        except HTTPError as error:
+            diagnostics["ollama_ps_error"] = f"HTTP {error.code} from /api/ps"
+        except (TimeoutError, socket.timeout) as error:
+            diagnostics["ollama_ps_error"] = str(error) or "/api/ps timed out"
+        except URLError as error:
+            diagnostics["ollama_ps_error"] = str(error.reason)
         except OSError as error:
             diagnostics["ollama_ps_error"] = str(error)
-            return diagnostics
-
-        if result.returncode != 0:
-            diagnostics["ollama_ps_error"] = (
-                result.stderr.strip() or f"ollama ps exited with {result.returncode}"
-            )
-            return diagnostics
-        diagnostics["ollama_ps_context"] = self.parse_ollama_ps_context(
-            result.stdout, model
-        )
         return diagnostics
+
+    @staticmethod
+    def parse_api_ps_model(
+        response: object, model: str
+    ) -> dict[str, object] | None:
+        if not isinstance(response, dict):
+            raise ValueError("/api/ps response is not an object")
+        models = response.get("models")
+        if not isinstance(models, list):
+            raise ValueError("/api/ps response has no models array")
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("model")
+            if not isinstance(name, str):
+                continue
+            if not (
+                name == model
+                or name.startswith(f"{model}:")
+                or model.startswith(f"{name}:")
+            ):
+                continue
+            context = item.get("context_length", item.get("context"))
+            processor = item.get("processor")
+            if processor is None:
+                details = item.get("details")
+                if isinstance(details, dict):
+                    processor = details.get("processor")
+            return {
+                "context_length": context
+                if isinstance(context, int) and not isinstance(context, bool)
+                else None,
+                "processor": processor if isinstance(processor, str) else None,
+                "runner": item.get("runner")
+                if isinstance(item.get("runner"), str)
+                else None,
+            }
+        return None
+
+    @staticmethod
+    def parse_modelfile_num_ctx(output: str) -> int | None:
+        match = re.search(
+            r"(?im)^\s*PARAMETER\s+num_ctx\s+(\d+)\s*$",
+            output,
+        )
+        return int(match.group(1)) if match is not None else None
+
+    @staticmethod
+    def parse_ollama_ps_column(output: str, model: str, column: str) -> str | None:
+        lines = [
+            re.split(r"\s{2,}", line.strip())
+            for line in output.splitlines()
+            if line.strip()
+        ]
+        if not lines or column not in lines[0]:
+            return None
+        column_index = lines[0].index(column)
+        for values in lines[1:]:
+            if values and (
+                values[0] == model
+                or values[0].startswith(f"{model}:")
+                or model.startswith(f"{values[0]}:")
+            ):
+                return values[column_index] if column_index < len(values) else None
+        return None
 
 
 CLAIM_ROLE_TOOL: dict[str, object] = {

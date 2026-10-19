@@ -1,15 +1,47 @@
-python src/werewolf/cli.py --mode ollama --num-ctx 8192 --num-predict 2048 --timeout 180
+python src/werewolf/cli.py --mode ollama --num-predict 2048 --timeout 180
 
+`--num-ctx`は省略時、Ollama APIリクエストには含まれず、サーバー／モデル側の既定値が使われます。必要な場合だけCLIの`--num-ctx`または`config/players.json`のプレイヤー別`num_ctx`で指定してください。
 
 --show-privateで管理者用ログを生成し、端末にも表示
 --private-logで管理者用ログだけを生成
 --private-logでは端末に秘密情報を表示しない
 
-ありがとうございます。
-ゲームで改善点があります。なんとなくですが議論の回答を二つ(CO関
-連と本文)に分けた方が精度がよくなると考えます。
-また、コンテキストサイズの割にCPUを食うのでもしかすると外部から
-設定せずモデルそのもののコンテキストサイズを変更する必要があるか
-もです。(モデルの回答に使うコンテキストは変わるが、CPU割り振りな
-どの判断に使うコンテキストは変わらない)どうするかは任せます。
-よろしくお願いいたします。
+## Ollamaコンテキスト診断
+
+Modelfileの`PARAMETER num_ctx`、Pythonプロセスの`OLLAMA_CONTEXT_LENGTH`、API要求値、ロード済みモデルの`/api/ps` CONTEXT/PROCESSORは別の値です。次のコマンドでモデル別の診断を`config/ollama_context.json`へ保存できます。`--num-ctx`を省略するとAPI要求値は未指定として記録されます。
+
+```powershell
+python scripts/diagnose_ollama_context.py
+python scripts/diagnose_ollama_context.py --num-ctx 4096 --output config/ollama_context-4096.json
+```
+
+コンテキスト変更はOllamaサーバーの環境変数またはAPI要求へ設定し、モデルが既にロード済みならアンロード／再ロードしてください。Modelfileを変更する場合は元モデルを上書きせず、派生モデル名を使います。
+
+```text
+FROM existing-model:latest
+PARAMETER num_ctx 4096
+```
+
+```powershell
+ollama create werewolf-existing-model-4k -f Modelfile
+```
+
+## コンテキスト比較ベンチマーク
+
+Ollamaサーバーはゲームと同様に直列実行し、`OLLAMA_NUM_PARALLEL=1`を設定してから再起動してください（この環境変数はクライアントCLIからではなく、Ollamaサーバープロセスの環境へ設定します）。4096と8192の二層形式率・形式適合率・解析成功率・応答時間・再試行・CPU使用率・Ollamaプロセスメモリ、利用可能ならNVIDIA GPU使用率・VRAMを比較し、結果をJSONLへ追記します。
+
+```powershell
+pip install -e ".[benchmark]"
+python scripts/benchmark_context.py --context-lengths 4096 8192 --rounds 2
+```
+
+結果は`evaluation-results/context-benchmark.jsonl`に保存されます。GPU使用率とVRAMは`nvidia-smi`対応GPUがある場合に記録されます。`ollama ps`のPROCESSORはCPU/GPUへのロード割当であり、使用率そのものではありません。Modelfile設定やサーバー環境変更後はモデルを再ロードし、実際のCONTEXTとPROCESSORを確認してください。
+
+## 議論応答形式
+
+新形式は1回の生成でCOと議論本文を分離します。COは公開主張の構造化に使い、会話履歴には本文だけを追加します。旧形式の明示的な文章COも互換のため受け付けます。
+
+```text
+【CO】なし または 占い師CO：対象=Player 2、判定=人間、理由=占い結果、投票提案=Player 3へ投票
+【本文】Player 2への疑いは弱めます。Player 3の発言も確認したいです。
+```

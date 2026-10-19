@@ -1,0 +1,2 @@
+FROM gpt-oss-20b-262000:latest
+PARAMETER num_ctx 8192
