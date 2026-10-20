@@ -1517,3 +1517,300 @@ def test_action_lifecycle_events_include_reprompt_fallback_and_timing() -> None:
     assert events[3]["semantic_retries"] == 1
     assert events[3]["fallback_used"] is True
     assert isinstance(events[3]["elapsed_seconds"], float)
+
+
+# ---------------------------------------------------------------------------
+# TASK-022 占い師COの確実な公開と非対応モデル向け短縮経路
+# ---------------------------------------------------------------------------
+
+
+def make_seer_state(result: str = "human", seed: int = 31) -> GameState:
+    state = make_state(seed)
+    state.players[0].role = Role.SEER
+    state.players[2].role = Role.VILLAGER
+    state.seer_results["P2"] = result
+    state.seer_result_history.append((1, "P2", result))
+    return state
+
+
+class EndlessClient(FakeClient):
+    """用意した応答を使い切った後は、安全な既定応答を返すクライアント。"""
+
+    default_response = "公開情報を確認して投票先を考えます。"
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict[str, object] | None = None,
+    ) -> str:
+        self.prompts.append(messages[-1]["content"])
+        self.options.append(options)
+        self.timeouts.append(getattr(self, "timeout", None))
+        if not self.responses:
+            return self.default_response
+        response = self.responses.pop(0)
+        if isinstance(response, OllamaError):
+            raise response
+        return response
+
+
+def test_minimal_co_and_result_blocks_are_accepted_without_retry() -> None:
+    state = make_seer_state("human")
+    minimal = "【CO】占い師\n【結果】対象=P2 判定=人間"
+    client = FakeClient(minimal)
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == minimal
+    assert len(client.prompts) == 1
+    assert actions.traces[-1].fallback_used is False
+    assert actions.traces[-1].failure_reasons == ()
+
+
+def test_minimal_co_and_result_blocks_with_body_are_accepted() -> None:
+    state = make_seer_state("wolf")
+    minimal = (
+        "【CO】占い師\n"
+        "【結果】対象=P2 判定=人狼\n"
+        "【本文】P2への投票を提案します。"
+    )
+    client = FakeClient(minimal)
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == minimal
+    assert len(client.prompts) == 1
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_result_only_response_is_corrected_by_a_short_co_prompt() -> None:
+    state = make_seer_state("human")
+    corrected = "【CO】占い師\n【結果】対象=P2 判定=人間"
+    client = FakeClient("【CO】なし\n【結果】対象=P2 判定=人間", corrected)
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == corrected
+    # CO補正は最大1回だけ送る
+    assert len(client.prompts) == 2
+    correction = client.prompts[1]
+    assert correction.startswith("【CO補正】")
+    assert "同じ発言内で明示的に占い師COしてください" in correction
+    assert "【CO】占い師" in correction
+    assert "【結果】対象=Player X 判定=人狼/人間" in correction
+    # 長い再要求ではなく、短い補正プロンプトを使う
+    assert len(correction) < len(client.prompts[0])
+    # 占い師本人の結果だけを補正プロンプトへ含める
+    assert "対象=P2、判定=人間" in correction
+    assert actions.traces[-1].fallback_used is False
+    assert [
+        event["will_retry"]
+        for event in events
+        if event["type"] == "seer_result_claim_missing"
+    ] == [True]
+
+
+def test_result_only_response_without_markers_is_corrected_by_short_prompt() -> None:
+    state = make_seer_state("wolf")
+    corrected = (
+        "占い師CO：対象=P2、判定=人狼、理由=夜の占い結果、投票提案=P2へ投票します。"
+    )
+    client = FakeClient("P2は人狼と判定された。", corrected)
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == corrected
+    assert len(client.prompts) == 2
+    assert client.prompts[1].startswith("【CO補正】")
+    assert "同じ発言内で明示的に占い師COしてください" in client.prompts[1]
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_failed_co_correction_falls_back_to_structured_co() -> None:
+    state = make_seer_state("wolf")
+    client = FakeClient("P2は人狼と判定された。", "P2は人狼と判定された。")
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response.startswith("【CO】占い師CO：対象=P2、判定=人狼")
+    assert "【本文】" in response
+    assert len(client.prompts) == 2
+    assert actions.traces[-1].fallback_used is True
+    assert [
+        event["will_retry"]
+        for event in events
+        if event["type"] == "seer_result_claim_missing"
+    ] == [True, False]
+    assert any(event["type"] == "seer_result_claim_fallback" for event in events)
+    assert any(
+        event["type"] == "llm_action_parse_failed"
+        and event["reason"] == "seer_result_without_claim"
+        and event["will_retry"] is False
+        for event in events
+    )
+
+
+def test_natural_language_seer_co_is_accepted_without_correction() -> None:
+    state = make_seer_state("wolf")
+    natural = "私は占い師です。対象=P2、判定=人狼。"
+    client = FakeClient(natural)
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == natural
+    assert len(client.prompts) == 1
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_result_block_without_co_is_never_returned_for_non_seer() -> None:
+    state = make_state()
+    client = FakeClient(
+        "【CO】なし\n【結果】対象=P2 判定=人狼",
+        "【CO】なし\n【結果】対象=P2 判定=人狼",
+    )
+    actions = OllamaActions(state, client)
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    # COが成立しない結果は、他プレイヤーへ公開せずに安全側へ落とす
+    assert response == "パス"
+    assert len(client.prompts) == 2
+    assert client.prompts[1].startswith("【CO補正】")
+    assert actions.traces[-1].fallback_used is True
+    assert state.public_role_claims == []
+    assert state.seer_claims == []
+
+
+def test_seer_co_correction_result_is_published_to_the_next_player() -> None:
+    state = make_seer_state("human")
+    client = EndlessClient(
+        "【CO】なし\n【結果】対象=P2 判定=人間",
+        "【CO】なし\n【結果】対象=P2 判定=人間",
+        "状況を確認して投票先を考えます。",
+        "他の発言も確認します。",
+        "投票先をもう少し考えます。",
+        "P0の占い師COを確認しました。",
+        "公開情報を整理します。",
+        "今日は全体を見て判断します。",
+        "ほかの意見も確認します。",
+    )
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    GameEngine(state, actions, event_callback=events.append).run_discussion()
+
+    claims = [
+        (claim.claimant, claim.claimed_role, claim.target, claim.result)
+        for claim in state.public_role_claims
+    ]
+    # 補正に失敗した後の構造化COが、公開状態へ即時に登録される
+    assert claims == [
+        ("P0", "seer", None, None),
+        ("P0", "seer", "P2", "human"),
+    ]
+    # 次のプレイヤーのプロンプトへCOと結果が反映される
+    assert "P0は占い師を主張（P2：人間）" in client.prompts[2]
+    # 会話ログへは本文だけが入り、CO・結果ブロックや未成の結果は残らない
+    assert all(
+        "【CO】" not in message.content
+        and "【結果】" not in message.content
+        and "対象=P2" not in message.content
+        for message in state.conversation_log
+        if message.speaker != "system"
+    )
+    assert any(event["type"] == "seer_result_claim_fallback" for event in events)
+
+
+def test_wolf_seer_result_is_published_as_one_public_event() -> None:
+    state = make_seer_state("wolf")
+    client = EndlessClient(
+        "【CO】占い師\n"
+        "【結果】対象=P2 判定=人狼\n"
+        "【本文】P2への投票を提案します。",
+        "公開情報を確認して投票先を考えます。",
+        "P0の占い師COを確認しました。",
+        "他の発言も確認します。",
+        "投票先をもう少し考えます。",
+        "状況を整理します。",
+        "今日は全体を見て判断します。",
+        "ほかの意見も確認します。",
+        "議論を続けましょう。",
+    )
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    GameEngine(state, actions, event_callback=events.append).run_discussion()
+
+    # COと人狼結果が、連続した同一の公開イベント列として記録される
+    assert [
+        event["type"]
+        for event in events
+        if event["type"]
+        in {"claim_role_published", "seer_claim", "seer_result_claim"}
+    ] == ["claim_role_published", "seer_claim", "seer_result_claim"]
+    result_event = next(
+        event for event in events if event["type"] == "seer_result_claim"
+    )
+    assert (result_event["target"], result_event["claimed_result"]) == (
+        "P2",
+        "wolf",
+    )
+    # 村人側のプロンプトへCOと結果が確実に反映される
+    assert "P0は占い師を主張（P2：人狼）" in client.prompts[1]
+    assert any(
+        claim.claimant == "P0"
+        and claim.claimed_role == "seer"
+        and claim.target == "P2"
+        and claim.result == "wolf"
+        for claim in state.public_role_claims
+    )
+    assert state.conversation_log[0].content == "P2への投票を提案します。"
+
+
+def test_tool_unsupported_model_is_recorded_once_and_stops_tool_trials() -> None:
+    class ToolUnsupportedClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool_requests = 0
+            self.plain_requests = 0
+
+        def chat_with_metadata(self, model, messages, options=None, tools=None):
+            assert tools is not None
+            self.tool_requests += 1
+            raise OllamaError(
+                "http",
+                "model does not support tools",
+                attempts=1,
+                status_code=400,
+            )
+
+        def chat(self, model, messages, options=None):
+            self.plain_requests += 1
+            return "【CO】なし\n【本文】公開情報を確認して投票先を考えます。"
+
+    state = make_state()
+    events: list[dict[str, object]] = []
+    client = ToolUnsupportedClient()
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    for _ in range(3):
+        actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    # ツール非対応の事実をゲーム中の能力情報へ記録する
+    assert state.model_capabilities == {"model-0": {"claim_role_tool": False}}
+    # 判明した同一モデルへ、以後ツールを再送しない
+    assert client.tool_requests == 1
+    assert client.plain_requests == 3
+    assert [event["type"] for event in events].count("claim_tool_unavailable") == 1
+    # 文章CO経路だけで通常どおり処理される
+    assert actions.traces[-1].fallback_used is False
+    assert state.public_role_claims == []

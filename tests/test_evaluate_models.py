@@ -12,14 +12,77 @@ from scripts.evaluate_models import (
 from werewolf import ActionKind, OllamaClient, OllamaError, Player, Role
 
 
-def test_generate_scenarios_covers_four_actions() -> None:
+def test_generate_scenarios_covers_five_actions_including_seer_co() -> None:
     player = Player(name="Player 1", model="CALM3-22B", role=Role.VILLAGER)
     all_names = tuple(f"Player {i}" for i in range(1, 9))
 
     scenarios = generate_scenarios(player, all_names)
-    assert len(scenarios) == 4
+    assert len(scenarios) == 5
     action_types = [s.action_type for s in scenarios]
-    assert action_types == ["discussion", "vote", "attack", "seer"]
+    assert action_types == [
+        "discussion",
+        "vote",
+        "attack",
+        "seer",
+        "discussion_seer_co",
+    ]
+    co_scenario = next(s for s in scenarios if s.action_type == "discussion_seer_co")
+    assert co_scenario.expected_action_kind is None
+    assert co_scenario.player_names == all_names
+    assert "未公開の人狼判定" in co_scenario.prompt_ctx.user_prompt
+
+
+def test_seer_co_scenario_measures_co_establishment_and_short_correction() -> None:
+    player = Player(name="Player 1", model="CALM3-22B", role=Role.VILLAGER)
+    all_names = tuple(f"Player {i}" for i in range(1, 9))
+    scenario = next(
+        s
+        for s in generate_scenarios(player, all_names)
+        if s.action_type == "discussion_seer_co"
+    )
+
+    # 1回目：結果のみでCOなし → 短いCO補正 → 2回目：最小形式のCO＋結果
+    client = MagicMock(spec=OllamaClient)
+    client.chat.side_effect = [
+        "【CO】なし\n【本文】Player 2は人狼と判定されました。",
+        "【CO】占い師\n【結果】対象=Player 2 判定=人狼\n【本文】Player 2への投票を提案します。",
+    ]
+
+    result = evaluate_scenario(client, "CALM3-22B", scenario, {"num_ctx": 4096})
+
+    assert result["is_parse_valid"] is True
+    assert result["co_established"] is True
+    assert result["seer_result_published"] is True
+    assert result["fallback_used"] is False
+    assert result["semantic_retries"] == 1
+    retry_prompt = client.chat.call_args_list[1].kwargs["messages"][-1]["content"]
+    assert "同じ発言内で明示的に占い師COしてください" in retry_prompt
+    assert "【CO】占い師" in retry_prompt
+
+    # 自然文のCOも成立として扱う
+    legacy_client = MagicMock(spec=OllamaClient)
+    legacy_client.chat.return_value = "私は占い師です。対象=Player 2、判定=人狼。"
+    legacy_result = evaluate_scenario(
+        legacy_client, "CALM3-22B", scenario, {"num_ctx": 4096}
+    )
+    assert legacy_result["co_established"] is True
+    assert legacy_result["seer_result_published"] is True
+    assert legacy_result["is_parse_valid"] is True
+    assert legacy_result["discussion_format"] == "legacy"
+
+    # COが成立しなければフォールバック扱いになる
+    failed_client = MagicMock(spec=OllamaClient)
+    failed_client.chat.side_effect = [
+        "【CO】なし\n【本文】まだ決めかねます。",
+        "【CO】なし\n【本文】まだ決めかねます。",
+    ]
+    failed_result = evaluate_scenario(
+        failed_client, "CALM3-22B", scenario, {"num_ctx": 4096}
+    )
+    assert failed_result["co_established"] is False
+    assert failed_result["is_parse_valid"] is False
+    assert failed_result["fallback_used"] is True
+    assert failed_result["status"] == "FAILED"
 
 
 def test_evaluate_scenario_success() -> None:
@@ -205,6 +268,9 @@ def test_cli_execution_with_mock_transport(tmp_path: Path, monkeypatch) -> None:
             return f"**襲撃対象：{first_cand}**"
         elif "占い対象：" in last_user:
             return "占い対象：P2"
+        elif "未公開の人狼判定" in last_user:
+            # 占い師CO評価シナリオ：最小形式のCOと結果を返す
+            return "【CO】占い師\n【結果】対象=P2 判定=人狼\n【本文】P2への投票を提案します。"
         return "こんにちは。私は村人です。"
 
     monkeypatch.setattr(OllamaClient, "chat", mock_chat)
@@ -246,7 +312,7 @@ def test_cli_execution_with_mock_transport(tmp_path: Path, monkeypatch) -> None:
         m = f"model-{i}"
         assert m in summary_data["models"]
         model_stat = summary_data["models"][m]
-        assert model_stat["total_actions"] == 4
+        assert model_stat["total_actions"] == 5
         assert model_stat["parse_success_rate"] == 1.0
         assert model_stat["format_compliance_rate"] == 1.0
         assert model_stat["error_count"] == 0
@@ -254,12 +320,16 @@ def test_cli_execution_with_mock_transport(tmp_path: Path, monkeypatch) -> None:
         assert model_stat["semantic_retries"] == 0
         assert model_stat["total_retries"] == 0
         assert model_stat["fallback_count"] == 0
+        assert model_stat["seer_co_total"] == 1
+        assert model_stat["seer_co_established"] == 1
+        assert model_stat["seer_co_established_rate"] == 1.0
+        assert model_stat["seer_co_result_published_rate"] == 1.0
 
         # jsonl ファイルの存在確認
         jsonl_file = test_output_dir / f"{m}.jsonl"
         assert jsonl_file.exists()
         lines = jsonl_file.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 4
+        assert len(lines) == 5
         record = json.loads(lines[0])
         assert "raw_responses" in record
         assert "transport_retries" in record

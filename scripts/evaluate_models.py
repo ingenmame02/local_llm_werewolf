@@ -21,6 +21,7 @@ from werewolf import (
     ActionKind,
     ActionParser,
     ChatResponse,
+    GameState,
     Message,
     OllamaClient,
     OllamaError,
@@ -34,15 +35,37 @@ from werewolf.discussion_format import (
     has_discussion_output_markers,
     parse_discussion_output,
 )
+from werewolf.engine import extract_public_seer_result, is_public_seer_claim
 
 
 @dataclass
 class PromptTestScenario:
-    action_type: str  # "discussion", "vote", "attack", "seer"
+    action_type: str  # "discussion", "vote", "attack", "seer", "discussion_seer_co"
     prompt_ctx: PromptContext
     expected_action_kind: ActionKind | None
     candidates: tuple[str, ...]
     actor_name: str
+    player_names: tuple[str, ...] = ()
+
+
+def evaluate_seer_co_response(
+    content: str, player_names: tuple[str, ...]
+) -> tuple[bool, bool]:
+    """応答から「明示的な占い師CO」と「占い結果の公開」の成立を判定する。"""
+    structured = parse_discussion_output(content)
+    if structured is not None:
+        claim_text = structured.claim
+        result_text = "\n".join(
+            part
+            for part in (structured.claim, structured.result, structured.body)
+            if part
+        )
+    else:
+        claim_text = content
+        result_text = content
+    co_established = is_public_seer_claim(claim_text)
+    result_published = extract_public_seer_result(result_text, player_names) is not None
+    return co_established, result_published
 
 
 def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list[PromptTestScenario]:
@@ -127,6 +150,44 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
         )
     )
 
+    # 5. 未公開の人狼判定を持つ占い師の昼議論（TASK-022 CO評価）
+    seer_state = GameState(
+        players=[
+            Player(
+                name=name,
+                model=actor.model,
+                role=Role.VILLAGER,
+                is_alive=True,
+            )
+            for name in all_player_names
+        ]
+    )
+    seer_speaker = next(
+        player for player in seer_state.players if player.name == actor.name
+    )
+    seer_speaker.role = Role.SEER
+    co_target = next(name for name in all_player_names if name != actor.name)
+    seer_state.seer_results[co_target] = "wolf"
+    seer_state.seer_result_history.append((1, co_target, "wolf"))
+    seer_state.discussion_turn = 1
+    co_ctx = PromptBuilder.build_discussion_prompt(
+        actor=seer_speaker,
+        alive_players=all_player_names,
+        conversation_history=dummy_history,
+        day=1,
+        state=seer_state,
+    )
+    scenarios.append(
+        PromptTestScenario(
+            action_type="discussion_seer_co",
+            prompt_ctx=co_ctx,
+            expected_action_kind=None,
+            candidates=(),
+            actor_name=actor.name,
+            player_names=all_player_names,
+        )
+    )
+
     return scenarios
 
 
@@ -158,6 +219,8 @@ def evaluate_scenario(
     is_format_compliant = False
     is_parse_valid = False
     result_format = "invalid"
+    co_established: bool | None = None
+    seer_result_published: bool | None = None
 
     current_user_prompt = user_prompt
 
@@ -204,22 +267,29 @@ def evaluate_scenario(
                 actor=scenario.actor_name if scenario.expected_action_kind == ActionKind.VOTE else None,
             )
         else:
-            # discussion
+            # discussion / discussion_seer_co
             structured_output = parse_discussion_output(content)
             if has_discussion_output_markers(content):
                 is_format_compliant = structured_output is not None
-                is_parse_valid = (
-                    structured_output is not None
-                    and bool(structured_output.body.strip())
-                )
                 discussion_format = (
                     "two_block" if is_format_compliant else "invalid"
                 )
             else:
                 is_format_compliant = bool(content.strip())
-                is_parse_valid = is_format_compliant
-                discussion_format = "legacy" if is_parse_valid else "invalid"
+                discussion_format = "legacy" if is_format_compliant else "invalid"
             result_format = discussion_format
+            if scenario.action_type == "discussion_seer_co":
+                # 占い師CO評価：明示的なCOと占い結果公開の成立を見る
+                co_established, seer_result_published = evaluate_seer_co_response(
+                    content, scenario.player_names
+                )
+                is_parse_valid = bool(co_established and seer_result_published)
+            else:
+                is_parse_valid = is_format_compliant and bool(
+                    structured_output.body.strip()
+                    if structured_output is not None
+                    else content.strip()
+                )
 
         if is_parse_valid:
             break
@@ -233,11 +303,21 @@ def evaluate_scenario(
                     f"候補から1名を選び、最後に必ず「{_label_for_action(scenario.expected_action_kind)}：名前」とだけ明示してください。"
                 )
             else:
-                current_user_prompt = (
-                    f"{user_prompt}\n前回の応答は空または不正でした。"
-                    "「【CO】なし または CO内容」の次行に"
-                    "「【本文】議論本文」を出力してください。"
-                )
+                if scenario.action_type == "discussion_seer_co":
+                    # CO補正は本番と同じ、COと結果だけを求める短い再要求を使う
+                    current_user_prompt = (
+                        f"{user_prompt}\n"
+                        "前回の応答に明示的な占い師CO（または結果）がありませんでした。"
+                        "同じ発言内で明示的に占い師COしてください。"
+                        "「【CO】占い師」の次に"
+                        "「【結果】対象=Player X 判定=人狼」の2行だけを出力してください。"
+                    )
+                else:
+                    current_user_prompt = (
+                        f"{user_prompt}\n前回の応答は空または不正でした。"
+                        "「【CO】なし または CO内容」の次行に"
+                        "「【本文】議論本文」を出力してください。"
+                    )
 
     elapsed_seconds = round(time.perf_counter() - start_time, 4)
     total_retries = transport_retries + semantic_retries
@@ -253,8 +333,12 @@ def evaluate_scenario(
         "player_name": scenario.actor_name,
         "action_type": scenario.action_type,
         "discussion_format": (
-            result_format if scenario.action_type == "discussion" else None
+            result_format
+            if scenario.action_type in {"discussion", "discussion_seer_co"}
+            else None
         ),
+        "co_established": co_established,
+        "seer_result_published": seer_result_published,
         "options": options,
         "elapsed_seconds": elapsed_seconds,
         "status": status,
@@ -412,7 +496,13 @@ def main() -> None:
 
         # アクション種別ごとの内訳
         by_action: dict[str, Any] = {}
-        for action_name in ("discussion", "vote", "attack", "seer"):
+        for action_name in (
+            "discussion",
+            "discussion_seer_co",
+            "vote",
+            "attack",
+            "seer",
+        ):
             act_recs = [r for r in records if r["action_type"] == action_name]
             act_total = len(act_recs)
             act_valid = sum(1 for r in act_recs if r["is_parse_valid"])
@@ -433,6 +523,13 @@ def main() -> None:
                 "parse_success_rate": round(act_valid / act_total, 3) if act_total else 0.0,
             }
 
+        co_recs = [
+            r for r in records if r.get("action_type") == "discussion_seer_co"
+        ]
+        co_total = len(co_recs)
+        co_established_count = sum(1 for r in co_recs if r.get("co_established"))
+        co_published_count = sum(1 for r in co_recs if r.get("seer_result_published"))
+
         summary_by_model[model] = {
             "total_actions": total_actions,
             "format_compliance_rate": round(format_compliant_count / total_actions, 3) if total_actions else 0.0,
@@ -443,6 +540,15 @@ def main() -> None:
             "semantic_retries": semantic_retries,
             "total_retries": total_retries,
             "fallback_count": fallback_count,
+            "fallback_rate": round(fallback_count / total_actions, 3) if total_actions else 0.0,
+            "seer_co_total": co_total,
+            "seer_co_established": co_established_count,
+            "seer_co_established_rate": (
+                round(co_established_count / co_total, 3) if co_total else 0.0
+            ),
+            "seer_co_result_published_rate": (
+                round(co_published_count / co_total, 3) if co_total else 0.0
+            ),
             "average_response_seconds": avg_time,
             "options": options,
             "by_action": by_action,
@@ -475,6 +581,15 @@ def main() -> None:
     print("\n=== Evaluation Complete ===")
     print(f"Summary saved to: {summary_path}")
     print(f"Per-model logs saved to: {output_dir}/*.jsonl")
+
+    print("\n=== Seer CO comparison (CO成立率 / 結果公開率 / フォールバック率) ===")
+    for model, stat in summary_by_model.items():
+        print(
+            f"  {model}: CO成立率={stat['seer_co_established_rate']} "
+            f"({stat['seer_co_established']}/{stat['seer_co_total']}), "
+            f"結果公開率={stat['seer_co_result_published_rate']}, "
+            f"フォールバック率={stat['fallback_rate']}"
+        )
 
 
 if __name__ == "__main__":

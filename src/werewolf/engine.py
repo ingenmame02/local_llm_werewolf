@@ -251,14 +251,27 @@ class GameEngine:
                     self.state.conversation_log.append(Message(player.name, content))
                     self._record_public_role_claim(player.name, content)
                 else:
-                    self.state.conversation_log.append(
-                        Message(player.name, structured_output.body)
-                    )
-                    if structured_output.claim not in {"なし", "保留"}:
-                        claim_content = (
-                            f"{structured_output.claim}\n{structured_output.body}"
+                    # 会話本文へは`【本文】`だけを登録し、COブロック・結果ブロックは分離する。
+                    if structured_output.body:
+                        self.state.conversation_log.append(
+                            Message(player.name, structured_output.body)
                         )
-                        self._record_public_role_claim(player.name, claim_content)
+                    # COが「なし」「保留」の間は、結果ブロックを公開状態へ登録しない。
+                    if structured_output.claim not in {"なし", "保留"}:
+                        claim_parts = [
+                            part
+                            for part in (
+                                structured_output.claim,
+                                structured_output.result,
+                                structured_output.body,
+                            )
+                            if part
+                        ]
+                        self._record_public_role_claim(
+                            player.name,
+                            "\n".join(claim_parts),
+                            claim_text=structured_output.claim,
+                        )
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:
@@ -360,8 +373,12 @@ class GameEngine:
                 )
         return self.state.winner
 
-    def _record_public_role_claim(self, speaker: str, content: str) -> None:
-        claimed_role = extract_public_role_claim(content)
+    def _record_public_role_claim(
+        self, speaker: str, content: str, claim_text: str | None = None
+    ) -> None:
+        claimed_role = extract_public_role_claim(
+            claim_text if claim_text is not None else content
+        )
         if claimed_role is None:
             return
 

@@ -104,6 +104,8 @@ class GameState:
     public_role_claims: list[PublicRoleClaim] = field(default_factory=list)
     winner_reason: str | None = None
     winner_counts: dict[str, int] = field(default_factory=dict)
+    # ゲーム中に判明したモデル能力（例：{"model-x": {"claim_role_tool": False}}）。
+    model_capabilities: dict[str, dict[str, bool]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.day < 0:

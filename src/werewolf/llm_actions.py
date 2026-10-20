@@ -452,9 +452,14 @@ class OllamaActions(ActionPolicy):
         last_response_issue: str | None = None
         failure_reasons: list[str] = []
         response_metadata_history: list[dict[str, str | int | bool | None]] = []
+        last_spoken_result: tuple[str, str] | None = None
         for attempt in range(2):
             user_prompt = (
-                self._short_discussion_retry_prompt(
+                self._seer_co_correction_prompt(actor, last_spoken_result)
+                if attempt
+                and action == "discussion"
+                and last_response_issue == "seer_result_without_claim"
+                else self._short_discussion_retry_prompt(
                     actor, last_response_issue, recent_messages
                 )
                 if attempt and action == "discussion"
@@ -549,6 +554,10 @@ class OllamaActions(ActionPolicy):
                 )
             last_response_issue = response_issue
             if response_issue == "seer_result_without_claim":
+                last_spoken_result = extract_public_seer_result(
+                    response_text,
+                    tuple(player.name for player in self.state.players),
+                )
                 self._emit(
                     "seer_result_claim_missing",
                     action,
@@ -595,25 +604,24 @@ class OllamaActions(ActionPolicy):
                 )
                 return response_text
 
-            if attempt == 0:
-                reason = (
-                    response_issue
-                    if response_issue is not None
-                    else "seer_result_required"
-                    if must_use_seer_info
-                    else "invalid_discussion_response"
-                )
-                failure_reasons.append(reason)
-                self._emit(
-                    "llm_action_parse_failed",
-                    action,
-                    actor,
-                    started_at,
-                    transport_retries=max(0, transport_attempts - len(raw_responses)),
-                    reason=reason,
-                    response_metadata=metadata,
-                    will_retry=True,
-                )
+            reason = (
+                response_issue
+                if response_issue is not None
+                else "seer_result_required"
+                if must_use_seer_info
+                else "invalid_discussion_response"
+            )
+            failure_reasons.append(reason)
+            self._emit(
+                "llm_action_parse_failed",
+                action,
+                actor,
+                started_at,
+                transport_retries=max(0, transport_attempts - len(raw_responses)),
+                reason=reason,
+                response_metadata=metadata,
+                will_retry=attempt == 0,
+            )
 
         forced_seer_message = (
             self._seer_info_fallback(actor)
@@ -912,8 +920,44 @@ class OllamaActions(ActionPolicy):
             )
             + f"【修正指示】{guidance}\n"
             "回答は必ず「【CO】なし/保留/CO内容」の次行に「【本文】本文」の2行構造にしてください。"
+            "占い結果を公開する場合のみ「【CO】占い師」＋「【結果】対象=Player X 判定=人狼/人間」の行を追加できます。"
             "本文は短く1～2文にし、直前の質問があれば本文の最初に回答してください。"
         )
+
+    @staticmethod
+    def _result_label(result: str) -> str:
+        return "人狼" if result == "wolf" else "人間"
+
+    def _seer_co_correction_prompt(
+        self, actor: Player, spoken_result: tuple[str, str] | None
+    ) -> str:
+        """CO欠落を補正する、COと結果だけの短い再要求プロンプト。"""
+        lines = [
+            "【CO補正】占い結果を述べる発言に占い師COがありません。"
+            "同じ発言内で明示的に占い師COしてください。",
+            f"- あなた：{actor.name}",
+        ]
+        if actor.role is Role.SEER and self.state.seer_results:
+            target, result = self._latest_seer_result()
+            lines.append(
+                f"- あなたの占い結果：対象={target}、判定={self._result_label(result)}"
+            )
+            lines.append("この結果を占い師COとセットで公開してください。")
+        elif spoken_result is not None:
+            lines.append(
+                f"- 前回述べた結果：対象={spoken_result[0]}、"
+                f"判定={self._result_label(spoken_result[1])}"
+            )
+            lines.append("この結果を占い師COとセットで出力してください。")
+        lines.extend(
+            [
+                "COと結果だけを次の2行で出力してください。他の内容は不要です。",
+                "【CO】占い師",
+                "【結果】対象=Player X 判定=人狼/人間",
+                "理由・投票提案は任意で、付ける場合は3行目に【本文】を付けてください。",
+            ]
+        )
+        return "\n".join(lines)
 
     def _discussion_response_issue(self, actor: Player, response: str) -> str | None:
         structured_output = parse_discussion_output(response)
@@ -928,10 +972,31 @@ class OllamaActions(ActionPolicy):
             if structured_output is not None
             else response
         )
-        result_content = (
-            f"{claim_content}\n{body}" if structured_output is not None else response
+        result_block = (
+            structured_output.result if structured_output is not None else ""
         )
-        if actor.response_language == "日本語" and not re.search(
+        result_content = (
+            "\n".join(part for part in (claim_content, result_block, body) if part)
+            if structured_output is not None
+            else response
+        )
+        known_players = {player.name for player in self.state.players}
+        explicit_seer_co = is_public_seer_claim(claim_content)
+        public_result = extract_public_seer_result(result_content, tuple(known_players))
+
+        # 占い結果を公開する応答は、本文の内容を検証する前に明示的な占い師COを要求する。
+        if result_block and not explicit_seer_co:
+            return "seer_result_without_claim"
+        if public_result is not None and not explicit_seer_co:
+            target, result = public_result
+            if (
+                actor.role is Role.SEER
+                and self.state.seer_results.get(target) == result
+                and not self._has_published_seer_result(actor.name, target, result)
+            ):
+                return "seer_result_without_claim"
+
+        if body and actor.response_language == "日本語" and not re.search(
             r"[\u3040-\u30ff\u3400-\u9fff]", body
         ):
             return "wrong_response_language"
@@ -942,7 +1007,9 @@ class OllamaActions(ActionPolicy):
             if message.speaker != "system"
         )
         previous_message = history[-1] if history else None
-        if PromptBuilder._is_directed_to_player(actor, previous_message, history):
+        if body and PromptBuilder._is_directed_to_player(
+            actor, previous_message, history
+        ):
             first_sentence = re.split(r"[。！？\n]", body, maxsplit=1)[0]
             if previous_message is not None and previous_message.speaker not in first_sentence:
                 return "question_not_answered_first"
@@ -955,7 +1022,6 @@ class OllamaActions(ActionPolicy):
             return "third_person_self_reference"
 
         mentioned_players = re.findall(r"Player\s+\d+", response)
-        known_players = {player.name for player in self.state.players}
         if any(name not in known_players for name in mentioned_players):
             return "unknown_player_reference"
         claimed_role = extract_public_role_claim(claim_content)
@@ -968,9 +1034,6 @@ class OllamaActions(ActionPolicy):
             claim.claimed_role != claimed_role for claim in public_claims
         ):
             return "inconsistent_role_claim"
-        public_result = extract_public_seer_result(
-            result_content, tuple(known_players)
-        )
         if public_result is not None:
             target, result = public_result
             if any(
@@ -988,18 +1051,6 @@ class OllamaActions(ActionPolicy):
                 for claim in self.state.public_role_claims
             ):
                 return "inconsistent_seer_result"
-            if (
-                actor.role is Role.SEER
-                and self.state.seer_results.get(target) == result
-                and not is_public_seer_claim(claim_content)
-                and not any(
-                    claim.claimant == actor.name
-                    and claim.target == target
-                    and claim.result == result
-                    for claim in self.state.seer_claims
-                )
-            ):
-                return "seer_result_without_claim"
         if actor.role is Role.SEER:
             unpublished_wolf_results = [
                 target
@@ -1112,6 +1163,22 @@ class OllamaActions(ActionPolicy):
             return target, result
         return next(reversed(self.state.seer_results.items()))
 
+    def _has_published_seer_result(
+        self, claimant: str, target: str, result: str
+    ) -> bool:
+        return any(
+            claim.claimant == claimant
+            and claim.target == target
+            and claim.result == result
+            for claim in self.state.seer_claims
+        ) or any(
+            claim.claimant == claimant
+            and claim.claimed_role == Role.SEER.value
+            and claim.target == target
+            and claim.result == result
+            for claim in self.state.public_role_claims
+        )
+
     def _options_for(self, actor: Player) -> dict[str, object] | None:
         options = (
             {
@@ -1137,9 +1204,12 @@ class OllamaActions(ActionPolicy):
         increase_generation: bool,
         started_at: float,
     ) -> ChatResponse:
+        # ツール非対応と判明したモデルは、以後ツールを送らず文章CO経路だけを使う。
+        capabilities = self.state.model_capabilities.get(actor.model, {})
         tools = (
             [CLAIM_ROLE_TOOL]
             if action == "discussion"
+            and capabilities.get("claim_role_tool", True)
             and callable(getattr(self.client, "chat_with_metadata", None))
             else None
         )
@@ -1155,13 +1225,7 @@ class OllamaActions(ActionPolicy):
         except OllamaError as error:
             if tools is None or not self._is_tool_call_unsupported(error):
                 raise
-            self._emit(
-                "claim_tool_unavailable",
-                action,
-                actor,
-                started_at,
-                reason="model_does_not_support_tools",
-            )
+            self._record_tool_unsupported(actor, action, started_at)
             tools = None
             response = self._chat(
                 actor,
@@ -1231,6 +1295,21 @@ class OllamaActions(ActionPolicy):
                 "ツール呼び出しに対応していません",
             )
         )
+
+    def _record_tool_unsupported(
+        self, actor: Player, action: str, started_at: float
+    ) -> None:
+        capabilities = self.state.model_capabilities.setdefault(actor.model, {})
+        first_detection = capabilities.get("claim_role_tool") is not False
+        capabilities["claim_role_tool"] = False
+        if first_detection:
+            self._emit(
+                "claim_tool_unavailable",
+                action,
+                actor,
+                started_at,
+                reason="model_does_not_support_tools",
+            )
 
     def _handle_public_tool_call(
         self,

@@ -219,6 +219,10 @@ class GameLogger:
             "conversation_log": conversation_data,
             "votes": state.votes,
             "model_stats": self._model_stats,
+            "model_capabilities": {
+                model: dict(capabilities)
+                for model, capabilities in state.model_capabilities.items()
+            },
         }
         private_summary = {
             **public_summary,

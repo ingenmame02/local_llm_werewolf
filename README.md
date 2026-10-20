@@ -1,5 +1,19 @@
 python src/werewolf/cli.py --mode ollama --num-predict 2048 --timeout 180
 
+python src/werewolf/cli.py `
+  --mode ollama `
+  --models-file config/players.json `
+  --timeout 180 `
+  --num-predict 2048 `
+  --log-dir logs$env:CUDA_VISIBLE_DEVICES="0,1"
+
+
+$env:CUDA_VISIBLE_DEVICES="0,1"
+$env:OLLAMA_SCHED_SPREAD="1"
+$env:OLLAMA_FLASH_ATTENTION="1"
+$env:OLLAMA_CONTEXT_LENGTH="8192"
+ollama serve
+
 `--num-ctx`は省略時、Ollama APIリクエストには含まれず、サーバー／モデル側の既定値が使われます。必要な場合だけCLIの`--num-ctx`または`config/players.json`のプレイヤー別`num_ctx`で指定してください。
 
 --show-privateで管理者用ログを生成し、端末にも表示

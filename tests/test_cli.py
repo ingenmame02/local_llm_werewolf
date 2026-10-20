@@ -97,6 +97,20 @@ def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path:
     }
 
 
+def test_game_logger_records_model_tool_capability(tmp_path: Path) -> None:
+    logger = GameLogger("capability", tmp_path, {})
+    state = create_game(seed=5)
+    state.model_capabilities["werewolf-calm3-22b-8k"] = {"claim_role_tool": False}
+
+    logger.finalize(state)
+
+    result = json.loads(logger.log_file.read_text(encoding="utf-8").splitlines()[-1])
+    assert result["type"] == "game_result"
+    assert result["model_capabilities"] == {
+        "werewolf-calm3-22b-8k": {"claim_role_tool": False}
+    }
+
+
 def test_mock_actions_completes_game_via_cli(tmp_path: Path, capsys) -> None:
     log_dir = tmp_path / "logs"
     args = build_parser().parse_args([

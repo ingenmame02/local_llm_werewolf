@@ -517,3 +517,109 @@ def test_mock_policy_can_complete_a_full_game_without_external_llm() -> None:
     assert result.winner in {"village", "werewolf"}
     assert result.phase is Phase.ENDED
     assert all(not player.is_alive or player.name in result.alive_players for player in result.players)
+
+
+# ---------------------------------------------------------------------------
+# TASK-022 占い師COの確実な公開と非対応モデル向け短縮経路
+# ---------------------------------------------------------------------------
+
+
+def test_minimal_seer_co_result_blocks_are_recorded_separately_from_body() -> None:
+    state = make_state(Role.SEER, Role.WOLF, Role.VILLAGER)
+    state.seer_results["P1"] = "wolf"
+    state.seer_result_history.append((1, "P1", "wolf"))
+
+    class MinimalActions(MockActions):
+        def discuss(self, player, day, alive, history):
+            if player == "P0" and not any(
+                message.speaker == player for message in history
+            ):
+                return (
+                    "【CO】占い師\n"
+                    "【結果】対象=P1 判定=人狼\n"
+                    "【本文】P1への投票を提案します。"
+                )
+            return "【CO】なし\n【本文】公開情報を確認します。"
+
+    events: list[dict[str, object]] = []
+    GameEngine(state, MinimalActions(), event_callback=events.append).run_discussion()
+
+    # COと結果が1つの公開イベント列として登録される
+    assert [
+        (claim.day, claim.claimant, claim.target, claim.result)
+        for claim in state.seer_claims
+    ] == [
+        (1, "P0", None, None),
+        (1, "P0", "P1", "wolf"),
+    ]
+    assert [
+        (claim.claimant, claim.claimed_role, claim.target, claim.result)
+        for claim in state.public_role_claims
+    ] == [
+        ("P0", "seer", None, None),
+        ("P0", "seer", "P1", "wolf"),
+    ]
+    assert [event["type"] for event in events] == [
+        "claim_role_published",
+        "seer_claim",
+        "seer_result_claim",
+    ]
+    # 会話ログへは本文だけが入り、マーカーや結果は混入しない
+    assert state.conversation_log[0].content == "P1への投票を提案します。"
+    assert all(
+        "【CO】" not in message.content
+        and "【結果】" not in message.content
+        and "対象=P1" not in message.content
+        for message in state.conversation_log
+        if message.speaker != "system"
+    )
+
+
+def test_minimal_seer_co_without_body_records_claims_and_skips_empty_message() -> None:
+    state = make_state(Role.SEER, Role.WOLF, Role.VILLAGER)
+
+    class MinimalNoBodyActions(MockActions):
+        def discuss(self, player, day, alive, history):
+            if player == "P0" and not any(
+                message.speaker == player for message in history
+            ):
+                return "【CO】占い師\n【結果】対象=P1 判定=人狼"
+            return "【CO】なし\n【本文】公開情報を確認します。"
+
+    GameEngine(state, MinimalNoBodyActions()).run_discussion()
+
+    assert any(
+        claim.claimant == "P0"
+        and claim.claimed_role == "seer"
+        and claim.target == "P1"
+        and claim.result == "wolf"
+        for claim in state.public_role_claims
+    )
+    assert all(
+        message.content
+        for message in state.conversation_log
+        if message.speaker != "system"
+    )
+
+
+def test_result_block_is_not_published_while_co_is_withheld() -> None:
+    state = make_state(Role.SEER, Role.WOLF, Role.VILLAGER)
+
+    class WithheldActions(MockActions):
+        def discuss(self, player, day, alive, history):
+            if player == "P0" and not any(
+                message.speaker == player for message in history
+            ):
+                return "【CO】なし\n【結果】対象=P1 判定=人狼"
+            return "【CO】なし\n【本文】公開情報を確認します。"
+
+    GameEngine(state, WithheldActions()).run_discussion()
+
+    # COが成立していない結果は、公開状態にも会話ログにも残らない
+    assert state.public_role_claims == []
+    assert state.seer_claims == []
+    assert all(
+        "対象=P1" not in message.content
+        for message in state.conversation_log
+        if message.speaker != "system"
+    )

@@ -1,0 +1,640 @@
+{
+  "generated_at": "2026-10-20T13:01:28.227089+00:00",
+  "models_file": "config\\players.json",
+  "rounds": 1,
+  "timeout": 180.0,
+  "transport_retries": 0,
+  "semantic_retries": 1,
+  "total_retries": 1,
+  "fallback_count": 0,
+  "options": {
+    "temperature": 0.7,
+    "num_ctx": 8192
+  },
+  "models": {
+    "werewolf-calm3-22b-8k": {
+      "total_actions": 5,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 1,
+      "total_retries": 1,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 1,
+      "seer_co_established": 1,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "average_response_seconds": 5.744,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 8192
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "discussion_seer_co": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 1,
+          "total_retries": 1,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "werewolf-muse-glimmer-8k": {
+      "total_actions": 5,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 1,
+      "seer_co_established": 1,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "average_response_seconds": 116.167,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 8192
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "discussion_seer_co": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "werewolf-mistral-small-8k": {
+      "total_actions": 5,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 1,
+      "seer_co_established": 1,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "average_response_seconds": 6.54,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 8192
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "discussion_seer_co": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "werewolf-glm-4.7-flash-8k": {
+      "total_actions": 5,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 1,
+      "seer_co_established": 1,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "average_response_seconds": 17.002,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 8192
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "discussion_seer_co": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "werewolf-qwen3.8-8k": {
+      "total_actions": 5,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 1,
+      "seer_co_established": 1,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "average_response_seconds": 27.466,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 8192
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "discussion_seer_co": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "werewolf-deepseek-r1-8k": {
+      "total_actions": 5,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 1,
+      "seer_co_established": 1,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "average_response_seconds": 36.001,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 8192
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "discussion_seer_co": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "werewolf-gpt-oss-20b-8k": {
+      "total_actions": 5,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 1,
+      "seer_co_established": 1,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "average_response_seconds": 8.558,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 8192
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "discussion_seer_co": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    },
+    "werewolf-gemma4-8k": {
+      "total_actions": 5,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 1,
+      "seer_co_established": 1,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "average_response_seconds": 36.954,
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 8192
+      },
+      "by_action": {
+        "discussion": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "discussion_seer_co": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "vote": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "attack": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        },
+        "seer": {
+          "total": 1,
+          "format_compliant": 1,
+          "parse_valid": 1,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0
+        }
+      }
+    }
+  }
+}
