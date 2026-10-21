@@ -351,8 +351,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
             process_parallel = context.get(
                 "process_ollama_num_parallel_env", "未設定"
             )
+            request_number = event.get("request_number", 1)
+            request_reason = event.get("request_reason", "初回")
+            tool_based = event.get("tool_based", False)
+            tool_label = "ツール付き" if tool_based else "文章のみ"
             print(
-                f"{prefix} Ollama設定: API要求num_ctx={requested_context}, "
+                f"{prefix} LLM要求 #{request_number} [{request_reason}] ({tool_label}): API要求num_ctx={requested_context}, "
                 f"Modelfile PARAMETER num_ctx={modelfile_context}, "
                 f"(優先元={event.get('num_ctx_source')}), "
                 f"/api/ps CONTEXT={loaded_context}, PROCESSOR={loaded_processor}, "

@@ -217,6 +217,13 @@ class OllamaActions(ActionPolicy):
                             "generation_truncated",
                         }
                     ),
+                    request_number=request_number + 1,
+                    request_reason=(
+                        "初回"
+                        if request_number == 0
+                        else "意味的再要求"
+                    ),
+                    tool_based=False,
                 )
             except OllamaError as error:
                 last_error = error
@@ -487,6 +494,17 @@ class OllamaActions(ActionPolicy):
                         in {"empty_content", "thinking_only_response", "generation_truncated"}
                     ),
                     started_at=started_at,
+                    request_number=attempt + 1,
+                    request_reason=(
+                        "初回"
+                        if attempt == 0
+                        else (
+                            "CO補正"
+                            if last_response_issue == "seer_result_without_claim"
+                            else "意味的再要求"
+                        )
+                    ),
+                    tool_based=(action == "discussion"),
                 )
             except OllamaError as error:
                 last_error = error
@@ -785,6 +803,7 @@ class OllamaActions(ActionPolicy):
             "seer_result_without_claim": "占い結果の対象や判定を発言したため、同じ発言内で明示的に占い師COしてください。定型文「占い師CO：対象=対象名、判定=人狼/人間、理由=理由、投票提案=提案」を使ってください。結果を公開しない場合は対象名と判定を述べず、結果を伏せた発言にしてください。",
             "inconsistent_seer_result": "あなた自身が以前に主張した占い対象の判定を変更せず、過去の主張と一貫させてください。",
             "inconsistent_role_claim": "以前の役職主張を別の役職へ変更せず、一貫させてください。",
+            "vague_wait_and_see": "「様子見」や「情報不足」だけの繰り返しは避け、具体的な対象・根拠・判断を述べてください。",
         }
         if response_issue in retry_guidance:
             return f"\n前回の応答を採用できませんでした。{retry_guidance[response_issue]}"
@@ -1155,6 +1174,22 @@ class OllamaActions(ActionPolicy):
                 SequenceMatcher(None, normalized, prior_normalized).ratio() >= 0.92
             ):
                 return "repeated_speech"
+        # 様子見・情報不足のみの反復を検出（パスは除外）
+        if not self._is_pass(response):
+            vague_patterns = [
+                r"様子見",
+                r"様子を",
+                r"情報不足",
+                r"まだわからない",
+                r"判断できない",
+                r"何とも言えない",
+                r"様子を伺",
+            ]
+            import re as _re
+            if any(_re.search(p, body, _re.IGNORECASE) for p in vague_patterns):
+                # 単に様子見と言っているだけで新しい情報がない場合
+                if len(body.strip()) < 60:
+                    return "vague_wait_and_see"
         return None
 
     def _latest_seer_result(self) -> tuple[str, str]:
@@ -1203,6 +1238,9 @@ class OllamaActions(ActionPolicy):
         *,
         increase_generation: bool,
         started_at: float,
+        request_number: int = 1,
+        request_reason: str = "初回",
+        tool_based: bool = False,
     ) -> ChatResponse:
         # ツール非対応と判明したモデルは、以後ツールを送らず文章CO経路だけを使う。
         capabilities = self.state.model_capabilities.get(actor.model, {})
@@ -1221,6 +1259,9 @@ class OllamaActions(ActionPolicy):
                 tools=tools,
                 action=action,
                 started_at=started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                tool_based=tool_based,
             )
         except OllamaError as error:
             if tools is None or not self._is_tool_call_unsupported(error):
@@ -1233,6 +1274,9 @@ class OllamaActions(ActionPolicy):
                 increase_generation=increase_generation,
                 action=action,
                 started_at=started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                tool_based=False,
             )
         for _ in range(2):
             if not response.tool_calls:
@@ -1269,6 +1313,9 @@ class OllamaActions(ActionPolicy):
                 tools=tools,
                 action=action,
                 started_at=started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                tool_based=tool_based,
             )
         if response.tool_calls:
             return ChatResponse(
@@ -1514,6 +1561,9 @@ class OllamaActions(ActionPolicy):
         tools: list[dict[str, object]] | None = None,
         action: str | None = None,
         started_at: float | None = None,
+        request_number: int = 1,
+        request_reason: str = "初回",
+        tool_based: bool = False,
     ) -> ChatResponse:
         options = self._options_for(actor)
         if increase_generation:
@@ -1549,6 +1599,9 @@ class OllamaActions(ActionPolicy):
                 action,
                 actor,
                 started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                tool_based=tool_based,
                 request_options=options or {},
                 request_timeout_seconds=effective_timeout,
                 num_ctx_source=num_ctx_source,

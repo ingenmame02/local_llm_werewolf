@@ -5,7 +5,7 @@ python src/werewolf/cli.py `
   --models-file config/players.json `
   --timeout 180 `
   --num-predict 2048 `
-  --log-dir logs$env:CUDA_VISIBLE_DEVICES="0,1"
+  --log-dir logs
 
 
 $env:CUDA_VISIBLE_DEVICES="0,1"
