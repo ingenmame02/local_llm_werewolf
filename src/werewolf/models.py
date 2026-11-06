@@ -1,6 +1,9 @@
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+
+from .config import ACTION_BUDGET_KEYS
 
 
 class Role(str, Enum):
@@ -30,6 +33,9 @@ class Player:
     timeout: float | None = None
     num_predict: int | None = None
     response_language: str = "日本語"
+    num_predict_by_action: Mapping[str, int] | None = None
+    thinking: bool | None = None
+    thinking_by_action: Mapping[str, bool] | None = None
 
     def __post_init__(self) -> None:
         if self.num_ctx is not None and (
@@ -53,6 +59,38 @@ class Player:
             raise ValueError("Player num_predict must be a positive integer.")
         if not isinstance(self.response_language, str) or not self.response_language.strip():
             raise ValueError("Player response_language cannot be empty.")
+        if self.num_predict_by_action is not None:
+            if not isinstance(self.num_predict_by_action, Mapping):
+                raise ValueError(
+                    "Player num_predict_by_action must be a mapping of action keys "
+                    "to positive integers."
+                )
+            for key, num_predict in self.num_predict_by_action.items():
+                if key not in ACTION_BUDGET_KEYS:
+                    raise ValueError(
+                        f"Player num_predict_by_action contains unsupported action key {key!r}."
+                    )
+                if isinstance(num_predict, bool) or not isinstance(num_predict, int) or num_predict <= 0:
+                    raise ValueError(
+                        f"Player num_predict_by_action value for {key} must be a positive integer."
+                    )
+        if self.thinking is not None and not isinstance(self.thinking, bool):
+            raise ValueError("Player thinking must be a boolean.")
+        if self.thinking_by_action is not None:
+            if not isinstance(self.thinking_by_action, Mapping):
+                raise ValueError(
+                    "Player thinking_by_action must be a mapping of action keys "
+                    "to booleans."
+                )
+            for key, thinking in self.thinking_by_action.items():
+                if key not in ACTION_BUDGET_KEYS:
+                    raise ValueError(
+                        f"Player thinking_by_action contains unsupported action key {key!r}."
+                    )
+                if not isinstance(thinking, bool):
+                    raise ValueError(
+                        f"Player thinking_by_action value for {key} must be a boolean."
+                    )
 
 
 @dataclass(frozen=True)

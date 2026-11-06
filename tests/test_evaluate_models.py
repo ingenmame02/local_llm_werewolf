@@ -6,10 +6,12 @@ import pytest
 
 from scripts.evaluate_models import (
     PromptTestScenario,
+    build_parser,
     evaluate_scenario,
     generate_scenarios,
+    select_player_configs,
 )
-from werewolf import ActionKind, OllamaClient, OllamaError, Player, Role
+from werewolf import ActionKind, OllamaClient, OllamaError, Player, PlayerConfig, Role
 
 
 def test_generate_scenarios_covers_five_actions_including_seer_co() -> None:
@@ -336,3 +338,234 @@ def test_cli_execution_with_mock_transport(tmp_path: Path, monkeypatch) -> None:
         assert "semantic_retries" in record
         assert "total_retries" in record
         assert "fallback_used" in record
+
+def test_evaluate_scenario_doubles_generation_budget_on_generation_failure() -> None:
+    """TASK-024: 評価ハーネスも本番と同じく生成起因の再試行でnum_predictを倍へ増やす。"""
+    from werewolf import ChatResponse
+
+    client = MagicMock(spec=OllamaClient)
+    client.chat.side_effect = [
+        ChatResponse(
+            content="",
+            attempts=1,
+            done_reason="length",
+            content_length=0,
+            thinking_present=True,
+            eval_count=256,
+        ),
+        ChatResponse(
+            content="投票：Player 2",
+            attempts=1,
+            done_reason="stop",
+            content_length=len("投票：Player 2"),
+        ),
+    ]
+    player = Player(name="Player 1", model="CALM3-22B", role=Role.VILLAGER)
+    all_names = tuple(f"Player {i}" for i in range(1, 9))
+    vote_scenario = next(
+        s for s in generate_scenarios(player, all_names) if s.action_type == "vote"
+    )
+
+    result = evaluate_scenario(client, "CALM3-22B", vote_scenario, {"num_predict": 256})
+
+    assert result["is_parse_valid"] is True
+    assert result["status"] == "OK"
+    assert result["request_attempts"] == 2
+    assert result["generation_escalated"] is True
+    assert result["num_predict_by_attempt"] == [256, 512]
+    assert result["failure_reasons"] == ["generation_truncated"]
+    assert result["budget_exhausted"] is True
+    assert result["done_reason"] == "stop"
+    # 再要求は失敗理由別の短い修正指示だけを送る
+    retry_prompt = client.chat.call_args_list[1].kwargs["messages"][-1]["content"]
+    assert "生成上限で途切れました" in retry_prompt
+    assert len(retry_prompt) < len(
+        client.chat.call_args_list[0].kwargs["messages"][-1]["content"]
+    )
+
+
+def test_evaluate_scenario_disables_thinking_on_retry() -> None:
+    """TASK-024: 評価ハーネスも本番と同じく再要求で思考off・上限倍にする。"""
+    client = MagicMock(spec=OllamaClient)
+    # 1回目：空応答（思考で枯渇）、2回目：思考offの短い再要求で正解
+    responses = ["", "投票：Player 2"]
+    sent_options: list[dict[str, object]] = []
+
+    def chat(model, messages, options=None):
+        # 同じoptions辞書が再要求で変更されるため、試行ごとにコピーを記録する
+        sent_options.append(dict(options or {}))
+        return responses.pop(0)
+
+    client.chat.side_effect = chat
+
+    player = Player(name="Player 1", model="CALM3-22B", role=Role.VILLAGER)
+    all_names = tuple(f"Player {i}" for i in range(1, 9))
+    scenario = next(
+        s for s in generate_scenarios(player, all_names) if s.action_type == "vote"
+    )
+
+    result = evaluate_scenario(
+        client,
+        "CALM3-22B",
+        scenario,
+        {"temperature": 0.7, "num_predict": 256, "thinking": True},
+    )
+
+    assert result["status"] == "OK"
+    assert result["parsed_target"] == "Player 2"
+    assert result["failure_reasons"] == ["empty_content"]
+    assert result["thinking_enabled"] is True
+    assert result["thinking_by_attempt"] == [True, False]
+    assert result["thinking_disabled_on_retry"] is True
+
+    assert sent_options[0] == {
+        "temperature": 0.7,
+        "num_predict": 256,
+        "thinking": True,
+    }
+    assert sent_options[1]["thinking"] is False
+    # 生成起因の再試行では生成上限を倍へ増やす
+    assert sent_options[1]["num_predict"] == 512
+    assert client.chat.call_count == 2
+
+
+def test_evaluate_scenario_keeps_thinking_off_for_minimal_actions() -> None:
+    client = MagicMock(spec=OllamaClient)
+    client.chat.return_value = "投票：Player 2"
+
+    player = Player(name="Player 1", model="CALM3-22B", role=Role.VILLAGER)
+    all_names = tuple(f"Player {i}" for i in range(1, 9))
+    scenario = next(
+        s for s in generate_scenarios(player, all_names) if s.action_type == "vote"
+    )
+
+    result = evaluate_scenario(client, "CALM3-22B", scenario, {"thinking": False})
+
+    assert result["status"] == "OK"
+    assert result["thinking_enabled"] is False
+    assert result["thinking_by_attempt"] == [False]
+    assert result["thinking_disabled_on_retry"] is False
+    assert client.chat.call_count == 1
+
+
+def test_evaluate_scenario_thinking_unsupported_400_falls_back_without_semantic_retry() -> None:
+    """TASK-024: 評価ハーネスは思考非対応の400を意味的再試行ではなく能力切替として扱う。"""
+    client = MagicMock(spec=OllamaClient)
+    sent_options: list[dict[str, object]] = []
+
+    def chat(model, messages, options=None):
+        sent_options.append(dict(options or {}))
+        if sent_options[-1].get("thinking") is True:
+            raise OllamaError(
+                "http",
+                "model does not support thinking",
+                attempts=1,
+                status_code=400,
+            )
+        return "投票：Player 2"
+
+    client.chat.side_effect = chat
+
+    player = Player(name="Player 1", model="CALM3-22B", role=Role.VILLAGER)
+    all_names = tuple(f"Player {i}" for i in range(1, 9))
+    scenario = next(
+        s for s in generate_scenarios(player, all_names) if s.action_type == "vote"
+    )
+    capabilities: dict[str, bool] = {}
+
+    result = evaluate_scenario(
+        client,
+        "CALM3-22B",
+        scenario,
+        {"temperature": 0.7, "num_predict": 256, "thinking": True},
+        capabilities,
+    )
+
+    assert result["status"] == "OK"
+    assert result["parsed_target"] == "Player 2"
+    assert result["error"] is None
+    assert result["semantic_retries"] == 0
+    assert result["thinking_capability_fallback"] is True
+    assert result["failure_reasons"] == []
+    assert capabilities == {"CALM3-22B": False}
+    assert len(sent_options) == 2
+    assert sent_options[0]["thinking"] is True
+    assert sent_options[1]["thinking"] is False
+    # 同じ上限のまま（生成起因の倍化はしない）
+    assert sent_options[1]["num_predict"] == 256
+
+    # 判明後は最初からoffで送り、400を再度発生させない
+    client.chat.side_effect = lambda model, messages, options=None: (
+        sent_options.append(dict(options or {})) or "投票：Player 2"
+    )
+    second = evaluate_scenario(
+        client,
+        "CALM3-22B",
+        scenario,
+        {"temperature": 0.7, "num_predict": 256, "thinking": True},
+        capabilities,
+    )
+    assert second["status"] == "OK"
+    # thinking_enabledは設定値（True）のまま、実際の送信はoff
+    assert second["thinking_by_attempt"] == [False]
+    assert second["thinking_capability_fallback"] is True
+    assert sent_options[-1]["thinking"] is False
+
+
+def test_select_player_configs_keeps_all_models_without_filter() -> None:
+    configs = [
+        PlayerConfig(name=f"Player {index}", model=f"werewolf-{slug}-8k")
+        for index, slug in enumerate(
+            ["calm3-22b", "muse-glimmer", "mistral-small", "glm-4.7-flash"], start=1
+        )
+    ]
+
+    assert select_player_configs(configs, []) == configs
+    # 空白のみの指定は絞り込みなし扱いで全モデルを残す
+    assert select_player_configs(configs, ["", "   "]) == configs
+
+
+def test_select_player_configs_filters_pilot_models_by_model_or_name() -> None:
+    """TASK-024: 8モデル一括の前に、1〜2モデルだけ評価対象へ絞れる。"""
+    configs = [
+        PlayerConfig(name=f"Player {index}", model=f"werewolf-{slug}-8k")
+        for index, slug in enumerate(
+            ["calm3-22b", "muse-glimmer", "mistral-small", "glm-4.7-flash"], start=1
+        )
+    ]
+
+    by_model = select_player_configs(configs, ["muse"])
+    assert [cfg.model for cfg in by_model] == ["werewolf-muse-glimmer-8k"]
+
+    # 大文字小文字無視・モデル名とプレイヤー名の両方で一致する
+    mixed = select_player_configs(configs, ["GLM-4.7", "Player 1"])
+    assert [cfg.model for cfg in mixed] == [
+        "werewolf-calm3-22b-8k",
+        "werewolf-glm-4.7-flash-8k",
+    ]
+
+    with pytest.raises(ValueError, match="matched no configured model"):
+        select_player_configs(configs, ["nonexistent-model"])
+
+    # 空白のみの指定は絞り込みなし扱いで全モデルを残す
+    assert select_player_configs(configs, ["   "]) == configs
+
+
+def test_evaluation_parser_accepts_model_filter_and_action_budgets() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "--models",
+            "muse-glimmer",
+            "--num-predict-by-action",
+            "discussion=2048",
+            "--thinking-by-action",
+            "vote=false",
+        ]
+    )
+
+    assert args.models == ["muse-glimmer"]
+    assert args.num_predict_by_action == ["discussion=2048"]
+    assert args.thinking_by_action == ["vote=false"]
+    assert args.thinking == "auto"

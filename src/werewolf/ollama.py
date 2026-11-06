@@ -29,6 +29,34 @@ class OllamaError(Exception):
         }
 
 
+# 同じ要求を再送しても同じ結果になるエラー（能力非対応・モデル不在）は再試行しない。
+# 思考生成・ツール非対応の400を3回送ると、実送信3回分の無駄な時間と
+# 「ERROR」表示が発生するため、初回で確定させて上位の能力切替へ委ねる。
+NON_RETRYABLE_HTTP_STATUS_CODES: frozenset[int] = frozenset({400, 404, 422})
+
+NON_RETRYABLE_HTTP_MARKERS: tuple[str, ...] = (
+    "does not support thinking",
+    "doesn't support thinking",
+    "thinking is not supported",
+    "thinking not supported",
+    "does not support tools",
+    "doesn't support tools",
+    "tool calling is not supported",
+    "tool calls are not supported",
+    "tools are not supported",
+    "does not exist",
+    "model not found",
+)
+
+
+def is_non_retryable_http_error(message: str, status_code: int | None) -> bool:
+    """HTTPステータスとメッセージから、再試行しても同じ結果になるエラーかを判定する。"""
+    if status_code not in NON_RETRYABLE_HTTP_STATUS_CODES:
+        return False
+    lowered = message.casefold()
+    return any(marker in lowered for marker in NON_RETRYABLE_HTTP_MARKERS)
+
+
 Transport = Callable[[Request, float], bytes]
 
 
@@ -52,6 +80,9 @@ class ChatResponse:
     content_length: int | None = None
     thinking_present: bool = False
     tool_calls: tuple[ToolCall, ...] = ()
+    eval_count: int | None = None
+    eval_duration_ms: int | None = None
+    prompt_eval_count: int | None = None
 
     def to_metadata(self) -> dict[str, str | int | bool | None]:
         return {
@@ -62,6 +93,9 @@ class ChatResponse:
                 else len(self.content)
             ),
             "thinking_present": self.thinking_present,
+            "eval_count": self.eval_count,
+            "eval_duration_ms": self.eval_duration_ms,
+            "prompt_eval_count": self.prompt_eval_count,
         }
 
 
@@ -130,8 +164,16 @@ class OllamaClient:
             "messages": messages,
             "stream": False,
         }
-        if options:
-            payload["options"] = options
+        request_options = dict(options) if options else {}
+        # `thinking` はOllamaのリクエスト引数 `think`（思考生成のon/off）へ変換する。
+        # 本プロジェクトのPython実行環境やアプリのコンテキスト設定ではなく、
+        # このリクエストだけを制御する。num_predict は思考トークンも消費するため、
+        # 1行回答の行動では思考をoffにすることで空応答・切り詰めを減らせる。
+        thinking = request_options.pop("thinking", None)
+        if isinstance(thinking, bool):
+            payload["think"] = thinking
+        if request_options:
+            payload["options"] = request_options
         if tools:
             payload["tools"] = tools
         body = json.dumps(payload).encode("utf-8")
@@ -179,6 +221,9 @@ class OllamaClient:
                     )
                 done_reason = response.get("done_reason")
                 thinking = message.get("thinking")
+                eval_count = response.get("eval_count")
+                eval_duration = response.get("eval_duration")
+                prompt_eval_count = response.get("prompt_eval_count")
                 self._last_chat_response = ChatResponse(
                     content=content,
                     attempts=attempt,
@@ -186,6 +231,27 @@ class OllamaClient:
                     content_length=len(content),
                     thinking_present=bool(thinking) or "<think" in content.casefold(),
                     tool_calls=tuple(tool_calls),
+                    eval_count=(
+                        eval_count
+                        if isinstance(eval_count, int)
+                        and not isinstance(eval_count, bool)
+                        and eval_count >= 0
+                        else None
+                    ),
+                    eval_duration_ms=(
+                        int(eval_duration // 1_000_000)
+                        if isinstance(eval_duration, (int, float))
+                        and not isinstance(eval_duration, bool)
+                        and eval_duration >= 0
+                        else None
+                    ),
+                    prompt_eval_count=(
+                        prompt_eval_count
+                        if isinstance(prompt_eval_count, int)
+                        and not isinstance(prompt_eval_count, bool)
+                        and prompt_eval_count >= 0
+                        else None
+                    ),
                 )
                 return content
             except HTTPError as error:
@@ -196,6 +262,8 @@ class OllamaClient:
                     attempts=attempt,
                     status_code=error.code,
                 )
+                if is_non_retryable_http_error(last_error.message, error.code):
+                    raise last_error
             except (TimeoutError, socket.timeout) as error:
                 last_error = OllamaError(
                     kind="timeout", message=str(error) or "Request timed out.", attempts=attempt

@@ -1,7 +1,36 @@
-from .config import PlayerConfig, load_player_configs
+from .config import (
+    ACTION_BUDGET_KEYS,
+    ACTION_BUDGET_DEFAULT_LABELS,
+    DEFAULT_ACTION_NUM_PREDICT,
+    DEFAULT_THINKING_BY_ACTION,
+    MINIMAL_ACTION_MAX_NUM_PREDICT,
+    MINIMAL_OUTPUT_ACTION_KEYS,
+    PlayerConfig,
+    THINKING_AFFORDABLE_NUM_PREDICT,
+    THINKING_BUDGET_EXHAUSTED_REASON,
+    THINKING_BUDGET_SOURCE,
+    THINKING_CAPABILITY_SOURCE,
+    THINKING_DEFAULT_LABELS,
+    THINKING_NUM_PREDICT_SOURCE,
+    THINKING_RESOLUTION_PRIORITY,
+    load_player_configs,
+    parse_action_num_predict_pairs,
+    parse_thinking_by_action_pairs,
+    validate_action_num_predict,
+    validate_thinking_by_action,
+)
 from .action_parser import ActionKind, ActionParser
 from .engine import ActionPolicy, GameEngine, MockActions
-from .llm_actions import ActionTrace, OllamaActions
+from .llm_actions import (
+    ACTION_BUDGET_KEY_ALIASES,
+    ACTION_BUDGET_RESOLUTION_PRIORITY,
+    ActionTrace,
+    OllamaActions,
+    apply_thinking_floor,
+    normalize_action_budget_key,
+    resolve_action_num_predict,
+    resolve_thinking,
+)
 from .models import (
     GameState,
     Message,
@@ -11,7 +40,13 @@ from .models import (
     PublicSeerClaim,
     Role,
 )
-from .ollama import ChatResponse, OllamaClient, OllamaError, ToolCall
+from .ollama import (
+    ChatResponse,
+    OllamaClient,
+    OllamaError,
+    ToolCall,
+    is_non_retryable_http_error,
+)
 from .setup import create_game
 from .cli import build_parser, run_cli_game
 from .prompts import (
@@ -49,4 +84,28 @@ __all__ = [
     "ROLE_DESCRIPTIONS_JA",
     "build_parser",
     "run_cli_game",
+    "ACTION_BUDGET_KEYS",
+    "ACTION_BUDGET_DEFAULT_LABELS",
+    "ACTION_BUDGET_KEY_ALIASES",
+    "ACTION_BUDGET_RESOLUTION_PRIORITY",
+    "DEFAULT_ACTION_NUM_PREDICT",
+    "MINIMAL_ACTION_MAX_NUM_PREDICT",
+    "MINIMAL_OUTPUT_ACTION_KEYS",
+    "parse_action_num_predict_pairs",
+    "validate_action_num_predict",
+    "normalize_action_budget_key",
+    "resolve_action_num_predict",
+    "apply_thinking_floor",
+    "DEFAULT_THINKING_BY_ACTION",
+    "THINKING_DEFAULT_LABELS",
+    "THINKING_RESOLUTION_PRIORITY",
+    "THINKING_CAPABILITY_SOURCE",
+    "THINKING_AFFORDABLE_NUM_PREDICT",
+    "THINKING_NUM_PREDICT_SOURCE",
+    "THINKING_BUDGET_SOURCE",
+    "THINKING_BUDGET_EXHAUSTED_REASON",
+    "parse_thinking_by_action_pairs",
+    "validate_thinking_by_action",
+    "resolve_thinking",
+    "is_non_retryable_http_error",
 ]

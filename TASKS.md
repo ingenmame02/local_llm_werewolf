@@ -778,8 +778,10 @@ Player 1は実際には占い結果を発言したが、「私は占い師です
 
 ## TASK-024 — 行動種別ごとの適応的な回答文量
 
-状態：未着手
+状態：完了（実装・自動テスト完了 / 8モデル実機評価はローカルLLM実行担当者が実施）
 対象ログ：`logs/game_9bd960a6facd.jsonl`
+追加対象ログ：`evaluation-results/task022-co`
+実機評価結果：`evaluation-results/task024`（行動別上限・思考既定なしの比較）、`evaluation-results/task024-think`（思考on/off比較）
 
 ### 背景
 
@@ -806,4 +808,52 @@ Player 1は実際には占い結果を発言したが、「私は占い師です
 - 文量を増やした議論で、具体性・質問回答・事実整合性が改善するか比較できる。
 - CO・投票・襲撃・占いの形式成功率と処理時間を悪化させない。
 - 量子化評価と同じ指標で結果をJSONLへ保存できる。
+
+## TASK-025 — プレイヤー1のモデル再評価とプレイヤー個性の導入
+
+状態：未着手
+対象ログ：`logs/game_b560ee86e280.jsonl`
+
+### 背景
+
+今回の議論全体は以前より具体的になった一方、Player 1（`werewolf-calm3-22b-8k`）は占い師としての結果公開・対象選択で再試行が集中した。`seer_result_without_claim`や`invalid_target`が発生しており、モデル自体の能力、占い師役職との相性、生成設定のいずれが原因かを切り分ける必要がある。また、全員が似た語彙・論法で発言するため、モデルごとの個性が見えにくい。
+
+### 実装要件
+
+- Player 1候補として現在のCALM3とqwen-flashを含む少なくとも2モデルを、同一の占い師CO・人狼判定公開・対象選択シナリオで比較する。
+- CO成立率、占い結果公開率、不正対象率、再試行数、フォールバック率、処理時間、発言の具体性をモデル別に記録する。
+- 1回の評価だけでモデルを交換せず、複数ラウンドまたは固定シナリオで傾向を確認する。
+- 個性プロファイルを役職説明とは分離して追加する。例：分析重視、質問重視、積極追及、慎重検証、合意形成、直感重視など。
+- 個性プロファイルは推理の方向や勝敗条件を上書きせず、話し方・注目点・議論姿勢だけを変更する。
+- 同じモデルを別個性で動かした場合にも、公開情報・秘匿情報・行動制約が変わらないことをテストする。
+- 個性による発言の多様性を、語彙の差だけでなく、質問対象・疑いの根拠・投票提案の分散として評価する。
+- 個性追加後も、現在改善している事実整合性・質問応答・CO形式・パース成功率を維持する。
+
+### 初期評価方針
+
+- まず実戦ゲーム全体を変更せず、Player 1だけをqwen-flashへ置き換えた短い評価を行う。
+- 次にPlayer 1を元のCALM3へ戻し、個性プロファイルだけを変更した比較を行う。
+- 結果が安定するまで、8人全員のモデルを同時に変更しない。
+
+### 完了条件
+
+- Player 1候補モデルの比較結果がJSONLとサマリに保存される。
+- モデル交換の判断が、CO・占い・議論・速度の指標に基づいて説明できる。
+- 少なくとも複数の個性プロファイルが設定ファイルから指定できる。
+- 個性の違いと、役職・公開情報・モデル能力の違いを評価ログで区別できる。
+- 既存テスト、コンパイル、差分チェックが成功する。
+- ローカルLLMのテストはユーザーが行う
+
+実装メモ：
+
+- 行動別生成上限を導入。既定値は議論(1536)、人狼相談(768)、襲撃(256)、占い(256)、投票(256)、CO補正(256)。優先順位はplayer行動別(`num_predict_by_action`) → CLI行動別(`--num-predict-by-action`) → 全体設定 → player全体 → CLI全体 → 行動別既定値。
+- 襲撃・占い・投票・CO補正は最終回答が1行（COは最小3行）で済む行動として扱い、全体`num_predict`が大きい思考系モデルではキャップ（襲撃/占い/投票=768、CO補正=384）へ降ろす（`num_predict_source=global_capped`）。議論・人狼相談は根拠説明用の文量を確保するため全体設定をそのまま使う。
+- `config/players.json` にモデル別・行動別上限を設定した。GLMは空応答多発のため議論1536・対象選択1024へ増やし、Muse/Gemma/DeepSeekは対象選択を768〜1024へ抑えて長時間応答を削減する。
+- 生成起因の再試行（空応答・思考のみ・`done_reason=length`）では`num_predict`を倍へ増やして再送し、同じ長いプロンプトは再送しない。本番は理由別短い再要求（CO補正・軽い再要求・対象選択再要求）を使い、評価ハーネスも同じ短縮再要求と上限エスカレーションを行う。
+- Ollama応答の`done_reason`・`thinking`・`eval_count`・`eval_duration`・`prompt_eval_count`を管理者ログと評価JSONLへ記録し、空応答/思考のみ/切り詰めを分離集計する。議論の文量目安を2〜4文から5〜8文へ緩和し、無内容な「様子見」だけを繰り返さない指示へ変更した。占い師の人狼判定公開は3行最小例（`【CO】占い師`／`【結果】対象=Player X 判定=人狼`／`【本文】…`）をプロンプトへ明示。
+- リトライ多発の要因はOllamaの`num_predict`が思考トークンを消費する点だった。実機ログでは思考系モデルの投票・襲撃・占い・CO補正が思考で上限を食い、`done_reason=length`＋空content→再試行（`generation_truncated`）になっていた。そこで思考生成を行動別に制御し、既定で襲撃・占い・投票・CO補正をoff、議論・人狼相談をonとする（`DEFAULT_THINKING_BY_ACTION`）。Ollamaへはリクエスト毎の`think`として送り、優先順位はplayer行動別(`thinking_by_action`) → CLI行動別(`--thinking-by-action`) → player全体(`thinking`) → CLI全体(`--thinking`) → 行動別既定値。再要求は思考offへ切り替え（`thinking_source=retry_thinking_off`）、再要求プロンプトには実際の送信値（倍化した`num_predict`と「思考生成（think）はオフ」）を反映して指示とリクエストを一致させる。CLI・JSONL・評価サマリへ`thinking_enabled`・`thinking_source`・`thinking_off_requests`・`thinking_retry_off_requests`を記録する。
+- 議論のERROR（HTTP 400）の要因は、思考非対応モデルへ`think=true`を送っていた点だった。400を検出したら同じ要求を再送せず、ただちに`think=false`で1回だけ再送し、`thinking_unavailable`イベント・`GameState.model_capabilities`へ記録して以後の全行動もoffにする（`thinking_source=model_capability`）。CLI・評価サマリへ思考非対応への切替と`thinking_capability_fallback`を反映する。
+- 思考onでは思考トークンが`num_predict`を消費するため、設定未指定（行動別既定値）の議論・人狼相談だけ下限へ引き上げる（議論3072・人狼相談1536、`num_predict_source=thinking_allowance`）。player行動別・CLI行動別・全体設定・キャップ済み値は上書きしない（`apply_thinking_floor`共有）。下限適用値は実際のoptionsと再要求プロンプトの両方へ反映し、表示値と送信値を一致させる。思考だけで上限を消費したモデルは`thinking_budget_exhausted`として記録し、以後そのモデルの思考行動はoffへ落とす。
+- 評価ハーネスに`--models`（部分一致、複数指定可）を追加し、8モデル一括前に1〜2モデルだけで品質・速度を比較できる。サマリへ`models_filter`・`selected_models`を記録し、議論プロンプトは常に8人分の名前を使う。ローカルLLMの負荷を避けるため、実機評価は本タスクの実行時には実施していない（`python scripts/evaluate_models.py --models calm3 --timeout 120 --output evaluation-results/task024-pilot` のように1モデルずつ実行する）。
+- 検証：`pytest` 234件成功、`compileall`成功、`git diff --check`成功、CLI/評価スクリプトの`--help`確認済み。実機8モデル評価（`python scripts/evaluate_models.py`）はローカルLLM実行担当者が実施し、`done_reason`別失敗理由・実送信回数・行動別上限の出所・思考off送信数を比較する。
 

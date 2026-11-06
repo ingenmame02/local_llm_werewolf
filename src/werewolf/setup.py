@@ -34,6 +34,9 @@ def create_game(
             timeout=config.timeout,
             num_predict=config.num_predict,
             response_language=config.response_language,
+            num_predict_by_action=config.num_predict_by_action,
+            thinking=config.thinking,
+            thinking_by_action=config.thinking_by_action,
         )
         for config, role in zip(player_configs, roles, strict=True)
     ]

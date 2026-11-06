@@ -13,6 +13,18 @@ from .engine import (
     extract_public_seer_result,
     is_public_seer_claim,
 )
+from .config import (
+    ACTION_BUDGET_KEYS,
+    DEFAULT_ACTION_NUM_PREDICT,
+    DEFAULT_THINKING_BY_ACTION,
+    MINIMAL_ACTION_MAX_NUM_PREDICT,
+    MINIMAL_OUTPUT_ACTION_KEYS,
+    THINKING_AFFORDABLE_NUM_PREDICT,
+    THINKING_BUDGET_EXHAUSTED_REASON,
+    THINKING_BUDGET_SOURCE,
+    THINKING_CAPABILITY_SOURCE,
+    THINKING_NUM_PREDICT_SOURCE,
+)
 from .discussion_format import (
     has_discussion_output_markers,
     parse_discussion_output,
@@ -23,6 +35,156 @@ from .prompts import PromptBuilder, PromptContext, ROLE_NAMES_JA
 
 _THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 _UNCLOSED_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
+
+# 行動別生成上限の解決優先順位:
+# player行動別 > CLI行動別 > 全体設定（対象選択・CO補正は行動別キャップへ降ろす）
+# > player全体 > CLI全体 > 行動別既定値
+ACTION_BUDGET_RESOLUTION_PRIORITY: tuple[str, ...] = (
+    "player_by_action",
+    "cli_by_action",
+    "global_capped",
+    "player_global",
+    "cli_global",
+    "default_by_action",
+)
+
+# 軽い再要求で回復しない場合にモデル設定変更を検討させるための注記
+LIGHT_RETRY_EXHAUSTED_NOTE = (
+    "軽い要求でも回復しない場合は、num_predictまたはモデルの量子化設定を変更してください。"
+)
+
+# 生成起因の応答失敗（再試行で生成上限を倍へ増やす理由）
+GENERATION_ISSUE_REASONS: frozenset[str] = frozenset(
+    {"empty_content", "thinking_only_response", "generation_truncated"}
+)
+
+
+# 行動キーの別名（設定ファイルで使いやすい名前を正規キーへ寄せる）
+ACTION_BUDGET_KEY_ALIASES: dict[str, str] = {
+    "wolf_consult": "wolf_discussion",
+    "target": "vote",
+    "discussion_seer_co": "co_correction",
+}
+
+
+def normalize_action_budget_key(budget_key: str, *, fallback: str = "discussion") -> str:
+    """行動別生成上限のキーを正規化し、未知のキーは fallback に寄せる。"""
+    normalized = budget_key.strip().lower()
+    if normalized in ACTION_BUDGET_KEYS:
+        return normalized
+    if normalized in ACTION_BUDGET_KEY_ALIASES:
+        return ACTION_BUDGET_KEY_ALIASES[normalized]
+    return fallback
+
+
+def _global_num_predict(
+    player: Player | None, cli_options: dict[str, object] | None
+) -> tuple[int | None, str | None]:
+    """player全体 > CLI全体 の順で全体生成上限を返す。"""
+    if player is not None and player.num_predict is not None:
+        return player.num_predict, "player_global"
+    if cli_options is not None:
+        cli_global = cli_options.get("num_predict")
+        if isinstance(cli_global, int) and not isinstance(cli_global, bool):
+            return cli_global, "cli_global"
+    return None, None
+
+
+def resolve_action_num_predict(
+    player: Player | None,
+    cli_options: dict[str, object] | None,
+    budget_key: str,
+) -> tuple[int | None, str]:
+    """行動別生成上限を優先順位で解決する。
+
+    player行動別 > CLI行動別 > 全体設定 > 行動別既定値。
+    対象選択・CO補正は全体設定が大きい場合、行動別キャップへ降ろす。
+    議論・人狼相談は根拠を説明できる文量を確保するため全体設定をそのまま使う。
+    """
+    key = normalize_action_budget_key(budget_key)
+    if player is not None:
+        by_action = (
+            player.num_predict_by_action.get(key)
+            if player.num_predict_by_action is not None
+            else None
+        )
+        if isinstance(by_action, int) and not isinstance(by_action, bool):
+            return by_action, "player_by_action"
+    if cli_options is not None:
+        cli_by_action = cli_options.get(f"num_predict_by_action:{key}")
+        if isinstance(cli_by_action, int) and not isinstance(cli_by_action, bool):
+            return cli_by_action, "cli_by_action"
+
+    global_value, global_source = _global_num_predict(player, cli_options)
+    default = DEFAULT_ACTION_NUM_PREDICT.get(key)
+
+    if key in MINIMAL_OUTPUT_ACTION_KEYS:
+        cap = MINIMAL_ACTION_MAX_NUM_PREDICT.get(key)
+        if global_value is not None:
+            if cap is not None and global_value > cap:
+                return cap, "global_capped"
+            return global_value, global_source or "default_by_action"
+        if default is not None:
+            return default, "default_by_action"
+        return None, "ollama_service_default"
+
+    if global_value is not None:
+        return global_value, global_source or "default_by_action"
+    if default is not None:
+        return default, "default_by_action"
+    return None, "ollama_service_default"
+def resolve_thinking(
+    player: Player | None,
+    cli_options: dict[str, object] | None,
+    budget_key: str,
+) -> tuple[bool | None, str]:
+    """行動別の思考生成（Ollamaの `think`）を優先順位で解決する。
+
+    優先順位: player行動別 > CLI行動別 > player全体 > CLI全体 > 行動別既定値
+    解決できない場合は (None, "ollama_service_default") でOllama側既定に委ねる。
+    """
+    key = normalize_action_budget_key(budget_key)
+    if player is not None and player.thinking_by_action is not None:
+        by_action = player.thinking_by_action.get(key)
+        if isinstance(by_action, bool):
+            return by_action, "player_by_action"
+    if cli_options is not None:
+        cli_by_action = cli_options.get(f"thinking_by_action:{key}")
+        if isinstance(cli_by_action, bool):
+            return cli_by_action, "cli_by_action"
+    if player is not None and isinstance(player.thinking, bool):
+        return player.thinking, "player_global"
+    if cli_options is not None and isinstance(cli_options.get("thinking"), bool):
+        return cli_options["thinking"], "cli_global"
+    default = DEFAULT_THINKING_BY_ACTION.get(key)
+    if default is not None:
+        return default, "default_by_action"
+    return None, "ollama_service_default"
+
+
+def apply_thinking_floor(
+    num_predict: int | None,
+    num_predict_source: str,
+    thinking_enabled: bool | None,
+    budget_key: str,
+) -> tuple[int | None, str]:
+    """思考onの行動で、設定未指定（行動別既定値）時のみ思考残余用の下限を適用する。
+
+    思考onでは思考トークンがnum_predictを消費するため、既定値の議論・人狼相談では
+    最終回答（5〜8文）が最後まで生成できる残余を下限として確保する（TASK-024）。
+    player・CLIの行動別/全体設定は優先順位上より高いため、下限で上書きしない。
+    """
+    if thinking_enabled is not True or num_predict_source != "default_by_action":
+        return num_predict, num_predict_source
+    floor = THINKING_AFFORDABLE_NUM_PREDICT.get(normalize_action_budget_key(budget_key))
+    if (
+        floor is None
+        or not isinstance(num_predict, int)
+        or isinstance(num_predict, bool)
+        or num_predict >= floor
+    ):
+        return num_predict, num_predict_source
+    return floor, THINKING_NUM_PREDICT_SOURCE
 
 
 @dataclass(frozen=True)
@@ -74,6 +236,8 @@ class OllamaActions(ActionPolicy):
             prompt_ctx,
             f"{wolf} は相談に応答できませんでした。",
             started_at,
+            recent_messages=history,
+            budget_key="wolf_discussion",
         )
 
     def choose_attack(self, wolves: tuple[str, ...], candidates: tuple[str, ...]) -> str:
@@ -96,6 +260,7 @@ class OllamaActions(ActionPolicy):
             prompt_ctx,
             started_at,
             forbidden=wolves,
+            budget_key="attack",
         )
 
     def choose_seer_target(
@@ -118,7 +283,12 @@ class OllamaActions(ActionPolicy):
             state=self.state,
         )
         return self._select_target(
-            ActionKind.SEER, actor, eligible_candidates, prompt_ctx, started_at
+            ActionKind.SEER,
+            actor,
+            eligible_candidates,
+            prompt_ctx,
+            started_at,
+            budget_key="seer",
         )
 
     def discuss(
@@ -140,6 +310,7 @@ class OllamaActions(ActionPolicy):
             f"{player} は発言できませんでした。",
             started_at,
             recent_messages=history,
+            budget_key="discussion",
         )
 
     def vote(
@@ -171,6 +342,7 @@ class OllamaActions(ActionPolicy):
             prompt_ctx,
             started_at,
             forbid_self=True,
+            budget_key="vote",
         )
 
     def _select_target(
@@ -182,6 +354,7 @@ class OllamaActions(ActionPolicy):
         started_at: float,
         forbid_self: bool = False,
         forbidden: tuple[str, ...] = (),
+        budget_key: str = "vote",
     ) -> str:
         valid_candidates = self._valid_candidates(
             actor, candidates, forbid_self=forbid_self, forbidden=forbidden
@@ -189,7 +362,20 @@ class OllamaActions(ActionPolicy):
         if not valid_candidates:
             raise ValueError(f"No valid candidates for {action.value} by {actor.name}.")
 
-        user_prompts = [prompt_ctx.user_prompt]
+        def _with_budget(
+            prompt: str,
+            *,
+            escalated: bool = False,
+            thinking_off: bool = False,
+        ) -> str:
+            return prompt + self._attempt_generation_guidance(
+                actor,
+                budget_key,
+                escalated=escalated,
+                thinking_off=thinking_off,
+            )
+
+        user_prompts = [_with_budget(prompt_ctx.user_prompt)]
         raw_responses: list[str] = []
         parsed_targets: list[str | None] = []
         last_error: OllamaError | None = None
@@ -210,13 +396,10 @@ class OllamaActions(ActionPolicy):
                     messages,
                     increase_generation=(
                         request_number == 1
-                        and last_response_issue
-                        in {
-                            "empty_content",
-                            "thinking_only_response",
-                            "generation_truncated",
-                        }
+                        and last_response_issue in GENERATION_ISSUE_REASONS
                     ),
+                    action=action,
+                    started_at=started_at,
                     request_number=request_number + 1,
                     request_reason=(
                         "初回"
@@ -224,6 +407,10 @@ class OllamaActions(ActionPolicy):
                         else "意味的再要求"
                     ),
                     tool_based=False,
+                    budget_key=budget_key,
+                    # 再要求は1行形式だけを求めるため、思考をoffにして
+                    # 思考トークンが num_predict を消費しないようにする。
+                    disable_thinking=request_number == 1,
                 )
             except OllamaError as error:
                 last_error = error
@@ -250,11 +437,14 @@ class OllamaActions(ActionPolicy):
                         will_retry=True,
                     )
                     user_prompts.append(
-                        self._target_retry_prompt(
-                            action,
-                            actor,
-                            valid_candidates,
-                            "context_overflow_compacted",
+                        _with_budget(
+                            self._target_retry_prompt(
+                                action,
+                                actor,
+                                valid_candidates,
+                                "context_overflow_compacted",
+                            ),
+                            thinking_off=True,
                         )
                     )
                     semantic_retries += 1
@@ -332,11 +522,15 @@ class OllamaActions(ActionPolicy):
                 if request_number == 0:
                     semantic_retries += 1
                     user_prompts.append(
-                        self._target_retry_prompt(
-                            action,
-                            actor,
-                            valid_candidates,
-                            failure_reason,
+                        _with_budget(
+                            self._target_retry_prompt(
+                                action,
+                                actor,
+                                valid_candidates,
+                                failure_reason,
+                            ),
+                            escalated=failure_reason in GENERATION_ISSUE_REASONS,
+                            thinking_off=True,
                         )
                     )
                 continue
@@ -362,11 +556,14 @@ class OllamaActions(ActionPolicy):
             if request_number == 0:
                 semantic_retries += 1
                 user_prompts.append(
-                    self._target_retry_prompt(
-                        action,
-                        actor,
-                        valid_candidates,
-                        "invalid_target" if target is not None else "invalid_action_response",
+                    _with_budget(
+                        self._target_retry_prompt(
+                            action,
+                            actor,
+                            valid_candidates,
+                            "invalid_target" if target is not None else "invalid_action_response",
+                        ),
+                        thinking_off=True,
                     )
                 )
 
@@ -452,6 +649,7 @@ class OllamaActions(ActionPolicy):
         fallback: str,
         started_at: float,
         recent_messages: tuple[Message, ...] | None = None,
+        budget_key: str = "discussion",
     ) -> str:
         raw_responses: list[str] = []
         last_error: OllamaError | None = None
@@ -461,15 +659,24 @@ class OllamaActions(ActionPolicy):
         response_metadata_history: list[dict[str, str | int | bool | None]] = []
         last_spoken_result: tuple[str, str] | None = None
         for attempt in range(2):
-            user_prompt = (
-                self._seer_co_correction_prompt(actor, last_spoken_result)
-                if attempt
+            is_co_correction = (
+                attempt
                 and action == "discussion"
                 and last_response_issue == "seer_result_without_claim"
+            )
+            is_light_retry = bool(attempt) and not is_co_correction
+            user_prompt = (
+                self._seer_co_correction_prompt(actor, last_spoken_result)
+                if is_co_correction
                 else self._short_discussion_retry_prompt(
                     actor, last_response_issue, recent_messages
                 )
-                if attempt and action == "discussion"
+                if is_light_retry and action == "discussion"
+                else self._wolf_consult_light_retry_prompt(
+                    actor,
+                    recent_messages,
+                )
+                if is_light_retry and action == "wolf_discussion"
                 else prompt_ctx.user_prompt
                 + (
                     self._discussion_retry_instruction(
@@ -478,6 +685,16 @@ class OllamaActions(ActionPolicy):
                     if attempt
                     else ""
                 )
+            )
+            attempt_budget_key = "co_correction" if is_co_correction else budget_key
+            generation_escalation = (
+                attempt == 1 and last_response_issue in GENERATION_ISSUE_REASONS
+            )
+            user_prompt += self._attempt_generation_guidance(
+                actor,
+                attempt_budget_key,
+                escalated=generation_escalation,
+                thinking_off=attempt == 1,
             )
             messages = [
                 {"role": "system", "content": prompt_ctx.system_prompt},
@@ -488,11 +705,7 @@ class OllamaActions(ActionPolicy):
                     actor,
                     messages,
                     action,
-                    increase_generation=(
-                        attempt == 1
-                        and last_response_issue
-                        in {"empty_content", "thinking_only_response", "generation_truncated"}
-                    ),
+                    increase_generation=generation_escalation,
                     started_at=started_at,
                     request_number=attempt + 1,
                     request_reason=(
@@ -500,11 +713,17 @@ class OllamaActions(ActionPolicy):
                         if attempt == 0
                         else (
                             "CO補正"
-                            if last_response_issue == "seer_result_without_claim"
+                            if is_co_correction
+                            else "軽い再要求"
+                            if is_light_retry and action == "discussion"
                             else "意味的再要求"
                         )
                     ),
                     tool_based=(action == "discussion"),
+                    budget_key=attempt_budget_key,
+                    # 再要求（CO補正・軽い再要求）は短い必須項目だけを求めるため、
+                    # 思考をoffにして思考トークンの消費による再失敗を防ぐ。
+                    disable_thinking=attempt == 1,
                 )
             except OllamaError as error:
                 last_error = error
@@ -569,6 +788,16 @@ class OllamaActions(ActionPolicy):
                     if metadata.get("thinking_present")
                     or self._has_thinking(chat_response.content)
                     else "empty_content"
+                )
+            if (
+                metadata.get("done_reason") == "length"
+                and metadata.get("thinking_present")
+                and not response_text
+            ):
+                # 思考生成が生成上限をすべて消費し、本文が生成されなかった。
+                # 同じ失敗を毎ターン繰り返さないため、このモデルの思考行動をoffへ落とす。
+                self._record_thinking_budget_exhausted(
+                    actor, action, started_at, metadata
                 )
             last_response_issue = response_issue
             if response_issue == "seer_result_without_claim":
@@ -784,9 +1013,19 @@ class OllamaActions(ActionPolicy):
         self, action: str, actor: Player, response_issue: str | None = None
     ) -> str:
         retry_guidance = {
-            "empty_content": "前回は本文が空でした。短い最終回答だけを生成してください。",
-            "thinking_only_response": "前回は思考だけで最終回答がありませんでした。思考を出さず、最終回答だけを生成してください。",
-            "generation_truncated": "前回は生成上限で途切れました。結論だけを短く最後まで出力してください。",
+            "empty_content": (
+                "前回は本文が空でした。思考・前置きを出さず、"
+                "【本文】へ5～8文の最終回答だけを出力してください。"
+            ),
+            "thinking_only_response": (
+                "前回は思考だけで最終回答がありませんでした。思考を出さず、"
+                "【本文】へ5～8文の最終回答だけを出力してください。"
+            ),
+            "generation_truncated": (
+                "前回は生成上限で途切れました。二層形式のまま、【本文】を5～8文で"
+                "途中で止めずに最後まで出力してください。思考・前置き・説明は出さず、"
+                "回答・確認できる事実・疑う根拠・次に確認したい点の4要素をすべて含めてください。"
+            ),
             "discussion_output_format": "前回は二層形式が不正でした。必ず「【CO】なし または CO内容」の次行に「【本文】議論本文」を出力してください。CO保留は「【CO】保留」とし、本文は空にしないでください。",
             "wrong_response_language": "指定された応答言語で短く発言してください。",
             "third_person_self_reference": "自分自身を第三者のように名前で説明せず、一人称で発言してください。",
@@ -940,7 +1179,129 @@ class OllamaActions(ActionPolicy):
             + f"【修正指示】{guidance}\n"
             "回答は必ず「【CO】なし/保留/CO内容」の次行に「【本文】本文」の2行構造にしてください。"
             "占い結果を公開する場合のみ「【CO】占い師」＋「【結果】対象=Player X 判定=人狼/人間」の行を追加できます。"
-            "本文は短く1～2文にし、直前の質問があれば本文の最初に回答してください。"
+            "本文は5～8文を目安に、直前の質問への回答・確認できる事実・疑う対象と根拠・"
+            "次に確認したい点の4要素をすべて含め、途中で止めずに最後まで出力してください。"
+        )
+
+    @staticmethod
+    def _escalated_num_predict(limit: int) -> int:
+        """生成起因の再試行で送信する生成上限（倍、最大8192）。"""
+        return max(limit, min(limit * 2, 8192))
+
+    def _attempt_generation_guidance(
+        self,
+        actor: Player,
+        budget_key: str,
+        *,
+        escalated: bool = False,
+        thinking_off: bool = False,
+    ) -> str:
+        """実際に送信する予定の上限・思考設定をプロンプトへ反映する。
+
+        再要求では `_chat`側で思考offと生成上限の倍化が行われるため、
+        プロンプトの指示が実際のリクエストとずれないようにする。
+        """
+        limit, _source = resolve_action_num_predict(
+            player=actor,
+            cli_options=self.options,
+            budget_key=budget_key,
+        )
+        if not thinking_off:
+            thinking_enabled_for_floor, _ = resolve_thinking(actor, self.options, budget_key)
+            limit, _source = apply_thinking_floor(
+                limit, _source, thinking_enabled_for_floor, budget_key
+            )
+        effective_limit = limit
+        if escalated:
+            base = limit if isinstance(limit, int) and not isinstance(limit, bool) else 512
+            effective_limit = self._escalated_num_predict(base)
+        return self._generation_budget_guidance(
+            actor,
+            budget_key,
+            thinking_enabled=False if thinking_off else None,
+            num_predict=effective_limit,
+        )
+
+    def _generation_budget_guidance(
+        self,
+        actor: Player,
+        budget_key: str,
+        *,
+        thinking_enabled: bool | None = None,
+        num_predict: int | None = None,
+    ) -> str:
+        """行動別生成上限に対する最終回答用の残余トークンを指示する。
+
+        再要求では実際に送信する値（思考off・増加後の上限）を受け取り、
+        プロンプトの指示と実際のリクエストを一致させる。
+        """
+        if num_predict is None:
+            num_predict, _ = resolve_action_num_predict(
+                player=actor,
+                cli_options=self.options,
+                budget_key=budget_key,
+            )
+        if thinking_enabled is None:
+            thinking_enabled, _ = resolve_thinking(actor, self.options, budget_key)
+        notes = ""
+        if thinking_enabled is False:
+            notes = (
+                "\nこのリクエストでは思考生成（think）はオフです。"
+                "思考・前置きを書かず、要求形式の最終回答だけを出力してください。"
+            )
+        if num_predict is None:
+            return notes
+        output_share = max(1, round(num_predict * 3 // 10))
+        key = normalize_action_budget_key(budget_key)
+        if key in {"discussion", "wolf_discussion"}:
+            # 議論・人狼相談は根拠を説明する文量が必要なので、残余トークンを
+            # 「短文」ではなく具体的な文量として指示する（TASK-024の文量緩和）。
+            body_share = max(1, round(num_predict * 6 // 10))
+            return (
+                f"\n【生成上限】num_predict={num_predict}トークン。"
+                f"末尾{body_share}トークン程度を【本文】の最終回答へ使い、"
+                "5〜8文で質問への回答・確認できる事実・疑う対象と根拠・"
+                "次に確認したい点を書き、途中で止めずに最後まで出力してください。"
+                f"{notes}"
+            )
+        return (
+            f"\n【生成上限】num_predict={num_predict}トークン。"
+            f"末尾{output_share}トークン程度を最終回答に残し、"
+            "結論・根拠・未確認情報を短文で区切ってください。"
+            f"{notes}"
+        )
+
+    def _wolf_consult_light_retry_prompt(
+        self,
+        actor: Player,
+        recent_messages: tuple[Message, ...] | None = None,
+    ) -> str:
+        """人狼相談の軽い再要求。前の長い相談文を繰り返さない。"""
+        partner = actor.partner
+        wolf_chat = recent_messages if recent_messages is not None else ()
+        recent_consult = [
+            f"{message.speaker}: {message.content[:160]}"
+            for message in wolf_chat[-2:]
+            if message.speaker != "system"
+        ]
+        alive = tuple(
+            name
+            for name in self.state.alive_players
+            if name != actor.name and name != partner
+        )
+        return (
+            "人狼相談の軽い再要求です。前の長い相談文は参照しません。\n"
+            "【確定した事実】\n"
+            f"- あなたのプレイヤー名：{actor.name}\n"
+            f"- あなたの役職：{ROLE_NAMES_JA[actor.role]}\n"
+            f"- 人狼の相手：{partner}\n"
+            f"- 現在の日数：{self.state.day}日目\n"
+            f"- 襲撃候補の生存者：{', '.join(alive) or 'なし'}\n"
+            f"- 直近の相談（未確認）：{'; '.join(recent_consult) or 'なし'}\n"
+            "【要求】次の2項目だけを日本語の短文で書いてください。\n"
+            "1. 襲撃対象の候補1名\n"
+            "2. 襲撃しない候補と理由\n"
+            "自分自身を第三者として言及せず、一人称で書いてください。"
         )
 
     @staticmethod
@@ -1214,21 +1575,66 @@ class OllamaActions(ActionPolicy):
             for claim in self.state.public_role_claims
         )
 
-    def _options_for(self, actor: Player) -> dict[str, object] | None:
+    def _options_for(
+        self,
+        actor: Player,
+        budget_key: str = "discussion",
+        *,
+        disable_thinking: bool = False,
+    ) -> tuple[dict[str, object] | None, str, bool | None, str]:
+        """行動別生成上限と思考生成を優先順位で解決して options を組み立てる。
+
+        num_predict優先順位: player行動別 > CLI行動別 > 全体設定（対象選択・CO補正はキャップ適用）
+        > 行動別既定値
+        思考優先順位: player行動別 > CLI行動別 > player全体 > CLI全体 > 行動別既定値
+        再要求（disable_thinking=True）では思考を強制的にoffにする。
+        """
+        key = normalize_action_budget_key(budget_key)
+        num_predict, num_predict_source = resolve_action_num_predict(
+            player=actor,
+            cli_options=self.options,
+            budget_key=key,
+        )
         options = (
             {
-                key: value
-                for key, value in self.options.items()
+                option_key: value
+                for option_key, value in self.options.items()
                 if value is not None
+                and not option_key.startswith("num_predict_by_action:")
+                and not option_key.startswith("thinking_by_action:")
             }
             if self.options is not None
             else {}
         )
         if actor.num_ctx is not None:
             options["num_ctx"] = actor.num_ctx
-        if actor.num_predict is not None:
-            options["num_predict"] = actor.num_predict
-        return options or None
+        if num_predict is not None:
+            options["num_predict"] = num_predict
+        thinking_enabled, thinking_source = resolve_thinking(actor, self.options, key)
+        capabilities = self.state.model_capabilities.get(actor.model, {})
+        if capabilities.get("thinking") is False and thinking_enabled is True:
+            # そのモデルは思考生成非対応と判明しているため、設定指定より先にoffへ落とす。
+            # 同一要求の400再試行（実送信3回）を防ぐ。
+            thinking_enabled = False
+            thinking_source = THINKING_CAPABILITY_SOURCE
+        elif capabilities.get("thinking_budget") is False and thinking_enabled is True:
+            # 思考onでは思考トークンが生成上限をすべて消費して最終回答が空になったため、
+            # このモデルの思考行動はoffへ落とす（offなら同じ上限で本文が生成できる）。
+            thinking_enabled = False
+            thinking_source = THINKING_BUDGET_SOURCE
+        if disable_thinking:
+            thinking_enabled = False
+            thinking_source = "retry_thinking_off"
+        num_predict, num_predict_source = apply_thinking_floor(
+            num_predict, num_predict_source, thinking_enabled, key
+        )
+        if num_predict is not None:
+            # 思考下限で変更した値も実際に送信するoptionsへ反映しないと、
+            # 優先元だけ表示され送信値は変わらない。
+            options["num_predict"] = num_predict
+        if thinking_enabled is not None:
+            options["thinking"] = thinking_enabled
+        return options or None, num_predict_source, thinking_enabled, thinking_source
 
     def _chat_with_claim_tools(
         self,
@@ -1241,6 +1647,8 @@ class OllamaActions(ActionPolicy):
         request_number: int = 1,
         request_reason: str = "初回",
         tool_based: bool = False,
+        budget_key: str = "discussion",
+        disable_thinking: bool = False,
     ) -> ChatResponse:
         # ツール非対応と判明したモデルは、以後ツールを送らず文章CO経路だけを使う。
         capabilities = self.state.model_capabilities.get(actor.model, {})
@@ -1262,6 +1670,8 @@ class OllamaActions(ActionPolicy):
                 request_number=request_number,
                 request_reason=request_reason,
                 tool_based=tool_based,
+                budget_key=budget_key,
+                disable_thinking=disable_thinking,
             )
         except OllamaError as error:
             if tools is None or not self._is_tool_call_unsupported(error):
@@ -1277,6 +1687,8 @@ class OllamaActions(ActionPolicy):
                 request_number=request_number,
                 request_reason=request_reason,
                 tool_based=False,
+                budget_key=budget_key,
+                disable_thinking=disable_thinking,
             )
         for _ in range(2):
             if not response.tool_calls:
@@ -1316,6 +1728,8 @@ class OllamaActions(ActionPolicy):
                 request_number=request_number,
                 request_reason=request_reason,
                 tool_based=tool_based,
+                budget_key=budget_key,
+                disable_thinking=disable_thinking,
             )
         if response.tool_calls:
             return ChatResponse(
@@ -1324,6 +1738,8 @@ class OllamaActions(ActionPolicy):
                 done_reason=response.done_reason,
                 content_length=0,
                 thinking_present=response.thinking_present,
+                eval_count=response.eval_count,
+                eval_duration_ms=response.eval_duration_ms,
             )
         return response
 
@@ -1342,6 +1758,72 @@ class OllamaActions(ActionPolicy):
                 "ツール呼び出しに対応していません",
             )
         )
+
+    @staticmethod
+    def _is_thinking_unsupported(error: OllamaError) -> bool:
+        """Ollamaが思考生成（think）非対応を理由に400を返したかどうか。"""
+        message = error.message.casefold()
+        return any(
+            marker in message
+            for marker in (
+                "does not support thinking",
+                "doesn't support thinking",
+                "thinking is not supported",
+                "thinking not supported",
+                "does not support reasoning",
+                "thinkingモード",
+                "思考生成に対応していません",
+                "思考に対応していません",
+            )
+        )
+
+    def _record_thinking_unsupported(
+        self,
+        actor: Player,
+        action: str | None,
+        started_at: float | None,
+    ) -> None:
+        """思考生成非対応を能力情報へ記録し、以後の行動ではthink=falseだけを送る。"""
+        capabilities = self.state.model_capabilities.setdefault(actor.model, {})
+        first_detection = capabilities.get("thinking") is not False
+        capabilities["thinking"] = False
+        if first_detection and action is not None and started_at is not None:
+            self._emit(
+                "thinking_unavailable",
+                action,
+                actor,
+                started_at,
+                reason="model_does_not_support_thinking",
+            )
+
+    def _record_thinking_budget_exhausted(
+        self,
+        actor: Player,
+        action: str,
+        started_at: float,
+        metadata: dict[str, str | int | bool | None],
+    ) -> None:
+        """思考onの応答が思考トークンだけで生成上限を消費したモデルを記録する。
+
+        実機ログでは議論の思考が num_predict をすべて消費し、本文が空のまま
+        done_reason=length になった。同じ上限で再試行しても同じ結果になるため、
+        以後の同一モデルの思考行動（議論・人狼相談）はoffへ自動で切り替える。
+        offでは同じ num_predict のほとんどが本文に使えるため、文量はむしろ増える。
+        """
+        capabilities = self.state.model_capabilities.setdefault(actor.model, {})
+        first_detection = capabilities.get("thinking_budget") is not False
+        capabilities["thinking_budget"] = False
+        if first_detection:
+            self._emit(
+                "thinking_budget_exhausted",
+                action,
+                actor,
+                started_at,
+                reason=THINKING_BUDGET_EXHAUSTED_REASON,
+                eval_count=metadata.get("eval_count"),
+                num_predict=metadata.get("num_predict"),
+                content_length=metadata.get("content_length"),
+            )
 
     def _record_tool_unsupported(
         self, actor: Player, action: str, started_at: float
@@ -1564,13 +2046,18 @@ class OllamaActions(ActionPolicy):
         request_number: int = 1,
         request_reason: str = "初回",
         tool_based: bool = False,
+        budget_key: str = "discussion",
+        disable_thinking: bool = False,
     ) -> ChatResponse:
-        options = self._options_for(actor)
+        options, num_predict_source, thinking_enabled, thinking_source = self._options_for(
+            actor, budget_key, disable_thinking=disable_thinking
+        )
         if increase_generation:
             current_limit = options.get("num_predict", 512) if options else 512
             if isinstance(current_limit, int) and not isinstance(current_limit, bool):
                 options = dict(options or {})
                 options["num_predict"] = max(current_limit, min(current_limit * 2, 8192))
+                num_predict_source = "retry_generation_boost"
         original_timeout = getattr(self.client, "timeout", None)
         effective_timeout = (
             actor.timeout
@@ -1579,35 +2066,58 @@ class OllamaActions(ActionPolicy):
         )
         if original_timeout is not None and actor.timeout is not None:
             self.client.timeout = actor.timeout
-        if (
-            action is not None
-            and started_at is not None
-            and callable(getattr(self.client, "context_diagnostics", None))
-        ):
+        max_retries = getattr(self.client, "max_retries", 2)
+        context_diagnostics: dict[str, object] = {}
+        if callable(getattr(self.client, "context_diagnostics", None)):
             context_diagnostics = self.client.context_diagnostics(actor.model)
-            requested_num_ctx = options.get("num_ctx") if options else None
-            if actor.num_ctx is not None:
-                num_ctx_source = "player_setting"
-            elif self.options is not None and self.options.get("num_ctx") is not None:
-                num_ctx_source = "cli_setting"
-            elif requested_num_ctx is not None:
-                num_ctx_source = "api_request"
-            else:
-                num_ctx_source = "ollama_service_default_or_environment"
+        requested_num_ctx = options.get("num_ctx") if options else None
+        if actor.num_ctx is not None:
+            num_ctx_source = "player_setting"
+        elif self.options is not None and self.options.get("num_ctx") is not None:
+            num_ctx_source = "cli_setting"
+        elif requested_num_ctx is not None:
+            num_ctx_source = "api_request"
+        else:
+            num_ctx_source = "ollama_service_default_or_environment"
+
+        def emit_request_configuration(
+            request_options: dict[str, object],
+            thinking_value: bool | None,
+            thinking_label: str,
+            reason: str,
+        ) -> None:
+            """実際に送信するリクエスト設定をログ・CLIへ反映する。"""
+            if (
+                action is None
+                or started_at is None
+                or not callable(getattr(self.client, "context_diagnostics", None))
+            ):
+                return
             self._emit(
                 "llm_request_configuration",
                 action,
                 actor,
                 started_at,
                 request_number=request_number,
-                request_reason=request_reason,
+                request_reason=reason,
                 tool_based=tool_based,
-                request_options=options or {},
+                request_options=request_options,
                 request_timeout_seconds=effective_timeout,
                 num_ctx_source=num_ctx_source,
+                num_predict=request_options.get("num_predict"),
+                num_predict_source=num_predict_source,
+                action_budget_key=normalize_action_budget_key(budget_key),
+                thinking_enabled=thinking_value,
+                thinking_source=thinking_label,
+                max_retries=max_retries,
                 context_diagnostics=context_diagnostics,
             )
-        try:
+
+        emit_request_configuration(
+            options or {}, thinking_enabled, thinking_source, request_reason
+        )
+
+        def send(request_options: dict[str, object] | None) -> ChatResponse:
             if hasattr(self.client, "_last_chat_response"):
                 delattr(self.client, "_last_chat_response")
             if tools is not None and callable(
@@ -1616,11 +2126,11 @@ class OllamaActions(ActionPolicy):
                 return self.client.chat_with_metadata(
                     actor.model,
                     messages,
-                    options=options,
+                    options=request_options,
                     tools=tools,
                 )
-            if options is not None:
-                content = self.client.chat(actor.model, messages, options=options)
+            if request_options is not None:
+                content = self.client.chat(actor.model, messages, options=request_options)
             else:
                 content = self.client.chat(actor.model, messages)
             metadata = getattr(self.client, "_last_chat_response", None)
@@ -1632,6 +2142,27 @@ class OllamaActions(ActionPolicy):
                 content_length=len(content),
                 thinking_present=self._has_thinking(content),
             )
+
+        try:
+            try:
+                return send(options)
+            except OllamaError as error:
+                # 思考生成非対応のモデルでは400が返る。同じ要求を再送せず、
+                # think=offで1回だけ再送し、能力情報を記録して以後の行動もoffにする。
+                if not self._is_thinking_unsupported(error) or not (
+                    options and options.get("thinking") is True
+                ):
+                    raise
+                self._record_thinking_unsupported(actor, action, started_at)
+                fallback_options = dict(options or {})
+                fallback_options["thinking"] = False
+                emit_request_configuration(
+                    fallback_options,
+                    False,
+                    THINKING_CAPABILITY_SOURCE,
+                    f"{request_reason}（思考非対応のためthink=off再送）",
+                )
+                return send(fallback_options)
         finally:
             if original_timeout is not None:
                 self.client.timeout = original_timeout

@@ -19,6 +19,11 @@ if str(SRC_DIR) not in sys.path:
 
 
 from werewolf import (
+    ACTION_BUDGET_DEFAULT_LABELS,
+    ACTION_BUDGET_KEYS,
+    DEFAULT_ACTION_NUM_PREDICT,
+    DEFAULT_THINKING_BY_ACTION,
+    THINKING_DEFAULT_LABELS,
     ActionPolicy,
     GameEngine,
     GameState,
@@ -32,6 +37,9 @@ from werewolf import (
     Role,
     create_game,
     load_player_configs,
+    normalize_action_budget_key,
+    parse_action_num_predict_pairs,
+    parse_thinking_by_action_pairs,
 )
 
 # フェーズ表示用ラベル
@@ -120,11 +128,35 @@ class GameLogger:
                     + float(record.get("elapsed_seconds", 0.0)),
                     3,
                 )
+                response_metadata = record.get("response_metadata")
+                if isinstance(response_metadata, dict):
+                    eval_count = response_metadata.get("eval_count")
+                    if isinstance(eval_count, int) and not isinstance(eval_count, bool):
+                        stats["eval_count_total"] += eval_count
+                    eval_duration_ms = response_metadata.get("eval_duration_ms")
+                    if isinstance(eval_duration_ms, int) and not isinstance(eval_duration_ms, bool):
+                        stats["eval_duration_ms_total"] += eval_duration_ms
+                budget_key = record.get("action_budget_key")
+                num_predict = record.get("num_predict")
+                if isinstance(budget_key, str) and isinstance(num_predict, int):
+                    stats["action_budgets"][budget_key] = num_predict
                 error = record.get("error")
                 if record.get("failure_reason") == "timeout" or (
                     isinstance(error, dict) and error.get("kind") == "timeout"
                 ):
                     stats["timeout_count"] += 1
+        if isinstance(model, str) and record.get("type") == "llm_request_configuration":
+            stats = self._model_stats.setdefault(model, self._new_model_stats())
+            if record.get("thinking_enabled") is False:
+                stats["thinking_disabled_requests"] += 1
+            elif record.get("thinking_enabled") is True:
+                stats["thinking_enabled_requests"] += 1
+        if isinstance(model, str) and record.get("type") == "thinking_unavailable":
+            stats = self._model_stats.setdefault(model, self._new_model_stats())
+            stats["thinking_capability_fallbacks"] += 1
+        if isinstance(model, str) and record.get("type") == "thinking_budget_exhausted":
+            stats = self._model_stats.setdefault(model, self._new_model_stats())
+            stats["thinking_budget_fallbacks"] += 1
         self._append_to_file(record, self.log_file, private=False)
         if self.private_log_file is not None:
             self._append_to_file(
@@ -147,6 +179,17 @@ class GameLogger:
             "truncated_count": 0,
             "elapsed_seconds": 0.0,
             "failure_reasons": {},
+            # eval_count / eval_duration_ms は Ollama の生成トーク数・生成時間メトリクス
+            "eval_count_total": 0,
+            "eval_duration_ms_total": 0,
+            "action_budgets": {},
+            # 思考生成（think=false）で送信したリクエスト数
+            "thinking_disabled_requests": 0,
+            "thinking_enabled_requests": 0,
+            # 思考生成非対応と判明して think=off へ切り替えたモデルの数
+            "thinking_capability_fallbacks": 0,
+            # 思考が生成上限を消費して切り詰め、think=offへ自動切替した回数
+            "thinking_budget_fallbacks": 0,
         }
 
     def _append_to_file(
@@ -172,6 +215,13 @@ class GameLogger:
                 stats["empty_response_rate"] = round(
                     stats["empty_response_count"] / actions, 4
                 )
+                stats["avg_eval_count"] = round(stats["eval_count_total"] / actions, 2)
+                stats["avg_eval_duration_ms"] = round(
+                    stats["eval_duration_ms_total"] / actions, 2
+                )
+            else:
+                stats["avg_eval_count"] = 0.0
+                stats["avg_eval_duration_ms"] = 0.0
 
         public_players_data = [
             {
@@ -264,12 +314,20 @@ def run_cli_game(args: argparse.Namespace) -> int:
     print(f"プレイヤー設定: {args.models_file}")
     print(f"ログ保存先: {log_dir / f'game_{game_id}.jsonl'}")
 
-    options: dict[str, object] = {
-        "temperature": args.temperature,
-        "num_predict": args.num_predict,
-    }
+    action_num_predict = parse_action_num_predict_pairs(args.num_predict_by_action)
+    action_thinking = parse_thinking_by_action_pairs(args.thinking_by_action)
+
+    options: dict[str, object] = {"temperature": args.temperature}
+    if args.num_predict is not None:
+        options["num_predict"] = args.num_predict
     if args.num_ctx is not None:
         options["num_ctx"] = args.num_ctx
+    if args.thinking in {"on", "off"}:
+        options["thinking"] = args.thinking == "on"
+    for key, value in action_num_predict.items():
+        options[f"num_predict_by_action:{key}"] = value
+    for key, value in action_thinking.items():
+        options[f"thinking_by_action:{key}"] = value
 
     # ゲーム初期化
     state = create_game(seed=args.seed, config_path=Path(args.models_file))
@@ -280,9 +338,72 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "options": options,
         "timeout": args.timeout,
         "num_predict": args.num_predict,
+        "num_predict_by_action": action_num_predict,
+        "default_action_num_predict": dict(DEFAULT_ACTION_NUM_PREDICT),
+        "thinking": args.thinking,
+        "thinking_by_action": action_thinking,
+        "default_thinking_by_action": dict(DEFAULT_THINKING_BY_ACTION),
         "base_url": args.base_url,
         "show_private": args.show_private,
     }
+    print(f"行動別生成上限（規定）: {' / '.join(ACTION_BUDGET_DEFAULT_LABELS.values())}")
+    print(
+        f"CLI全体num_predict: "
+        f"{args.num_predict if args.num_predict is not None else '未設定（行動別既定を使う）'}"
+    )
+    print(
+        "CLI行動別num_predict: "
+        + (
+            " / ".join(f"{key}={value}" for key, value in action_num_predict.items())
+            if action_num_predict
+            else "未設定"
+        )
+    )
+    print(f"行動別思考生成（規定）: {' / '.join(THINKING_DEFAULT_LABELS.values())}")
+    print(
+        "CLI全体思考設定: "
+        + (
+            f"{'on' if args.thinking == 'on' else 'off'}"
+            if args.thinking in {"on", "off"}
+            else "未設定（行動別既定を使う）"
+        )
+    )
+    print(
+        "CLI行動別思考設定: "
+        + (
+            " / ".join(
+                f"{key}={'on' if value else 'off'}"
+                for key, value in action_thinking.items()
+            )
+            if action_thinking
+            else "未設定"
+        )
+    )
+    print("player設定の行動別num_predict:")
+    for player in state.players:
+        per_action = (
+            " / ".join(f"{key}={value}" for key, value in player.num_predict_by_action.items())
+            if player.num_predict_by_action
+            else "未設定"
+        )
+        per_thinking = (
+            " / ".join(
+                f"{key}={'on' if value else 'off'}"
+                for key, value in player.thinking_by_action.items()
+            )
+            if player.thinking_by_action
+            else "未設定"
+        )
+        print(
+            f"  {player.name}: 全体="
+            f"{player.num_predict if player.num_predict is not None else '未設定'} / 行動別={per_action}"
+        )
+        print(
+            f"    思考生成: 全体="
+            f"{'未設定' if player.thinking is None else ('on' if player.thinking else 'off')}"
+            f" / 行動別={per_thinking}"
+        )
+
     private_logging = args.show_private or args.private_log
     logger = GameLogger(game_id, log_dir, meta, private_enabled=private_logging)
     show_private = args.show_private
@@ -355,6 +476,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
             request_reason = event.get("request_reason", "初回")
             tool_based = event.get("tool_based", False)
             tool_label = "ツール付き" if tool_based else "文章のみ"
+            thinking_enabled = event.get("thinking_enabled")
+            thinking_label = (
+                "未指定"
+                if thinking_enabled is None
+                else ("on" if thinking_enabled else "off")
+            )
             print(
                 f"{prefix} LLM要求 #{request_number} [{request_reason}] ({tool_label}): API要求num_ctx={requested_context}, "
                 f"Modelfile PARAMETER num_ctx={modelfile_context}, "
@@ -364,8 +491,22 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 f"PythonプロセスのOLLAMA_CONTEXT_LENGTH={process_env_context} "
                 f"(サーバー側と異なる場合があります), OLLAMA_NUM_PARALLEL="
                 f"{process_parallel} (サーバー環境とは異なる場合があります), "
-                f"num_predict={request_options.get('num_predict', '未指定')}, "
+                f"num_predict={request_options.get('num_predict', '未指定')} "
+                f"(行動={event.get('action_budget_key')}, 優先元={event.get('num_predict_source')}), "
+                f"think={thinking_label} (優先元={event.get('thinking_source')}), "
+                f"max_retries={event.get('max_retries')}, "
                 f"timeout={event.get('request_timeout_seconds')}秒",
+                flush=True,
+            )
+        elif event_type == "thinking_unavailable":
+            print(
+                f"{prefix} 思考生成（think）非対応と判明 → think=offで再送し、以後の行動もoffで送信します",
+                flush=True,
+            )
+        elif event_type == "thinking_budget_exhausted":
+            print(
+                f"{prefix} 思考が生成上限を消費して本文が空 → 以後の議論・人狼相談はthink=offで送信します "
+                f"(生成トーク数={event.get('eval_count')}, num_predict={event.get('num_predict')})",
                 flush=True,
             )
         elif event_type == "llm_action_completed":
@@ -634,8 +775,44 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--num-predict",
         type=int,
-        default=512,
-        help="Maximum number of generated tokens (num_predict)",
+        default=None,
+        help=(
+            "Maximum number of generated tokens (num_predict) as the global default. "
+            "When omitted, per-action defaults from players.json or built-in defaults apply"
+        ),
+    )
+    parser.add_argument(
+        "--num-predict-by-action",
+        action="append",
+        default=[],
+        metavar="ACTION=NUM_PREDICT",
+        help=(
+            "Per-action generation limit override (repeatable). Actions: "
+            + ", ".join(ACTION_BUDGET_KEYS)
+            + ". Example: --num-predict-by-action discussion=1024 "
+            "--num-predict-by-action vote=256"
+        ),
+    )
+    parser.add_argument(
+        "--thinking",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help=(
+            "Ollama thinking generation ('auto' keeps per-action defaults: "
+            "discussion/wolf_discussion on, attack/seer/vote/co_correction off)"
+        ),
+    )
+    parser.add_argument(
+        "--thinking-by-action",
+        action="append",
+        default=[],
+        metavar="ACTION=true|false",
+        help=(
+            "Per-action thinking generation override (repeatable). Actions: "
+            + ", ".join(ACTION_BUDGET_KEYS)
+            + ". Example: --thinking-by-action vote=false "
+            "--thinking-by-action discussion=true"
+        ),
     )
     parser.add_argument(
         "--log-dir",

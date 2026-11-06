@@ -502,6 +502,14 @@ def test_seer_prompt_prioritizes_publication_of_wolf_result_and_allows_human_res
     assert "対象・判定・理由・投票提案を公開してください" in prompt
     assert "文章でのCOを省略しないでください" in prompt
     assert "占い師CO：対象=Player X、判定=人狼/人間" in prompt
+    # TASK-024: 3行の最小例をそのまま示し、COなしで結果だけ書く誤りを防ぐ
+    assert "【CO】占い師" in prompt
+    assert f"【結果】対象={wolf.name} 判定=人狼" in prompt
+    assert "COなしで本文に判定だけ書くのは不可" in prompt
+    assert "5～8文を目安に" in prompt
+    # TASK-024: 無内容な様子見を許す案内は削除し、質問対象の具体化を求める
+    assert "自分の意見をはっきり言う必要はありません" not in prompt
+    assert "無内容な様子見だけを繰り返さない" in prompt
 
     state.seer_results[wolf.name] = "human"
     state.seer_result_history[:] = [(1, wolf.name, "human")]

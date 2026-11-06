@@ -19,6 +19,13 @@ from werewolf import (
     PublicSeerClaim,
     Role,
     ToolCall,
+    THINKING_CAPABILITY_SOURCE,
+    THINKING_NUM_PREDICT_SOURCE,
+    THINKING_RESOLUTION_PRIORITY,
+    apply_thinking_floor,
+    normalize_action_budget_key,
+    resolve_action_num_predict,
+    resolve_thinking,
 )
 
 
@@ -153,6 +160,9 @@ def test_client_chat_with_metadata_tracks_completion_and_thinking_fields() -> No
         "done_reason": "length",
         "content_length": 0,
         "thinking_present": True,
+        "eval_count": None,
+        "eval_duration_ms": None,
+        "prompt_eval_count": None,
     }
 
 
@@ -665,9 +675,10 @@ def test_truncated_target_response_retries_with_increased_generation_limit(
 
     expected_target = {"vote": "P2", "attack": "P0", "seer": "P0"}[action]
     assert target == expected_target
+    # 1行回答の行動では思考生成をoff（Ollamaの think=false）で送信する
     assert client.options == [
-        {"num_predict": 256},
-        {"num_predict": 512},
+        {"num_predict": 256, "thinking": False},
+        {"num_predict": 512, "thinking": False},
     ]
     assert len(client.prompts) == 2
     assert actions.traces[-1].failure_reasons == ("generation_truncated",)
@@ -702,8 +713,8 @@ def test_thinking_only_target_responses_retry_then_use_legal_fallback() -> None:
 
     assert target in {"P1", "P2"}
     assert client.options == [
-        {"num_predict": 256},
-        {"num_predict": 512},
+        {"num_predict": 256, "thinking": False},
+        {"num_predict": 512, "thinking": False},
     ]
     assert len(client.prompts) == 2
     assert actions.traces[-1].failure_reasons == (
@@ -1180,7 +1191,7 @@ def test_model_specific_num_ctx_overrides_global_context_option() -> None:
     actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
 
     assert client.options == [
-        {"temperature": 0.4, "num_ctx": 16384, "num_predict": 192}
+        {"temperature": 0.4, "num_ctx": 16384, "num_predict": 192, "thinking": True}
     ]
 
 
@@ -1217,7 +1228,11 @@ def test_request_configuration_records_effective_options_and_timeout() -> None:
         "temperature": 0.4,
         "num_ctx": 16384,
         "num_predict": 192,
+        "thinking": True,
     }
+    # 議論は思考生成をonのまま送る
+    assert configuration["thinking_enabled"] is True
+    assert configuration["thinking_source"] == "default_by_action"
     assert configuration["request_timeout_seconds"] == 7.5
     assert configuration["num_ctx_source"] == "player_setting"
     assert configuration["context_diagnostics"]["ollama_ps_context"] == 8192
@@ -1436,13 +1451,17 @@ def test_empty_generation_is_classified_and_retried_with_more_tokens(
 
     assert response == "議論ではP1の投票先を確認します。"
     assert len(client.prompts) == 2
-    assert client.options[0] == {"num_predict": 256}
-    assert client.options[1] == {"num_predict": 512}
+    # 初回議論は思考on、生成起因の再要求は思考offで再送する
+    assert client.options[0] == {"num_predict": 256, "thinking": True}
+    assert client.options[1] == {"num_predict": 512, "thinking": False}
     assert actions.traces[-1].failure_reasons == (reason,)
     assert actions.traces[-1].response_metadata[0] == {
         "done_reason": done_reason,
         "content_length": len(content),
         "thinking_present": thinking,
+        "eval_count": None,
+        "eval_duration_ms": None,
+        "prompt_eval_count": None,
     }
 
 
@@ -1814,3 +1833,524 @@ def test_tool_unsupported_model_is_recorded_once_and_stops_tool_trials() -> None
     # 文章CO経路だけで通常どおり処理される
     assert actions.traces[-1].fallback_used is False
     assert state.public_role_claims == []
+
+def test_action_num_predict_prefers_player_per_action_over_global_and_cli() -> None:
+    player = Player(
+        name="P0",
+        model="model-0",
+        role=Role.VILLAGER,
+        num_predict=1024,
+        num_predict_by_action={"discussion": 512, "attack": 128},
+    )
+    cli_options = {
+        "num_predict": 256,
+        "num_predict_by_action:discussion": 4096,
+        "num_predict_by_action:seer": 320,
+    }
+
+    assert resolve_action_num_predict(player, cli_options, "discussion") == (
+        512,
+        "player_by_action",
+    )
+    assert resolve_action_num_predict(player, cli_options, "attack") == (
+        128,
+        "player_by_action",
+    )
+    # 行動別設定が無い対象選択行動では、CLIの行動別上書きが全体設定より優先される
+    assert resolve_action_num_predict(player, cli_options, "seer") == (
+        320,
+        "cli_by_action",
+    )
+
+
+def test_target_actions_cap_large_global_and_discussion_keeps_it() -> None:
+    """思考系モデルの大きな全体設定は、対象選択・CO補正だけキャップする。"""
+    player = Player(name="P0", model="model-0", role=Role.VILLAGER, num_predict=4096)
+
+    assert resolve_action_num_predict(player, {}, "vote") == (768, "global_capped")
+    assert resolve_action_num_predict(player, {}, "attack") == (768, "global_capped")
+    assert resolve_action_num_predict(player, {}, "seer") == (768, "global_capped")
+    assert resolve_action_num_predict(player, {}, "co_correction") == (384, "global_capped")
+    # 議論・人狼相談は根拠を説明できる文量を確保するため全体設定をそのまま使う
+    assert resolve_action_num_predict(player, {}, "discussion") == (4096, "player_global")
+    assert resolve_action_num_predict(player, {}, "wolf_discussion") == (4096, "player_global")
+
+    # 全体設定がキャップ以下ならそのまま（明示的な短くしを尊重する）
+    small = Player(name="P1", model="model-1", role=Role.VILLAGER, num_predict=256)
+    assert resolve_action_num_predict(small, {}, "vote") == (256, "player_global")
+
+
+def test_action_num_predict_falls_back_to_cli_and_action_defaults() -> None:
+    player = Player(name="P0", model="model-0", role=Role.VILLAGER)
+    cli_options = {"num_predict": 256, "num_predict_by_action:discussion": 4096}
+
+    assert resolve_action_num_predict(player, cli_options, "discussion") == (
+        4096,
+        "cli_by_action",
+    )
+    assert resolve_action_num_predict(player, cli_options, "vote") == (
+        256,
+        "cli_global",
+    )
+    assert resolve_action_num_predict(player, {}, "wolf_discussion") == (
+        768,
+        "default_by_action",
+    )
+    assert resolve_action_num_predict(None, {}, "vote") == (256, "default_by_action")
+
+
+def test_action_budget_key_aliases_are_normalized() -> None:
+    assert normalize_action_budget_key("wolf_consult") == "wolf_discussion"
+    assert normalize_action_budget_key("target") == "vote"
+    assert normalize_action_budget_key("discussion_seer_co") == "co_correction"
+    assert normalize_action_budget_key("WOLF_CONSULT") == "wolf_discussion"
+    assert normalize_action_budget_key("unknown_key") == "discussion"
+
+
+def test_request_options_use_player_budgets_and_drop_internal_action_keys() -> None:
+    state = make_state()
+    state.players[0].num_ctx = 8192
+    state.players[0].num_predict = None
+    state.players[0].num_predict_by_action = {"discussion": 512}
+    client = FakeClient("議論を続けましょう。")
+    actions = OllamaActions(
+        state,
+        client,
+        options={
+            "temperature": 0.4,
+            "num_predict": 256,
+            "num_predict_by_action:discussion": 4096,
+        },
+    )
+
+    actions.discuss("P0", 1, ("P0", "P1", "P2"), ())
+
+    # 内部的な行動別キーはLLM送信オプションへ混ぜない
+    assert client.options[0] == {
+        "temperature": 0.4,
+        "num_ctx": 8192,
+        "num_predict": 512,
+        "thinking": True,
+    }
+    assert not any(
+        key.startswith("thinking_by_action:") for key in client.options[0] or {}
+    )
+
+
+def test_target_selection_uses_action_default_without_player_settings() -> None:
+    state = make_state()
+    client = FakeClient("投票：P1")
+    actions = OllamaActions(state, client, options={"temperature": 0.4})
+
+    target = actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+
+    assert target == "P1"
+    # 投票は思考オフで送り、1行回答の生成だけを行う
+    assert client.options[0] == {"temperature": 0.4, "num_predict": 256, "thinking": False}
+
+
+def test_target_selection_caps_large_global_and_escalates_retry_budget() -> None:
+    """TASK-024: 大きな全体設定は対象選択だけキャップし、生成起因の再試行では上限を増やす。"""
+    from werewolf import ChatResponse
+
+    class MetadataClient(FakeClient):
+        def chat(self, model, messages, options=None):
+            self.prompts.append(messages[-1]["content"])
+            self.options.append(options)
+            if len(self.prompts) == 1:
+                self._last_chat_response = ChatResponse(
+                    content="",
+                    attempts=1,
+                    done_reason="length",
+                    content_length=0,
+                    thinking_present=True,
+                )
+                return ""
+            return "投票：P1"
+
+    state = make_state()
+    state.players[0].num_predict = 4096
+    client = MetadataClient()
+    actions = OllamaActions(state, client, options={"temperature": 0.4})
+
+    target = actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+
+    assert target == "P1"
+    assert client.options[0] == {"temperature": 0.4, "num_predict": 768, "thinking": False}
+    assert client.options[1] == {"temperature": 0.4, "num_predict": 1536, "thinking": False}
+    assert actions.traces[-1].failure_reasons == ("generation_truncated",)
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_co_correction_request_uses_its_own_action_budget() -> None:
+    """TASK-024: CO補正は議論より小さい行動別上限を使い、本文の長文生成を抑制する。"""
+    state = make_seer_state("wolf")
+    state.players[0].num_predict_by_action = {"discussion": 1024, "co_correction": 256}
+    corrected = (
+        "【CO】占い師\n"
+        "【結果】対象=P2 判定=人狼\n"
+        "【本文】初夜の占い結果です。P2への投票を提案します。"
+    )
+    client = FakeClient("P2は人狼と判定された。", corrected)
+    actions = OllamaActions(state, client, options={"temperature": 0.4})
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == corrected
+    assert len(client.prompts) == 2
+    assert client.options[0] == {"temperature": 0.4, "num_predict": 1024, "thinking": True}
+    assert client.options[1] == {"temperature": 0.4, "num_predict": 256, "thinking": False}
+    # 補正プロンプトには行動別上限のガイダンスが反映される
+    assert "num_predict=256" in client.prompts[1]
+    # 思考オフでは「思考を書かない」指示をプロンプトへ明記する
+    assert "思考生成（think）はオフ" in client.prompts[1]
+
+
+def test_default_action_budgets_keep_co_correction_above_one_line() -> None:
+    """CO補正の既定上限は最小3行（CO・結果・本文）を生成できる量にする。"""
+    assert resolve_action_num_predict(None, {}, "co_correction") == (
+        256,
+        "default_by_action",
+    )
+    # TASK-024: 議論は文量緩和、人狼相談は議論より短いが提案・理由を書ける量
+    assert resolve_action_num_predict(None, {}, "discussion") == (
+        1536,
+        "default_by_action",
+    )
+    assert resolve_action_num_predict(None, {}, "wolf_discussion") == (
+        768,
+        "default_by_action",
+    )
+    assert resolve_action_num_predict(None, {}, "vote") == (256, "default_by_action")
+
+
+def test_thinking_floor_only_applies_to_unconfigured_action_defaults() -> None:
+    """TASK-024: 思考onの生成上限下限は設定未指定（行動別既定値）のときだけ適用する。"""
+    assert apply_thinking_floor(1536, "default_by_action", True, "discussion") == (
+        3072,
+        THINKING_NUM_PREDICT_SOURCE,
+    )
+    assert apply_thinking_floor(768, "default_by_action", True, "wolf_discussion") == (
+        1536,
+        THINKING_NUM_PREDICT_SOURCE,
+    )
+    # 別名キーも正規化して下限を適用する
+    assert apply_thinking_floor(768, "default_by_action", True, "wolf_consult") == (
+        1536,
+        THINKING_NUM_PREDICT_SOURCE,
+    )
+    # 明示設定（player行動別・CLI行動別・全体・キャップ）は下限で上書きしない
+    assert apply_thinking_floor(512, "player_by_action", True, "discussion") == (
+        512,
+        "player_by_action",
+    )
+    assert apply_thinking_floor(1024, "cli_by_action", True, "discussion") == (
+        1024,
+        "cli_by_action",
+    )
+    assert apply_thinking_floor(256, "player_global", True, "discussion") == (
+        256,
+        "player_global",
+    )
+    assert apply_thinking_floor(768, "global_capped", True, "vote") == (768, "global_capped")
+    # 思考off・下限のない行動・上限未解決は変更しない
+    assert apply_thinking_floor(1536, "default_by_action", False, "discussion") == (
+        1536,
+        "default_by_action",
+    )
+    assert apply_thinking_floor(256, "default_by_action", True, "vote") == (
+        256,
+        "default_by_action",
+    )
+    assert apply_thinking_floor(None, "default_by_action", True, "discussion") == (
+        None,
+        "default_by_action",
+    )
+    # 下限以上の既定値はそのまま
+    assert apply_thinking_floor(4096, "default_by_action", True, "discussion") == (
+        4096,
+        "default_by_action",
+    )
+
+
+def test_thinking_floor_reaches_discussion_request_and_prompt_guidance() -> None:
+    """TASK-024: 設定未指定の議論は下限3072を実際に送信し、プロンプト表記も一致する。"""
+    state = make_state()
+    client = FakeClient("【CO】なし\n【本文】P1を疑います。根拠は初動の薄さです。")
+    actions = OllamaActions(state, client, options={"temperature": 0.4})
+
+    actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert client.options[0] == {"temperature": 0.4, "num_predict": 3072, "thinking": True}
+    assert "num_predict=3072" in client.prompts[0]
+
+
+def test_explicit_discussion_budget_is_not_raised_by_thinking_floor() -> None:
+    """TASK-024: player行動別設定の議論上限は思考onでも変更しない。"""
+    state = make_state()
+    state.players[0].num_predict_by_action = {"discussion": 640}
+    client = FakeClient("【CO】なし\n【本文】P2の投票理由を確認します。")
+    actions = OllamaActions(state, client, options={"temperature": 0.4})
+
+    actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert client.options[0] == {"temperature": 0.4, "num_predict": 640, "thinking": True}
+    assert "num_predict=640" in client.prompts[0]
+
+
+def test_thinking_defaults_keep_reasoning_only_for_discussion_actions() -> None:
+    """TASK-024: 思考生成は議論・人狼相談だけon、1行回答の行動はoff。"""
+    assert resolve_thinking(None, {}, "discussion") == (True, "default_by_action")
+    assert resolve_thinking(None, {}, "wolf_discussion") == (True, "default_by_action")
+    for budget_key in ("attack", "seer", "vote", "co_correction"):
+        assert resolve_thinking(None, {}, budget_key) == (False, "default_by_action")
+    # 別名キー（target）も投票扱いとしてoffに寄せる
+    assert resolve_thinking(None, {}, "target") == (False, "default_by_action")
+
+
+def test_thinking_resolution_priority_matches_documented_order() -> None:
+    assert THINKING_RESOLUTION_PRIORITY == (
+        "player_by_action",
+        "cli_by_action",
+        "player_global",
+        "cli_global",
+        "default_by_action",
+    )
+
+    player = Player(
+        name="P0",
+        model="m",
+        role=Role.VILLAGER,
+        thinking=True,
+        thinking_by_action={"discussion": False},
+    )
+    cli_options = {"thinking": False, "thinking_by_action:vote": True}
+
+    assert resolve_thinking(player, cli_options, "discussion") == (
+        False,
+        "player_by_action",
+    )
+    assert resolve_thinking(player, cli_options, "vote") == (True, "cli_by_action")
+    assert resolve_thinking(player, cli_options, "seer") == (True, "player_global")
+    assert resolve_thinking(None, {"thinking": False}, "attack") == (False, "cli_global")
+    assert resolve_thinking(None, None, "discussion") == (True, "default_by_action")
+
+
+def test_thinking_option_is_sent_as_ollama_request_think_field() -> None:
+    """アプリの`thinking`設定はOllamaリクエストの`think`だけへ反映する。"""
+    payloads: list[dict[str, object]] = []
+
+    def transport(request, timeout):
+        payloads.append(json.loads(request.data.decode("utf-8")))
+        return json.dumps(
+            {"message": {"content": "投票：P1"}, "done_reason": "stop"}
+        ).encode("utf-8")
+
+    client = OllamaClient(timeout=5.0, transport=transport)
+    client.chat(
+        "model-x",
+        [{"role": "user", "content": "投票してください"}],
+        options={"num_predict": 256, "thinking": False},
+    )
+    assert payloads[0]["think"] is False
+    assert payloads[0]["options"] == {"num_predict": 256}
+    assert "thinking" not in payloads[0]["options"]
+
+    client.chat(
+        "model-x",
+        [{"role": "user", "content": "発言してください"}],
+        options={"num_predict": 1024, "thinking": True},
+    )
+    assert payloads[1]["think"] is True
+
+    # 未設定時は`think`を送らず、Ollama側既定に委ねる
+    client.chat(
+        "model-x",
+        [{"role": "user", "content": "投票してください"}],
+        options={"num_predict": 256},
+    )
+    assert "think" not in payloads[2]
+
+
+def test_player_thinking_override_reaches_target_selection_request() -> None:
+    state = make_state()
+    state.players[0].thinking_by_action = {"vote": True}
+    client = FakeClient("投票：P1")
+    actions = OllamaActions(
+        state, client, options={"temperature": 0.4, "thinking": False}
+    )
+
+    target = actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+
+    assert target == "P1"
+    # player行動別設定がCLI全体の思考offより優先される
+    assert client.options[0] == {
+        "temperature": 0.4,
+        "num_predict": 256,
+        "thinking": True,
+    }
+
+
+def test_discussion_retry_forces_thinking_off_and_short_prompt() -> None:
+    """TASK-024: 空応答の再要求は思考off＋短い必須項目だけで再送する。"""
+    state = make_state()
+    corrected = (
+        "【CO】なし\n"
+        "【本文】P1を疑います。根拠は初日の反応の薄さです。P2に質問します。"
+    )
+
+    class DiagnosticClient(FakeClient):
+        def context_diagnostics(self, model):
+            return {"ollama_ps_context": 8192}
+
+    client = DiagnosticClient("", corrected)
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(
+        state, client, options={"temperature": 0.4}, event_callback=events.append
+    )
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == corrected
+    configurations = [
+        event for event in events if event["type"] == "llm_request_configuration"
+    ]
+    assert len(configurations) == 2
+    assert configurations[0]["thinking_enabled"] is True
+    assert configurations[0]["thinking_source"] == "default_by_action"
+    assert configurations[1]["thinking_enabled"] is False
+    assert configurations[1]["thinking_source"] == "retry_thinking_off"
+    assert configurations[1]["request_reason"] == "軽い再要求"
+    # 思考オフでは「思考を書かない」指示をプロンプトへ明記する
+    assert "思考生成（think）はオフ" in client.prompts[1]
+    assert client.options[1]["thinking"] is False
+    # 初回議論は思考onの下限3072を送るため、プロンプトの上限表記も3072に一致する
+    assert "num_predict=3072" in client.prompts[0]
+    assert configurations[0]["num_predict"] == 3072
+    assert configurations[0]["num_predict_source"] == "thinking_allowance"
+    assert "num_predict=3072" in client.prompts[1]
+    assert client.options[1]["num_predict"] == 3072
+
+
+def test_target_selection_retry_records_thinking_off_source() -> None:
+    class DiagnosticClient(FakeClient):
+        def context_diagnostics(self, model):
+            return {"ollama_ps_context": 8192}
+
+    state = make_state()
+    client = DiagnosticClient("", "投票：P1")
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(
+        state, client, options={"temperature": 0.4}, event_callback=events.append
+    )
+
+    target = actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+
+    assert target == "P1"
+    configurations = [
+        event for event in events if event["type"] == "llm_request_configuration"
+    ]
+    assert [event["thinking_enabled"] for event in configurations] == [False, False]
+    assert [event["thinking_source"] for event in configurations] == [
+        "default_by_action",
+        "retry_thinking_off",
+    ]
+    # 生成起因の再試行では上限を倍へ増やす
+    assert [event["num_predict"] for event in configurations] == [256, 512]
+    # 再要求は長い原文を再送せず、必須項目だけの短いプロンプトにする
+    assert "選択可能な候補:" not in client.prompts[1]
+
+
+def test_retry_prompt_states_the_limit_actually_sent() -> None:
+    """TASK-024: 再要求プロンプトの上限・思考表記は実際の送信値と一致する。"""
+    state = make_state()
+    client = FakeClient("", "投票：P1")
+    actions = OllamaActions(state, client, options={"temperature": 0.4})
+
+    target = actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
+
+    assert target == "P1"
+    # 初回は行動別既定256、再要求は倍の512を送る
+    assert "num_predict=256" in client.prompts[0]
+    assert "num_predict=512" in client.prompts[1]
+    assert "思考生成（think）はオフ" in client.prompts[1]
+    assert client.options[0]["num_predict"] == 256
+    assert client.options[1]["num_predict"] == 512
+
+
+def test_model_rejecting_thinking_resends_once_with_think_off_and_records_capability() -> None:
+    """TASK-024: think非対応モデルの400は同じ要求を再送せず、think=offで1回だけ再送する。"""
+
+    class DiagnosticClient(FakeClient):
+        def context_diagnostics(self, model):
+            return {"ollama_ps_context": 8192}
+
+    state = make_state()
+    rejected = OllamaError(
+        "http",
+        "model does not support thinking",
+        attempts=1,
+        status_code=400,
+    )
+    speech = "【CO】なし\n【本文】P1の発言が曖昧なので疑います。"
+    client = DiagnosticClient(rejected, speech, speech)
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(
+        state, client, options={"temperature": 0.4}, event_callback=events.append
+    )
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == speech
+    # 400→off再送のみ。意味的再試行・フォールバックとして扱わない
+    assert len(client.options) == 2
+    assert client.options[0]["thinking"] is True
+    assert client.options[1]["thinking"] is False
+    assert actions.traces[-1].raw_responses == (speech,)
+    assert actions.traces[-1].fallback_used is False
+    assert [event["type"] for event in events].count("llm_action_parse_failed") == 0
+    # 能力情報へ記録し、イベントは初回のみ
+    assert state.model_capabilities == {"model-0": {"thinking": False}}
+    assert [event["type"] for event in events].count("thinking_unavailable") == 1
+    configurations = [
+        event for event in events if event["type"] == "llm_request_configuration"
+    ]
+    assert [event["thinking_enabled"] for event in configurations] == [True, False]
+    assert configurations[1]["thinking_source"] == THINKING_CAPABILITY_SOURCE
+
+    # 以後の行動も400を避けoffで送る（再度の400イベントは出ない）
+    actions.discuss("P0", 1, tuple(state.alive_players), ())
+    assert len(client.options) == 3
+    assert client.options[-1]["thinking"] is False
+    assert configurations[-1]["thinking_source"] == THINKING_CAPABILITY_SOURCE
+    assert [event["type"] for event in events].count("thinking_unavailable") == 1
+
+
+def test_thinking_unsupported_sends_only_two_http_requests() -> None:
+    """TASK-024: 400はトランスポート再送対象ではないため、送信は初回＋off再送の2回だけ。"""
+    calls: list[dict[str, object]] = []
+    speech = "【CO】なし\n【本文】P1の発言が曖昧なので、P1へ質問します。"
+
+    def transport(request, timeout):
+        body = json.loads(request.data)
+        calls.append(body)
+        if body.get("think") is True:
+            raise HTTPError(
+                request.full_url,
+                400,
+                "Bad Request",
+                {},
+                BytesIO(b"model does not support thinking"),
+            )
+        return json.dumps({"message": {"content": speech}}).encode("utf-8")
+
+    state = make_state()
+    client = OllamaClient(transport=transport)
+    actions = OllamaActions(state, client, options={"temperature": 0.4})
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert response == speech
+    assert len(calls) == 2
+    assert calls[0]["think"] is True
+    assert calls[1]["think"] is False

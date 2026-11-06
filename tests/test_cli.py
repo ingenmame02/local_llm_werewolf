@@ -79,6 +79,34 @@ def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path:
             "error": None,
         }
     )
+    # 実際のOllamaリクエストで送信した思考生成（think）をカウントする
+    logger.append_record(
+        {
+            "type": "llm_request_configuration",
+            "model": "slow-model",
+            "action": "vote",
+            "thinking_enabled": False,
+            "thinking_source": "default_by_action",
+        }
+    )
+    logger.append_record(
+        {
+            "type": "llm_request_configuration",
+            "model": "slow-model",
+            "action": "discussion",
+            "thinking_enabled": True,
+            "thinking_source": "default_by_action",
+        }
+    )
+    logger.append_record(
+        {
+            "type": "llm_request_configuration",
+            "model": "slow-model",
+            "action": "attack",
+            "thinking_enabled": False,
+            "thinking_source": "retry_thinking_off",
+        }
+    )
     logger.finalize(create_game(seed=4))
 
     result = json.loads(logger.log_file.read_text(encoding="utf-8").splitlines()[-1])
@@ -94,6 +122,15 @@ def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path:
         "parse_failure_count": 1,
         "elapsed_seconds": 13.75,
         "failure_reasons": {"empty_content": 1},
+        "eval_count_total": 0,
+        "eval_duration_ms_total": 0,
+        "action_budgets": {},
+        "avg_eval_count": 0.0,
+        "avg_eval_duration_ms": 0.0,
+        "thinking_disabled_requests": 2,
+        "thinking_enabled_requests": 1,
+        "thinking_capability_fallbacks": 0,
+        "thinking_budget_fallbacks": 0,
     }
 
 
@@ -516,3 +553,307 @@ def test_ctrl_c_records_current_llm_action_before_finalizing(
     }
     assert interrupted["active_action"]["action"] == "seer"
     assert records[-1]["error_occurred"] is True
+
+def test_cli_parser_per_action_num_predict_defaults() -> None:
+    parser = build_parser()
+
+    default_args = parser.parse_args([])
+    assert default_args.num_predict is None
+    assert default_args.num_predict_by_action == []
+
+    args = parser.parse_args([
+        "--num-predict", "512",
+        "--num-predict-by-action", "discussion=1024",
+        "--num-predict-by-action", "vote=256",
+    ])
+    assert args.num_predict == 512
+    assert args.num_predict_by_action == ["discussion=1024", "vote=256"]
+
+
+def test_cli_per_action_generation_budgets_reach_requests_and_display(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[0]["num_predict_by_action"] = {"discussion": 512, "attack": 128}
+    players[1]["num_ctx"] = 8192
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    def mock_chat(self, model, messages, options=None, tools=None):
+        prompt = messages[-1]["content"]
+        if "これまでの相談内容" in prompt:
+            return "WOLF_PRIVATE_MARKER"
+        if "襲撃対象：" in prompt:
+            line = next(line for line in prompt.splitlines() if "選択可能な襲撃対象：" in line)
+            return f"襲撃対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
+        if "占い対象：" in prompt:
+            line = next(line for line in prompt.splitlines() if "選択可能な占い対象：" in line)
+            return f"占い対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
+        if "選択可能な候補:" in prompt:
+            line = next(line for line in prompt.splitlines() if "選択可能な候補:" in line)
+            return f"投票：{line.split(':', 1)[1].split(',', 1)[0].strip()}"
+        return "公開発言です。PUBLIC_DAY_SPEECH"
+
+    monkeypatch.setattr(OllamaClient, "ping", lambda self: True)
+    monkeypatch.setattr(OllamaClient, "chat", mock_chat)
+    monkeypatch.setattr(
+        OllamaClient,
+        "chat_with_metadata",
+        lambda self, model, messages, options=None, tools=None: ChatResponse(
+            content=mock_chat(self, model, messages, options=options, tools=tools),
+            attempts=1,
+        ),
+    )
+
+    log_dir = tmp_path / "event_logs"
+    args = build_parser().parse_args([
+        "--mode", "ollama",
+        "--seed", "42",
+        "--models-file", str(config_file),
+        "--num-predict-by-action", "discussion=1024",
+        "--num-predict-by-action", "vote=256",
+        "--log-dir", str(log_dir),
+    ])
+
+    assert run_cli_game(args) == 0
+
+    output = capsys.readouterr().out
+    assert "CLI全体num_predict: 未設定（行動別既定を使う）" in output
+    assert "CLI行動別num_predict: discussion=1024 / vote=256" in output
+    assert "全体=未設定 / 行動別=discussion=512 / attack=128" in output
+    assert "num_predict=1536 (行動=wolf_discussion, 優先元=thinking_allowance)" in output
+
+    public_log = next(
+        path for path in log_dir.glob("game_*.jsonl")
+        if not path.name.endswith(".private.jsonl")
+    )
+    records = [json.loads(line) for line in public_log.read_text(encoding="utf-8").splitlines()]
+    budgets = [record for record in records if record["type"] == "llm_request_configuration"]
+
+    # 内部的な行動別キーは送信オプションへ混ぜない
+    assert all(
+        not any(key.startswith("num_predict_by_action:") for key in record["request_options"])
+        for record in budgets
+    )
+
+    wolf_records = [r for r in budgets if r["action_budget_key"] == "wolf_discussion"]
+    assert wolf_records
+    # 思考onの人狼相談は思考トークンの残余を確保するため下限へ引き上げる
+    assert all(
+        r["num_predict"] == 1536 and r["num_predict_source"] == "thinking_allowance"
+        for r in wolf_records
+    )
+
+    vote_records = [r for r in budgets if r["action_budget_key"] == "vote"]
+    assert vote_records
+    assert all(
+        r["num_predict"] == 256 and r["num_predict_source"] == "cli_by_action"
+        for r in vote_records
+    )
+
+    player_one_first = [
+        r for r in budgets
+        if r["player"] == "Player 1"
+        and r["action_budget_key"] == "discussion"
+        and r["request_number"] == 1
+    ]
+    assert player_one_first
+    # player行動別設定は思考onでも下限で上書きしない（明示設定が最優先）
+    assert all(
+        r["num_predict"] == 512 and r["num_predict_source"] == "player_by_action"
+        for r in player_one_first
+    )
+
+    other_first = [
+        r for r in budgets
+        if r["player"] != "Player 1"
+        and r["action_budget_key"] == "discussion"
+        and r["request_number"] == 1
+    ]
+    assert other_first
+    # CLI行動別設定も明示設定なので下限で上書きしない
+    assert all(
+        r["num_predict"] == 1024 and r["num_predict_source"] == "cli_by_action"
+        for r in other_first
+    )
+
+    # 設定未指定の行動別既定（人狼相談）のみ思考onの下限へ引き上げる
+    unconfigured_first = [
+        r for r in budgets
+        if r["action_budget_key"] == "wolf_discussion" and r["request_number"] == 1
+    ]
+    assert unconfigured_first
+    assert all(
+        r["num_predict"] == 1536 and r["num_predict_source"] == "thinking_allowance"
+        for r in unconfigured_first
+    )
+
+
+def test_cli_parser_thinking_options() -> None:
+    parser = build_parser()
+
+    default_args = parser.parse_args([])
+    assert default_args.thinking == "auto"
+    assert default_args.thinking_by_action == []
+
+    args = parser.parse_args(
+        ["--thinking", "off", "--thinking-by-action", "discussion=true"]
+    )
+    assert args.thinking == "off"
+    assert args.thinking_by_action == ["discussion=true"]
+
+
+def test_cli_thinking_settings_reach_requests_and_display(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[0]["thinking_by_action"] = {"vote": True}
+    players[1]["thinking"] = False
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    def mock_chat(self, model, messages, options=None, tools=None):
+        prompt = messages[-1]["content"]
+        if "これまでの相談内容" in prompt:
+            return "WOLF_PRIVATE_MARKER"
+        if "襲撃対象：" in prompt:
+            line = next(line for line in prompt.splitlines() if "選択可能な襲撃対象：" in line)
+            return f"襲撃対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
+        if "占い対象：" in prompt:
+            line = next(line for line in prompt.splitlines() if "選択可能な占い対象：" in line)
+            return f"占い対象：{line.split('：', 1)[1].split(',', 1)[0].strip()}"
+        if "選択可能な候補:" in prompt:
+            line = next(line for line in prompt.splitlines() if "選択可能な候補:" in line)
+            return f"投票：{line.split(':', 1)[1].split(',', 1)[0].strip()}"
+        return "公開発言です。PUBLIC_DAY_SPEECH"
+
+    monkeypatch.setattr(OllamaClient, "ping", lambda self: True)
+    monkeypatch.setattr(OllamaClient, "chat", mock_chat)
+    monkeypatch.setattr(
+        OllamaClient,
+        "chat_with_metadata",
+        lambda self, model, messages, options=None, tools=None: ChatResponse(
+            content=mock_chat(self, model, messages, options=options, tools=tools),
+            attempts=1,
+        ),
+    )
+
+    log_dir = tmp_path / "thinking_logs"
+    args = build_parser().parse_args(
+        [
+            "--mode", "ollama",
+            "--seed", "42",
+            "--models-file", str(config_file),
+            "--thinking-by-action", "discussion=false",
+            "--log-dir", str(log_dir),
+        ]
+    )
+
+    assert run_cli_game(args) == 0
+
+    output = capsys.readouterr().out
+    assert (
+        "行動別思考生成（規定）: 議論(思考on) / 人狼相談(思考on) / 襲撃(思考off) / "
+        "占い(思考off) / 投票(思考off) / CO補正(思考off)" in output
+    )
+    assert "CLI全体思考設定: 未設定（行動別既定を使う）" in output
+    assert "CLI行動別思考設定: discussion=off" in output
+    assert "思考生成: 全体=未設定 / 行動別=vote=on" in output
+    assert "思考生成: 全体=off / 行動別=未設定" in output
+    assert "think=off (優先元=cli_by_action)" in output
+    assert "think=on (優先元=player_by_action)" in output
+    assert "think=off (優先元=player_global)" in output
+
+    public_log = next(
+        path for path in log_dir.glob("game_*.jsonl")
+        if not path.name.endswith(".private.jsonl")
+    )
+    records = [
+        json.loads(line) for line in public_log.read_text(encoding="utf-8").splitlines()
+    ]
+    configurations = [
+        record for record in records if record["type"] == "llm_request_configuration"
+    ]
+    assert configurations
+
+    # 内部的な行動別思考キーは送信オプションへ混ぜない
+    assert all(
+        not any(
+            key.startswith("thinking_by_action:") for key in record["request_options"]
+        )
+        for record in configurations
+    )
+    # 思考設定は送信optionsへ`thinking`として現れる
+    assert all("thinking" in record["request_options"] for record in configurations)
+
+    player_one_votes = [
+        r for r in configurations
+        if r["player"] == "Player 1" and r["action_budget_key"] == "vote"
+    ]
+    assert player_one_votes
+    assert all(
+        r["thinking_enabled"] is True and r["thinking_source"] == "player_by_action"
+        for r in player_one_votes
+    )
+
+    discussions = [
+        r for r in configurations
+        if r["action_budget_key"] == "discussion" and r["request_reason"] == "初回"
+    ]
+    assert discussions
+    assert all(
+        r["thinking_enabled"] is False and r["thinking_source"] == "cli_by_action"
+        for r in discussions
+    )
+    # 思考offの議論は生成上限下限を適用せず、行動別既定値のまま送信する
+    assert all(
+        r["num_predict"] == 1536 and r["num_predict_source"] == "default_by_action"
+        for r in discussions
+    )
+    # 再要求は思考offへ切り替える（優先元=retry_thinking_off）
+    discussion_retries = [
+        r for r in configurations
+        if r["action_budget_key"] == "discussion" and r["request_reason"] != "初回"
+    ]
+    assert all(
+        r["thinking_enabled"] is False and r["thinking_source"] == "retry_thinking_off"
+        for r in discussion_retries
+    )
+
+    target_selection = [
+        r for r in configurations
+        if r["action_budget_key"] in {"attack", "seer", "vote"}
+        and r["request_reason"] == "初回"
+        and r["player"] != "Player 1"
+    ]
+    assert target_selection
+    assert all(
+        r["thinking_enabled"] is False for r in target_selection
+    )
+
+    player_two_votes = [
+        r for r in configurations
+        if r["player"] == "Player 2" and r["action_budget_key"] == "vote"
+    ]
+    assert player_two_votes
+    assert all(
+        r["thinking_enabled"] is False and r["thinking_source"] == "player_global"
+        for r in player_two_votes
+    )
+
+    game_result = records[-1]
+    model_stats = game_result["model_stats"]
+    assert model_stats
+    assert all("thinking_disabled_requests" in stats for stats in model_stats.values())
+    assert sum(stats["thinking_enabled_requests"] for stats in model_stats.values()) > 0
+    assert sum(stats["thinking_disabled_requests"] for stats in model_stats.values()) > 0

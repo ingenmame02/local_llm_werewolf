@@ -1,12 +1,116 @@
 {
   "players": [
-    { "name": "Player 1", "model": "werewolf-calm3-22b-8k", "num_predict": 1024 },
-    { "name": "Player 2", "model": "werewolf-muse-glimmer-8k", "num_predict": 4096 },
-    { "name": "Player 3", "model": "werewolf-mistral-small-8k", "num_predict": 512 },
-    { "name": "Player 4", "model": "werewolf-glm-4.7-flash-8k", "num_predict": 768 },
-    { "name": "Player 5", "model": "werewolf-qwen3.8-8k", "num_predict": 768 },
-    { "name": "Player 6", "model": "werewolf-deepseek-r1-8k", "num_predict": 1536 },
-    { "name": "Player 7", "model": "werewolf-gpt-oss-20b-8k", "num_predict": 1024 },
-    { "name": "Player 8", "model": "werewolf-gemma4-8k", "num_predict": 4096 }
+    {
+      "name": "Player 1",
+      "model": "werewolf-calm3-22b-8k",
+      "num_predict": 1024,
+      "num_predict_by_action": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 256,
+        "seer": 256,
+        "vote": 256,
+        "co_correction": 256
+      },
+      "thinking_by_action": {
+        "discussion": false,
+        "wolf_discussion": false
+      }
+    },
+    {
+      "name": "Player 2",
+      "model": "werewolf-muse-glimmer-8k",
+      "num_predict": 4096,
+      "num_predict_by_action": {
+        "discussion": 3072,
+        "wolf_discussion": 1024,
+        "attack": 768,
+        "seer": 768,
+        "vote": 768,
+        "co_correction": 512
+      }
+    },
+    {
+      "name": "Player 3",
+      "model": "werewolf-mistral-small-8k",
+      "num_predict": 512,
+      "num_predict_by_action": {
+        "discussion": 1280,
+        "wolf_discussion": 640,
+        "attack": 256,
+        "seer": 256,
+        "vote": 256,
+        "co_correction": 256
+      },
+      "thinking_by_action": {
+        "discussion": false,
+        "wolf_discussion": false
+      }
+    },
+    {
+      "name": "Player 4",
+      "model": "werewolf-glm-4.7-flash-8k",
+      "num_predict": 768,
+      "num_predict_by_action": {
+        "discussion": 2048,
+        "wolf_discussion": 1024,
+        "attack": 1024,
+        "seer": 1024,
+        "vote": 1024,
+        "co_correction": 512
+      }
+    },
+    {
+      "name": "Player 5",
+      "model": "werewolf-qwen3.8-8k",
+      "num_predict": 768,
+      "num_predict_by_action": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 512,
+        "seer": 512,
+        "vote": 512,
+        "co_correction": 256
+      }
+    },
+    {
+      "name": "Player 6",
+      "model": "werewolf-deepseek-r1-8k",
+      "num_predict": 1536,
+      "num_predict_by_action": {
+        "discussion": 3072,
+        "wolf_discussion": 1024,
+        "attack": 1024,
+        "seer": 1024,
+        "vote": 1024,
+        "co_correction": 512
+      }
+    },
+    {
+      "name": "Player 7",
+      "model": "werewolf-gpt-oss-20b-8k",
+      "num_predict": 1024,
+      "num_predict_by_action": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 512,
+        "seer": 512,
+        "vote": 512,
+        "co_correction": 256
+      }
+    },
+    {
+      "name": "Player 8",
+      "model": "werewolf-gemma4-8k",
+      "num_predict": 4096,
+      "num_predict_by_action": {
+        "discussion": 3072,
+        "wolf_discussion": 1024,
+        "attack": 768,
+        "seer": 768,
+        "vote": 768,
+        "co_correction": 512
+      }
+    }
   ]
 }

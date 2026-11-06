@@ -3,7 +3,16 @@ from collections import Counter
 
 import pytest
 
-from werewolf import GameState, Phase, Player, Role, create_game, load_player_configs
+from werewolf import (
+    GameState,
+    Phase,
+    Player,
+    Role,
+    create_game,
+    load_player_configs,
+    parse_action_num_predict_pairs,
+    parse_thinking_by_action_pairs,
+)
 from werewolf.config import PlayerConfig
 
 
@@ -191,3 +200,134 @@ def test_player_configuration_rejects_invalid_context_length(
 
     with pytest.raises(ValueError, match="num_ctx"):
         load_player_configs(config_file)
+
+
+def test_player_configuration_applies_per_action_generation_budgets(tmp_path) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[3]["num_predict_by_action"] = {"discussion": 1024, "vote": 256}
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    config = load_player_configs(config_file)[3]
+    player = create_game(seed=1, config_path=config_file).players[3]
+
+    assert config.num_predict_by_action == {"discussion": 1024, "vote": 256}
+    assert player.num_predict_by_action == {"discussion": 1024, "vote": 256}
+    assert load_player_configs(config_file)[0].num_predict_by_action is None
+
+
+@pytest.mark.parametrize(
+    "invalid_budgets",
+    [
+        {"attack": 0},
+        {"attack": -8},
+        {"attack": True},
+        {"attack": "256"},
+        {"unknown_action": 256},
+        "256",
+    ],
+)
+def test_player_configuration_rejects_invalid_per_action_budgets(
+    tmp_path, invalid_budgets
+) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[0]["num_predict_by_action"] = invalid_budgets
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="num_predict_by_action"):
+        load_player_configs(config_file)
+
+
+def test_cli_action_num_predict_pairs_are_parsed_and_validated() -> None:
+    assert parse_action_num_predict_pairs([]) == {}
+    assert parse_action_num_predict_pairs(
+        ["discussion=1024", "wolf_discussion=640"]
+    ) == {"discussion": 1024, "wolf_discussion": 640}
+
+    for invalid in ["discussion", "discussion=", "=128", "discussion=0", "discussion=-5",
+                    "discussion=abc", "attack=1.5", "unknown_action=10"]:
+        with pytest.raises(ValueError):
+            parse_action_num_predict_pairs([invalid])
+
+
+def test_player_configuration_applies_thinking_settings(tmp_path) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[2]["thinking"] = False
+    players[3]["thinking_by_action"] = {"discussion": True, "vote": False}
+    players[4]["thinking_by_action"] = {"discussion": "off"}
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    configs = load_player_configs(config_file)
+    state = create_game(seed=1, config_path=config_file)
+
+    assert configs[2].thinking is False
+    assert state.players[2].thinking is False
+    assert configs[3].thinking_by_action == {"discussion": True, "vote": False}
+    assert state.players[3].thinking_by_action == {"discussion": True, "vote": False}
+    # 文字列のboolean風指定は正規化する
+    assert configs[4].thinking_by_action == {"discussion": False}
+    assert configs[0].thinking is None
+    assert configs[0].thinking_by_action is None
+
+
+@pytest.mark.parametrize("invalid_thinking", [1, 0, "maybe", 1.5, [True]])
+def test_player_configuration_rejects_invalid_thinking(
+    tmp_path, invalid_thinking
+) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[0]["thinking"] = invalid_thinking
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="thinking"):
+        load_player_configs(config_file)
+
+
+@pytest.mark.parametrize(
+    "invalid_flags",
+    [{"vote": "maybe"}, {"vote": 1}, {"vote": None}, {"unknown_action": True}, "true"],
+)
+def test_player_configuration_rejects_invalid_per_action_thinking(
+    tmp_path, invalid_flags
+) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[0]["thinking_by_action"] = invalid_flags
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="thinking_by_action"):
+        load_player_configs(config_file)
+
+
+def test_cli_thinking_pairs_are_parsed_and_validated() -> None:
+    assert parse_thinking_by_action_pairs([]) == {}
+    assert parse_thinking_by_action_pairs(
+        ["discussion=true", "vote=off", "co_correction=false"]
+    ) == {"discussion": True, "vote": False, "co_correction": False}
+
+    for invalid in [
+        "discussion",
+        "discussion=",
+        "=true",
+        "discussion=maybe",
+        "unknown_action=true",
+    ]:
+        with pytest.raises(ValueError):
+            parse_thinking_by_action_pairs([invalid])
