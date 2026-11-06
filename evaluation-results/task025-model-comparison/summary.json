@@ -1,0 +1,794 @@
+{
+  "generated_at": "2026-11-06T09:45:09.610773+00:00",
+  "models_file": "C:\\Users\\yukic\\local_llm_werewolf\\config\\players.json",
+  "models_filter": [
+    "calm3",
+    "qwen3.8"
+  ],
+  "personality_override": null,
+  "personality_profiles": {
+    "werewolf-calm3-22b-8k": "analytical",
+    "werewolf-qwen3.8-8k": "analytical"
+  },
+  "selected_models": [
+    "werewolf-calm3-22b-8k",
+    "werewolf-qwen3.8-8k"
+  ],
+  "rounds": 3,
+  "timeout": 120.0,
+  "transport_retries": 0,
+  "semantic_retries": 5,
+  "total_retries": 5,
+  "fallback_count": 1,
+  "avg_eval_count": 181.07,
+  "avg_eval_duration_ms": 6154.87,
+  "specific_rate": 0.933,
+  "specific_valid_rate": 0.933,
+  "budget_exhausted_count": 1,
+  "request_attempts": 35,
+  "empty_response_count": 0,
+  "thinking_only_count": 3,
+  "truncated_count": 1,
+  "failure_reasons": {
+    "seer_result_without_claim": 1,
+    "discussion_output_format": 3,
+    "co_missing": 2
+  },
+  "cli_num_predict_by_action": {},
+  "default_action_num_predict": {
+    "discussion": 1536,
+    "wolf_discussion": 768,
+    "attack": 256,
+    "seer": 256,
+    "vote": 256,
+    "co_correction": 256
+  },
+  "minimal_action_max_num_predict": {
+    "attack": 768,
+    "seer": 768,
+    "vote": 768,
+    "co_correction": 384
+  },
+  "budget_resolution_priority": [
+    "player_by_action",
+    "cli_by_action",
+    "global_capped",
+    "player_global",
+    "cli_global",
+    "default_by_action"
+  ],
+  "applied_action_num_predict": {
+    "werewolf-calm3-22b-8k": {
+      "discussion": {
+        "num_predict": 1536,
+        "source": "player_by_action"
+      },
+      "vote": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      },
+      "attack": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      },
+      "seer": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      },
+      "co_correction": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      }
+    },
+    "werewolf-qwen3.8-8k": {
+      "discussion": {
+        "num_predict": 1536,
+        "source": "player_by_action"
+      },
+      "vote": {
+        "num_predict": 512,
+        "source": "player_by_action"
+      },
+      "attack": {
+        "num_predict": 512,
+        "source": "player_by_action"
+      },
+      "seer": {
+        "num_predict": 512,
+        "source": "player_by_action"
+      },
+      "co_correction": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      }
+    }
+  },
+  "cli_thinking": "auto",
+  "cli_thinking_by_action": {},
+  "default_thinking_by_action": {
+    "discussion": true,
+    "wolf_discussion": true,
+    "attack": false,
+    "seer": false,
+    "vote": false,
+    "co_correction": false
+  },
+  "thinking_resolution_priority": [
+    "player_by_action",
+    "cli_by_action",
+    "player_global",
+    "cli_global",
+    "default_by_action"
+  ],
+  "applied_thinking": {
+    "werewolf-calm3-22b-8k": {
+      "discussion": {
+        "thinking": false,
+        "source": "player_by_action"
+      },
+      "vote": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "attack": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "seer": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "co_correction": {
+        "thinking": false,
+        "source": "default_by_action"
+      }
+    },
+    "werewolf-qwen3.8-8k": {
+      "discussion": {
+        "thinking": true,
+        "source": "default_by_action"
+      },
+      "vote": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "attack": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "seer": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "co_correction": {
+        "thinking": false,
+        "source": "default_by_action"
+      }
+    }
+  },
+  "thinking_off_requests": 27,
+  "thinking_retry_off_requests": 0,
+  "thinking_capability_fallback_requests": 0,
+  "thinking_budget_adaptive_requests": 0,
+  "thinking_budget_exhausted_requests": 0,
+  "thinking_supported_models": {
+    "werewolf-calm3-22b-8k": true,
+    "werewolf-qwen3.8-8k": true
+  },
+  "thinking_budget_ok_models": {
+    "werewolf-calm3-22b-8k": true,
+    "werewolf-qwen3.8-8k": true
+  },
+  "thinking_affordable_num_predict": {
+    "discussion": 3072,
+    "wolf_discussion": 1536
+  },
+  "options": {
+    "temperature": 0.7,
+    "num_ctx": 4096
+  },
+  "models": {
+    "werewolf-calm3-22b-8k": {
+      "total_actions": 15,
+      "format_compliance_rate": 0.933,
+      "parse_success_rate": 0.933,
+      "parse_failure_rate": 0.067,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 5,
+      "total_retries": 5,
+      "fallback_count": 1,
+      "invalid_target_count": 0,
+      "invalid_target_rate": 0.0,
+      "seer_target_invalid_count": 0,
+      "seer_target_invalid_rate": 0.0,
+      "fallback_rate": 0.067,
+      "seer_co_total": 3,
+      "seer_co_established": 3,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "seer_co_published_in_game": 3,
+      "seer_co_published_in_game_rate": 1.0,
+      "average_response_seconds": 7.943,
+      "avg_eval_count": 95.2,
+      "avg_eval_duration_ms": 3462.67,
+      "specific_count": 13,
+      "specific_rate": 0.867,
+      "specific_valid_rate": 0.867,
+      "personality_profile": "analytical",
+      "discussion_signal_distribution": {
+        "question_targets": {
+          "target_counts": {
+            "Player 4": 1,
+            "Player 7": 1
+          },
+          "distinct_targets": 2
+        },
+        "suspicion_targets": {
+          "target_counts": {
+            "Player 4": 1,
+            "Player 7": 1
+          },
+          "distinct_targets": 2
+        },
+        "suspicion_reasons": {
+          "reason_counts": {
+            "other": 1,
+            "role_claim_evidence": 1
+          },
+          "distinct_reasons": 2
+        },
+        "vote_proposals": {
+          "target_counts": {},
+          "distinct_targets": 0
+        }
+      },
+      "budget_exhausted_count": 0,
+      "request_attempts": 20,
+      "empty_response_count": 0,
+      "thinking_only_count": 0,
+      "truncated_count": 0,
+      "failure_reasons": {
+        "seer_result_without_claim": 1,
+        "discussion_output_format": 3,
+        "co_missing": 2
+      },
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "cli_num_predict_by_action": {},
+      "default_action_num_predict": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 256,
+        "seer": 256,
+        "vote": 256,
+        "co_correction": 256
+      },
+      "player_num_predict": 1024,
+      "player_num_predict_by_action": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 256,
+        "seer": 256,
+        "vote": 256,
+        "co_correction": 256
+      },
+      "applied_action_num_predict": {
+        "discussion": {
+          "num_predict": 1536,
+          "source": "player_by_action"
+        },
+        "vote": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        },
+        "attack": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        },
+        "seer": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        },
+        "co_correction": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        }
+      },
+      "player_thinking": null,
+      "player_thinking_by_action": {
+        "discussion": false,
+        "wolf_discussion": false
+      },
+      "applied_thinking": {
+        "discussion": {
+          "thinking": false,
+          "source": "player_by_action"
+        },
+        "vote": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "attack": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "seer": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "co_correction": {
+          "thinking": false,
+          "source": "default_by_action"
+        }
+      },
+      "thinking_off_requests": 15,
+      "thinking_retry_off_requests": 0,
+      "thinking_capability_fallback_requests": 0,
+      "thinking_budget_adaptive_requests": 0,
+      "thinking_budget_exhausted_requests": 0,
+      "thinking_supported": true,
+      "thinking_budget_ok": true,
+      "by_action": {
+        "discussion": {
+          "total": 3,
+          "format_compliant": 2,
+          "parse_valid": 2,
+          "transport_retries": 0,
+          "semantic_retries": 2,
+          "total_retries": 2,
+          "fallback_count": 1,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 0.667,
+          "parse_success_rate": 0.667,
+          "specific_count": 1,
+          "specific_rate": 0.333,
+          "specific_valid_rate": 0.333,
+          "avg_eval_count": 226.67,
+          "avg_eval_duration_ms": 8404.33,
+          "budget_exhausted_count": 0,
+          "request_attempts": 5,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {
+            "discussion_output_format": 3
+          },
+          "action_budget_key": "discussion"
+        },
+        "discussion_seer_co": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 3,
+          "total_retries": 3,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 19.0,
+          "avg_eval_duration_ms": 636.67,
+          "budget_exhausted_count": 0,
+          "request_attempts": 6,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {
+            "seer_result_without_claim": 1,
+            "co_missing": 2
+          },
+          "action_budget_key": "co_correction"
+        },
+        "vote": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 59.33,
+          "avg_eval_duration_ms": 2108.67,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "vote"
+        },
+        "attack": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 115.33,
+          "avg_eval_duration_ms": 4172.33,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "attack"
+        },
+        "seer": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 55.67,
+          "avg_eval_duration_ms": 1991.33,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "seer"
+        }
+      }
+    },
+    "werewolf-qwen3.8-8k": {
+      "total_actions": 15,
+      "format_compliance_rate": 1.0,
+      "parse_success_rate": 1.0,
+      "parse_failure_rate": 0.0,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 0,
+      "total_retries": 0,
+      "fallback_count": 0,
+      "invalid_target_count": 0,
+      "invalid_target_rate": 0.0,
+      "seer_target_invalid_count": 0,
+      "seer_target_invalid_rate": 0.0,
+      "fallback_rate": 0.0,
+      "seer_co_total": 3,
+      "seer_co_established": 3,
+      "seer_co_established_rate": 1.0,
+      "seer_co_result_published_rate": 1.0,
+      "seer_co_published_in_game": 3,
+      "seer_co_published_in_game_rate": 1.0,
+      "average_response_seconds": 14.708,
+      "avg_eval_count": 266.93,
+      "avg_eval_duration_ms": 8847.07,
+      "specific_count": 15,
+      "specific_rate": 1.0,
+      "specific_valid_rate": 1.0,
+      "personality_profile": "analytical",
+      "discussion_signal_distribution": {
+        "question_targets": {
+          "target_counts": {
+            "Player 1": 5,
+            "Player 2": 3,
+            "Player 3": 1,
+            "Player 4": 1
+          },
+          "distinct_targets": 4
+        },
+        "suspicion_targets": {
+          "target_counts": {
+            "Player 1": 6,
+            "Player 2": 5,
+            "Player 3": 2,
+            "Player 4": 1
+          },
+          "distinct_targets": 4
+        },
+        "suspicion_reasons": {
+          "reason_counts": {
+            "discussion_behavior": 5,
+            "evasive_response": 3,
+            "inconsistent_statements": 2,
+            "other": 1,
+            "role_claim_evidence": 6,
+            "voting_behavior": 5
+          },
+          "distinct_reasons": 6
+        },
+        "vote_proposals": {
+          "target_counts": {
+            "Player 1": 2,
+            "Player 2": 1,
+            "Player 3": 1
+          },
+          "distinct_targets": 3
+        }
+      },
+      "budget_exhausted_count": 1,
+      "request_attempts": 15,
+      "empty_response_count": 0,
+      "thinking_only_count": 3,
+      "truncated_count": 1,
+      "failure_reasons": {},
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "cli_num_predict_by_action": {},
+      "default_action_num_predict": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 256,
+        "seer": 256,
+        "vote": 256,
+        "co_correction": 256
+      },
+      "player_num_predict": 768,
+      "player_num_predict_by_action": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 512,
+        "seer": 512,
+        "vote": 512,
+        "co_correction": 256
+      },
+      "applied_action_num_predict": {
+        "discussion": {
+          "num_predict": 1536,
+          "source": "player_by_action"
+        },
+        "vote": {
+          "num_predict": 512,
+          "source": "player_by_action"
+        },
+        "attack": {
+          "num_predict": 512,
+          "source": "player_by_action"
+        },
+        "seer": {
+          "num_predict": 512,
+          "source": "player_by_action"
+        },
+        "co_correction": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        }
+      },
+      "player_thinking": null,
+      "player_thinking_by_action": null,
+      "applied_thinking": {
+        "discussion": {
+          "thinking": true,
+          "source": "default_by_action"
+        },
+        "vote": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "attack": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "seer": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "co_correction": {
+          "thinking": false,
+          "source": "default_by_action"
+        }
+      },
+      "thinking_off_requests": 12,
+      "thinking_retry_off_requests": 0,
+      "thinking_capability_fallback_requests": 0,
+      "thinking_budget_adaptive_requests": 0,
+      "thinking_budget_exhausted_requests": 0,
+      "thinking_supported": true,
+      "thinking_budget_ok": true,
+      "by_action": {
+        "discussion": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 623.33,
+          "avg_eval_duration_ms": 18458.67,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 0,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 3,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "discussion"
+        },
+        "discussion_seer_co": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 221.67,
+          "avg_eval_duration_ms": 7689.0,
+          "budget_exhausted_count": 1,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 1,
+          "failure_reasons": {},
+          "action_budget_key": "co_correction"
+        },
+        "vote": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 203.33,
+          "avg_eval_duration_ms": 7440.33,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "vote"
+        },
+        "attack": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 162.33,
+          "avg_eval_duration_ms": 5941.67,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "attack"
+        },
+        "seer": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 124.0,
+          "avg_eval_duration_ms": 4705.67,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "seer"
+        }
+      }
+    }
+  }
+}

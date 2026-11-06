@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,7 @@ from werewolf import (
     Message,
     OllamaClient,
     OllamaError,
+    PERSONALITY_PROFILES,
     Player,
     PromptBuilder,
     PromptContext,
@@ -64,6 +65,8 @@ class PromptTestScenario:
     player_names: tuple[str, ...] = ()
     # 占い師COシナリオで、そのモデルが実際に持っている占い結果（本番のフォールバック評価用）
     expected_seer_result: tuple[str, str] | None = None
+    scenario_role: str | None = None
+    personality_profile: str = "balanced"
 
 
 # 評価シナリオの action_type と行動別生成上限キーの対応
@@ -239,6 +242,91 @@ def evaluate_specificity(
     return bool(content.strip()) and any(name in content for name in names)
 
 
+def extract_discussion_signals(
+    content: str, player_names: tuple[str, ...]
+) -> dict[str, list[str]]:
+    """議論本文から質問・疑い・投票提案の対象を抽出する（語彙ではなく対象選択を見る）。"""
+    structured = parse_discussion_output(content)
+    body = structured.body if structured is not None else content
+    signals: dict[str, set[str]] = {
+        "question_targets": set(),
+        "suspicion_targets": set(),
+        "suspicion_reasons": set(),
+        "vote_proposals": set(),
+    }
+    for line in body.splitlines():
+        mentioned = {name for name in player_names if name in line}
+        if "?" in line or "？" in line or any(
+            cue in line for cue in ("質問", "聞きたい", "尋ね", "確認したい")
+        ):
+            signals["question_targets"].update(mentioned)
+        suspicion_cues = ("疑", "怪しい", "人狼", "黒だ", "黒と思")
+        if any(cue in line for cue in suspicion_cues):
+            signals["suspicion_targets"].update(mentioned)
+            reason_categories = {
+                "inconsistent_statements": ("矛盾", "変わ", "一貫", "前と違"),
+                "voting_behavior": ("投票", "票"),
+                "role_claim_evidence": ("CO", "占い", "結果", "判定"),
+                "evasive_response": ("回答", "質問", "避け", "答え"),
+                "discussion_behavior": ("発言", "態度", "様子", "反応"),
+            }
+            matched_reasons = {
+                reason
+                for reason, cues in reason_categories.items()
+                if any(cue in line for cue in cues)
+            }
+            signals["suspicion_reasons"].update(matched_reasons or {"other"})
+        if any(
+            cue in line
+            for cue in (
+                "投票を提案",
+                "投票する",
+                "投票します",
+                "投票すべき",
+                "投票先",
+                "処刑",
+                "吊る",
+            )
+        ):
+            signals["vote_proposals"].update(mentioned)
+    return {key: sorted(targets) for key, targets in signals.items()}
+
+
+def summarize_discussion_signals(
+    records: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """対象選択の分布と多様性をモデル・個性別に集計する。"""
+    distributions: dict[str, dict[str, int]] = {
+        "question_targets": {},
+        "suspicion_targets": {},
+        "suspicion_reasons": {},
+        "vote_proposals": {},
+    }
+    for record in records:
+        signals = record.get("discussion_signals")
+        if not isinstance(signals, dict):
+            continue
+        for signal_name, counts in distributions.items():
+            targets = signals.get(signal_name)
+            if not isinstance(targets, list):
+                continue
+            for target in targets:
+                if isinstance(target, str):
+                    counts[target] = counts.get(target, 0) + 1
+    summary: dict[str, dict[str, Any]] = {}
+    for signal_name, counts in distributions.items():
+        count_key, diversity_key = (
+            ("reason_counts", "distinct_reasons")
+            if signal_name == "suspicion_reasons"
+            else ("target_counts", "distinct_targets")
+        )
+        summary[signal_name] = {
+            count_key: dict(sorted(counts.items())),
+            diversity_key: len(counts),
+        }
+    return summary
+
+
 def evaluate_seer_co_response(
     content: str, player_names: tuple[str, ...]
 ) -> tuple[bool, bool]:
@@ -281,6 +369,8 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
             candidates=(),
             actor_name=actor.name,
             player_names=all_player_names,
+            scenario_role=actor.role.value,
+            personality_profile=actor.personality_profile,
         )
     )
 
@@ -300,11 +390,19 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
             expected_action_kind=ActionKind.VOTE,
             candidates=vote_candidates,
             actor_name=actor.name,
+            scenario_role=actor.role.value,
+            personality_profile=actor.personality_profile,
         )
     )
 
     # 3. 襲撃対象 (attack) - 人狼役職としてテスト
-    wolf_actor = Player(name=actor.name, model=actor.model, role=Role.WOLF, is_alive=True)
+    wolf_actor = Player(
+        name=actor.name,
+        model=actor.model,
+        role=Role.WOLF,
+        is_alive=True,
+        personality_profile=actor.personality_profile,
+    )
     partner = next(p for p in all_player_names if p != actor.name)
     wolves = (actor.name, partner)
     attack_candidates = tuple(p for p in all_player_names if p not in wolves)
@@ -320,17 +418,40 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
             expected_action_kind=ActionKind.ATTACK,
             candidates=attack_candidates,
             actor_name=actor.name,
+            scenario_role=wolf_actor.role.value,
+            personality_profile=actor.personality_profile,
         )
     )
 
     # 4. 占い対象 (seer) - 占い師役職としてテスト
-    seer_actor = Player(name=actor.name, model=actor.model, role=Role.SEER, is_alive=True)
-    seer_results = {all_player_names[0]: "human"}
-    seer_candidates = all_player_names
+    seer_actor = Player(
+        name=actor.name,
+        model=actor.model,
+        role=Role.SEER,
+        is_alive=True,
+        personality_profile=actor.personality_profile,
+    )
+    scanned_target = next(name for name in all_player_names if name != actor.name)
+    seer_results = {scanned_target: "human"}
+    seer_state_players = [
+        Player(
+            name=name,
+            model=actor.model,
+            role=Role.SEER if name == actor.name else Role.VILLAGER,
+            personality_profile=actor.personality_profile,
+        )
+        for name in all_player_names
+    ]
+    seer_state = GameState(players=seer_state_players, day=2)
+    seer_state.seer_results.update(seer_results)
+    seer_state.seer_result_history.append((1, scanned_target, "human"))
+    seer_candidates = tuple(name for name in all_player_names if name != scanned_target)
     seer_ctx = PromptBuilder.build_seer_prompt(
         actor=seer_actor,
-        alive_players=seer_candidates,
+        alive_players=all_player_names,
         seer_results=seer_results,
+        day=2,
+        state=seer_state,
     )
     scenarios.append(
         PromptTestScenario(
@@ -339,6 +460,8 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
             expected_action_kind=ActionKind.SEER,
             candidates=seer_candidates,
             actor_name=actor.name,
+            scenario_role=seer_actor.role.value,
+            personality_profile=actor.personality_profile,
         )
     )
 
@@ -358,6 +481,7 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
         player for player in seer_state.players if player.name == actor.name
     )
     seer_speaker.role = Role.SEER
+    seer_speaker.personality_profile = actor.personality_profile
     co_target = next(name for name in all_player_names if name != actor.name)
     seer_state.seer_results[co_target] = "wolf"
     seer_state.seer_result_history.append((1, co_target, "wolf"))
@@ -378,6 +502,8 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
             actor_name=actor.name,
             player_names=all_player_names,
             expected_seer_result=(co_target, "wolf"),
+            scenario_role=seer_speaker.role.value,
+            personality_profile=actor.personality_profile,
         )
     )
 
@@ -467,6 +593,7 @@ def evaluate_scenario(
     semantic_retries = 0
 
     parsed_target: str | None = None
+    invalid_target = False
     is_format_compliant = False
     is_parse_valid = False
     result_format = "invalid"
@@ -595,6 +722,9 @@ def evaluate_scenario(
                 scenario.candidates,
                 actor=scenario.actor_name if scenario.expected_action_kind == ActionKind.VOTE else None,
             )
+            invalid_target = invalid_target or (
+                parsed_target is not None and not is_parse_valid
+            )
         else:
             # discussion / discussion_seer_co
             structured_output = parse_discussion_output(content)
@@ -689,6 +819,8 @@ def evaluate_scenario(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model": model,
         "player_name": scenario.actor_name,
+        "scenario_role": scenario.scenario_role,
+        "personality_profile": scenario.personality_profile,
         "action_type": scenario.action_type,
         "discussion_format": (
             result_format
@@ -711,6 +843,13 @@ def evaluate_scenario(
         "raw_response": last_raw_response,
         "raw_responses": raw_responses,
         "parsed_target": parsed_target,
+        "invalid_target": invalid_target,
+        "discussion_signals": (
+            extract_discussion_signals(last_raw_response, scenario.player_names)
+            if scenario.action_type in {"discussion", "discussion_seer_co"}
+            and last_raw_response is not None
+            else {}
+        ),
         "is_format_compliant": is_format_compliant,
         "is_parse_valid": is_parse_valid,
         "is_specific": is_specific,
@@ -800,6 +939,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--personality",
+        choices=tuple(PERSONALITY_PROFILES),
+        default=None,
+        help=(
+            "Override configured personality for selected models. Use the same model "
+            "filters and multiple rounds to compare personalities."
+        ),
+    )
+    parser.add_argument(
         "--rounds",
         type=int,
         default=1,
@@ -884,6 +1032,11 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     all_configs = load_player_configs(args.models_file)
+    if args.personality is not None:
+        all_configs = tuple(
+            replace(config, personality_profile=args.personality)
+            for config in all_configs
+        )
     # 議論プロンプトは8人全員の名前を使うが、評価対象は --models で1〜2モデルへ絞れる
     all_player_names = tuple(cfg.name for cfg in all_configs)
     player_configs = select_player_configs(all_configs, args.models)
@@ -944,6 +1097,9 @@ def main() -> None:
         if cfg.thinking_by_action
         else None
         for cfg in player_configs
+    }
+    personality_by_model: dict[str, str] = {
+        cfg.model: cfg.personality_profile for cfg in player_configs
     }
 
     print(f"=== Starting Model Evaluation ===")
@@ -1011,6 +1167,7 @@ def main() -> None:
                 num_predict_by_action=cfg.num_predict_by_action,
                 thinking=cfg.thinking,
                 thinking_by_action=cfg.thinking_by_action,
+                personality_profile=cfg.personality_profile,
             )
             scenarios = generate_scenarios(player_actor, all_player_names)
 
@@ -1100,6 +1257,8 @@ def main() -> None:
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "model": model,
                         "player_name": cfg.name,
+                        "scenario_role": scenario.scenario_role,
+                        "personality_profile": cfg.personality_profile,
                         "action_type": scenario.action_type,
                         "options": dict(scenario_options),
                         "elapsed_seconds": 0.0,
@@ -1112,6 +1271,8 @@ def main() -> None:
                         "raw_response": None,
                         "raw_responses": [],
                         "parsed_target": None,
+                        "invalid_target": False,
+                        "discussion_signals": {},
                         "is_format_compliant": False,
                         "is_parse_valid": False,
                         "fallback_used": True,
@@ -1197,6 +1358,17 @@ def main() -> None:
                 "semantic_retries": act_semantic_retries,
                 "total_retries": act_total_retries,
                 "fallback_count": act_fallback,
+                "invalid_target_count": sum(
+                    1 for r in act_recs if r.get("invalid_target")
+                ),
+                "invalid_target_rate": (
+                    round(
+                        sum(1 for r in act_recs if r.get("invalid_target")) / act_total,
+                        3,
+                    )
+                    if act_total
+                    else 0.0
+                ),
                 "format_compliance_rate": round(act_compliant / act_total, 3) if act_total else 0.0,
                 "parse_success_rate": round(act_valid / act_total, 3) if act_total else 0.0,
                 "specific_count": sum(1 for r in act_recs if r.get("is_specific")),
@@ -1254,6 +1426,33 @@ def main() -> None:
             "semantic_retries": semantic_retries,
             "total_retries": total_retries,
             "fallback_count": fallback_count,
+            "invalid_target_count": sum(1 for r in records if r.get("invalid_target")),
+            "invalid_target_rate": (
+                round(
+                    sum(1 for r in records if r.get("invalid_target")) / total_actions,
+                    3,
+                )
+                if total_actions
+                else 0.0
+            ),
+            "seer_target_invalid_count": sum(
+                1
+                for r in records
+                if r.get("action_type") == "seer" and r.get("invalid_target")
+            ),
+            "seer_target_invalid_rate": (
+                round(
+                    sum(
+                        1
+                        for r in records
+                        if r.get("action_type") == "seer" and r.get("invalid_target")
+                    )
+                    / sum(1 for r in records if r.get("action_type") == "seer"),
+                    3,
+                )
+                if any(r.get("action_type") == "seer" for r in records)
+                else 0.0
+            ),
             "fallback_rate": round(fallback_count / total_actions, 3) if total_actions else 0.0,
             "seer_co_total": co_total,
             "seer_co_established": co_established_count,
@@ -1276,6 +1475,8 @@ def main() -> None:
             "specific_valid_rate": (
                 round(specific_valid_count / total_actions, 3) if total_actions else 0.0
             ),
+            "personality_profile": personality_by_model.get(model, "balanced"),
+            "discussion_signal_distribution": summarize_discussion_signals(records),
             "budget_exhausted_count": budget_exhausted_count,
             "request_attempts": _request_attempts(records),
             **_metadata_counts(records),
@@ -1323,6 +1524,8 @@ def main() -> None:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "models_file": str(args.models_file),
         "models_filter": list(args.models),
+        "personality_override": args.personality,
+        "personality_profiles": personality_by_model,
         "selected_models": [cfg.model for cfg in player_configs],
         "rounds": args.rounds,
         "timeout": args.timeout,

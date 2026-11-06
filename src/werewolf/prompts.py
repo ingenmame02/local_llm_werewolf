@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Mapping
 
+from .config import PERSONALITY_PROFILES
 from .models import GameState, Message, Player, PublicRoleClaim, Role
 
 ROLE_NAMES_JA: dict[Role, str] = {
@@ -327,6 +328,12 @@ class PromptBuilder:
         return COMMON_SYSTEM_TEMPLATE.format(
             role=role_ja,
             role_description=role_desc,
+        ) + (
+            "\n\n【個性プロファイル（話し方・議論姿勢のみ）】\n"
+            f"{PERSONALITY_PROFILES[player.personality_profile]}\n"
+            "このプロファイルは注目点や表現の傾向だけを示します。役職の目的・勝利条件・"
+            "行動制約、確定事実、公開情報・秘匿情報の範囲、出力形式を変更しません。"
+            "結論や投票先を指定するものではなく、状況に応じて推理してください。"
         )
 
     @classmethod

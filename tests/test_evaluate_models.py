@@ -8,7 +8,9 @@ from scripts.evaluate_models import (
     PromptTestScenario,
     build_parser,
     evaluate_scenario,
+    extract_discussion_signals,
     generate_scenarios,
+    summarize_discussion_signals,
     select_player_configs,
 )
 from werewolf import ActionKind, OllamaClient, OllamaError, Player, PlayerConfig, Role
@@ -32,6 +34,66 @@ def test_generate_scenarios_covers_five_actions_including_seer_co() -> None:
     assert co_scenario.expected_action_kind is None
     assert co_scenario.player_names == all_names
     assert "未公開の人狼判定" in co_scenario.prompt_ctx.user_prompt
+    assert all(s.personality_profile == player.personality_profile for s in scenarios)
+    assert next(s for s in scenarios if s.action_type == "seer").scenario_role == "seer"
+    seer_scenario = next(s for s in scenarios if s.action_type == "seer")
+    assert "Player 2" not in seer_scenario.candidates
+    assert "Player 2" in seer_scenario.prompt_ctx.user_prompt
+    assert co_scenario.scenario_role == "seer"
+
+
+def test_seer_target_benchmark_records_invalid_target_rate() -> None:
+    player = Player(name="Player 1", model="model-a", role=Role.VILLAGER)
+    names = tuple(f"Player {index}" for index in range(1, 9))
+    scenario = next(
+        scenario
+        for scenario in generate_scenarios(player, names)
+        if scenario.action_type == "seer"
+    )
+    client = MagicMock(spec=OllamaClient)
+    client.chat.side_effect = ["占い対象：Player 2", "占い対象：Player 3"]
+
+    result = evaluate_scenario(client, player.model, scenario, {"num_ctx": 4096})
+
+    assert result["invalid_target"] is True
+    assert result["is_parse_valid"] is True
+    assert result["failure_reasons"] == ["invalid_target"]
+
+
+def test_discussion_signals_measure_targets_not_just_vocabulary() -> None:
+    response = (
+        "【CO】なし\n"
+        "【結果】なし\n"
+        "【本文】Player 2さんに投票の理由を質問します。\n"
+        "Player 3は発言が変わったので疑っています。\n"
+        "Player 3への投票を提案します。"
+    )
+
+    signals = extract_discussion_signals(
+        response, tuple(f"Player {index}" for index in range(1, 9))
+    )
+
+    assert signals == {
+        "question_targets": ["Player 2"],
+        "suspicion_targets": ["Player 3"],
+        "suspicion_reasons": [
+            "discussion_behavior",
+            "inconsistent_statements",
+        ],
+        "vote_proposals": ["Player 3"],
+    }
+    summary = summarize_discussion_signals(
+        [{"discussion_signals": signals}, {"discussion_signals": signals}]
+    )
+    assert summary["question_targets"] == {
+        "target_counts": {"Player 2": 2},
+        "distinct_targets": 1,
+    }
+    assert summary["suspicion_targets"]["target_counts"] == {"Player 3": 2}
+    assert summary["suspicion_reasons"]["reason_counts"] == {
+        "discussion_behavior": 2,
+        "inconsistent_statements": 2,
+    }
 
 
 def test_seer_co_scenario_measures_co_establishment_and_short_correction() -> None:
@@ -268,8 +330,12 @@ def test_cli_execution_with_mock_transport(tmp_path: Path, monkeypatch) -> None:
             candidates_line = [l for l in last_user.splitlines() if "選択可能な襲撃対象：" in l][0]
             first_cand = candidates_line.split("：", 1)[1].split(",")[0].strip()
             return f"**襲撃対象：{first_cand}**"
-        elif "占い対象：" in last_user:
-            return "占い対象：P2"
+        elif "選択可能な占い対象：" in last_user:
+            candidates_line = [
+                line for line in last_user.splitlines() if "選択可能な占い対象：" in line
+            ][0]
+            first_cand = candidates_line.split("：", 1)[1].split(",")[0].strip()
+            return f"占い対象：{first_cand}"
         elif "未公開の人狼判定" in last_user:
             # 占い師CO評価シナリオ：最小形式のCOと結果を返す
             return "【CO】占い師\n【結果】対象=P2 判定=人狼\n【本文】P2への投票を提案します。"
@@ -326,6 +392,9 @@ def test_cli_execution_with_mock_transport(tmp_path: Path, monkeypatch) -> None:
         assert model_stat["seer_co_established"] == 1
         assert model_stat["seer_co_established_rate"] == 1.0
         assert model_stat["seer_co_result_published_rate"] == 1.0
+        assert model_stat["personality_profile"] == "balanced"
+        assert model_stat["seer_target_invalid_rate"] == 0.0
+        assert "question_targets" in model_stat["discussion_signal_distribution"]
 
         # jsonl ファイルの存在確認
         jsonl_file = test_output_dir / f"{m}.jsonl"
@@ -338,6 +407,8 @@ def test_cli_execution_with_mock_transport(tmp_path: Path, monkeypatch) -> None:
         assert "semantic_retries" in record
         assert "total_retries" in record
         assert "fallback_used" in record
+        assert record["personality_profile"] == "balanced"
+        assert "discussion_signals" in record
 
 def test_evaluate_scenario_doubles_generation_budget_on_generation_failure() -> None:
     """TASK-024: 評価ハーネスも本番と同じく生成起因の再試行でnum_predictを倍へ増やす。"""

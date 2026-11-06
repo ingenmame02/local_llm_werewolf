@@ -37,6 +37,7 @@ def create_game(
             num_predict_by_action=config.num_predict_by_action,
             thinking=config.thinking,
             thinking_by_action=config.thinking_by_action,
+            personality_profile=config.personality_profile,
         )
         for config, role in zip(player_configs, roles, strict=True)
     ]

@@ -46,6 +46,47 @@ def test_system_prompt_common_structure_and_role_description() -> None:
         assert ROLE_DESCRIPTIONS_JA[role] in sys_prompt
 
 
+def test_personality_changes_style_only_and_keeps_discussion_facts_and_role_fixed() -> None:
+    analytical = Player(
+        name="Player 1",
+        model="dummy-model",
+        role=Role.SEER,
+        personality_profile="analytical",
+    )
+    questioning = Player(
+        name="Player 1",
+        model="dummy-model",
+        role=Role.SEER,
+        personality_profile="questioning",
+    )
+    state = GameState(
+        players=[
+            analytical,
+            *[
+                Player(name=f"Player {index}", model="dummy-model", role=Role.VILLAGER)
+                for index in range(2, 9)
+            ],
+        ]
+    )
+    state.seer_results["Player 2"] = "wolf"
+    state.seer_result_history.append((1, "Player 2", "wolf"))
+    history = (Message("Player 3", "Player 1さん、誰を疑っていますか？"),)
+    alive = tuple(state.alive_players)
+
+    first = PromptBuilder.build_discussion_prompt(
+        analytical, alive, history, state=state
+    )
+    second = PromptBuilder.build_discussion_prompt(
+        questioning, alive, history, state=state
+    )
+    profile_block = "【個性プロファイル（話し方・議論姿勢のみ）】"
+    assert first.user_prompt == second.user_prompt
+    assert first.system_prompt.split(profile_block)[0] == second.system_prompt.split(profile_block)[0]
+    assert first.system_prompt != second.system_prompt
+    assert "役職の目的・勝利条件・行動制約" in first.system_prompt
+    assert "Player 2: 人狼" in first.user_prompt
+
+
 def test_confidentiality_other_players_role_never_leaks_in_discussion_and_vote() -> None:
     state = create_game(seed=42)
     # roles check

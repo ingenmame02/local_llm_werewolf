@@ -811,7 +811,7 @@ Player 1は実際には占い結果を発言したが、「私は占い師です
 
 ## TASK-025 — プレイヤー1のモデル再評価とプレイヤー個性の導入
 
-状態：未着手
+状態：完了（3ラウンド実機比較済み）
 対象ログ：`logs/game_b560ee86e280.jsonl`
 
 ### 背景
@@ -856,4 +856,8 @@ Player 1は実際には占い結果を発言したが、「私は占い師です
 - 思考onでは思考トークンが`num_predict`を消費するため、設定未指定（行動別既定値）の議論・人狼相談だけ下限へ引き上げる（議論3072・人狼相談1536、`num_predict_source=thinking_allowance`）。player行動別・CLI行動別・全体設定・キャップ済み値は上書きしない（`apply_thinking_floor`共有）。下限適用値は実際のoptionsと再要求プロンプトの両方へ反映し、表示値と送信値を一致させる。思考だけで上限を消費したモデルは`thinking_budget_exhausted`として記録し、以後そのモデルの思考行動はoffへ落とす。
 - 評価ハーネスに`--models`（部分一致、複数指定可）を追加し、8モデル一括前に1〜2モデルだけで品質・速度を比較できる。サマリへ`models_filter`・`selected_models`を記録し、議論プロンプトは常に8人分の名前を使う。ローカルLLMの負荷を避けるため、実機評価は本タスクの実行時には実施していない（`python scripts/evaluate_models.py --models calm3 --timeout 120 --output evaluation-results/task024-pilot` のように1モデルずつ実行する）。
 - 検証：`pytest` 234件成功、`compileall`成功、`git diff --check`成功、CLI/評価スクリプトの`--help`確認済み。実機8モデル評価（`python scripts/evaluate_models.py`）はローカルLLM実行担当者が実施し、`done_reason`別失敗理由・実送信回数・行動別上限の出所・思考off送信数を比較する。
-
+- 個性プロファイルを役職説明から分離し、`config/players.json`で指定可能にした。Player 1のCALM3とPlayer 5のQwenは、モデル比較時に個性条件を揃えるため両方`analytical`に設定。評価時は`--personality`で同一モデルのプロファイルを上書き比較でき、JSONLとサマリにモデル・役職・個性を分けて記録する。
+- 占い対象ベンチマークは前日に占った候補を明示的に除外する固定シナリオへ変更し、CO成立・人狼結果公開・占い対象選択の率を、複数ラウンド・再試行・フォールバック・時間・具体性とともに保存する。議論の質問対象・疑い対象・疑いの根拠カテゴリ・投票提案対象の分布と不正対象率もJSONL/サマリへ記録する。
+- 実機評価結果（2026-11-06、同じ固定評価シナリオを各3ラウンド。生成設定は各プレイヤーの構成を使用）: `evaluation-results/task025-model-comparison/summary.json` とモデル別JSONLに保存。CALM3はCO成立3/3・人狼結果公開3/3・不正占い対象0/3、全15行動中14成功（93.3%）、再試行5、フォールバック1、具体性13/15（86.7%）、平均7.943秒。QwenはCO成立3/3・人狼結果公開3/3・不正占い対象0/3、全15行動15成功（100%）、再試行0、フォールバック0、具体性15/15（100%）、平均14.708秒。占い対象選択自体は両モデル3/3成功。
+- 議論ではCALM3が2/3成功（具体性1/3、平均22.162秒）、Qwenが3/3成功（具体性3/3、平均39.243秒）。対象・根拠分布はJSONLへ記録済み。今回の固定シナリオではQwenの形式・具体性・安定性が高く、CALM3は処理時間が短い。各3ラウンドの評価だけでは総合的な実戦優劣は確定しないため、Player 1のモデルはCALM3から変更せず、Qwenへの切替判断はより長い実戦評価後とする。
+- 初期評価コマンド: `python scripts/evaluate_models.py --models calm3 --models qwen3.8 --rounds 3 --timeout 120 --output evaluation-results/task025-model-comparison`。設定上のQwen候補は`werewolf-qwen3.8-8k`。個性比較は同じモデル・ラウンド数で`--personality analytical`と`--personality questioning`を別出力先へ実行できる。

@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .config import ACTION_BUDGET_KEYS
+from .config import ACTION_BUDGET_KEYS, PERSONALITY_PROFILES
 
 
 class Role(str, Enum):
@@ -36,6 +36,7 @@ class Player:
     num_predict_by_action: Mapping[str, int] | None = None
     thinking: bool | None = None
     thinking_by_action: Mapping[str, bool] | None = None
+    personality_profile: str = "balanced"
 
     def __post_init__(self) -> None:
         if self.num_ctx is not None and (
@@ -59,6 +60,14 @@ class Player:
             raise ValueError("Player num_predict must be a positive integer.")
         if not isinstance(self.response_language, str) or not self.response_language.strip():
             raise ValueError("Player response_language cannot be empty.")
+        if (
+            not isinstance(self.personality_profile, str)
+            or self.personality_profile not in PERSONALITY_PROFILES
+        ):
+            raise ValueError(
+                "Player personality_profile must be one of "
+                f"{', '.join(PERSONALITY_PROFILES)}."
+            )
         if self.num_predict_by_action is not None:
             if not isinstance(self.num_predict_by_action, Mapping):
                 raise ValueError(

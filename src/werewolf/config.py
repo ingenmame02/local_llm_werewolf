@@ -16,6 +16,16 @@ ACTION_BUDGET_KEYS: tuple[str, ...] = (
     "co_correction",
 )
 
+PERSONALITY_PROFILES: dict[str, str] = {
+    "balanced": "落ち着いた標準的な話し方をし、発言と質問のバランスを取る。",
+    "analytical": "発言や投票の根拠を整理し、事実と推測を区別して説明する。",
+    "questioning": "相手への具体的な質問を重視し、回答や説明の一貫性を確認する。",
+    "assertive": "疑問点を明確に指摘し、根拠とともに自分の見解や投票提案をはっきり述べる。",
+    "cautious": "断定を避け、根拠の確かさや別の可能性を慎重に検証する。",
+    "consensus": "意見の違いを整理し、複数人が納得できる確認事項や方針を探る。",
+    "intuitive": "会話の流れや発言の違和感に注目し、直感を仮説として根拠とともに提示する。",
+}
+
 # プレイヤー設定・CLI設定が未指定時に使う行動別デフォルト上限。
 # 議論は「質問回答・確認できる事実・疑う根拠・次の確認点」を説明する文量が必要なので、
 # 思考トークンの消費を考慮した残余を確保する（TASK-024で文量緩和）。
@@ -172,6 +182,7 @@ class PlayerConfig:
     num_predict_by_action: Mapping[str, int] | None = None
     thinking: bool | None = None
     thinking_by_action: Mapping[str, bool] | None = None
+    personality_profile: str = "balanced"
 
 
 def validate_action_num_predict(
@@ -244,10 +255,19 @@ def load_player_configs(
         num_predict_by_action = entry.get("num_predict_by_action")
         thinking = entry.get("thinking")
         thinking_by_action = entry.get("thinking_by_action")
+        personality_profile = entry.get("personality_profile", "balanced")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"Player name at index {index} must be a non-empty string.")
         if not isinstance(model, str) or not model.strip():
             raise ValueError(f"Player model at index {index} must be a non-empty string.")
+        if (
+            not isinstance(personality_profile, str)
+            or personality_profile not in PERSONALITY_PROFILES
+        ):
+            raise ValueError(
+                f"Player personality_profile at index {index} must be one of "
+                f"{', '.join(PERSONALITY_PROFILES)}."
+            )
         if num_ctx is not None and (
             not isinstance(num_ctx, int) or isinstance(num_ctx, bool) or num_ctx <= 0
         ):
@@ -300,6 +320,7 @@ def load_player_configs(
                 num_predict_by_action=num_predict_by_action,
                 thinking=thinking,
                 thinking_by_action=thinking_by_action,
+                personality_profile=personality_profile,
             )
         )
 

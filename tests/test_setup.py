@@ -40,6 +40,8 @@ def test_loads_all_eight_models_from_configuration() -> None:
         1024,
         4096,
     ]
+    assert configs[0].personality_profile == configs[4].personality_profile == "analytical"
+    assert len({config.personality_profile for config in configs}) >= 2
 
 
 def test_create_game_assigns_expected_roles_and_wolf_partners() -> None:
@@ -158,6 +160,24 @@ def test_player_configuration_applies_model_budgets_and_response_language(tmp_pa
     assert config.num_predict == player.num_predict == 256
     assert config.response_language == player.response_language == "English"
     assert load_player_configs(config_file)[0].response_language == "日本語"
+
+
+def test_player_personality_profile_loads_into_game_and_rejects_unknown_values(tmp_path) -> None:
+    config_file = tmp_path / "players.json"
+    players = [
+        {"name": f"Player {index}", "model": f"model-{index}"}
+        for index in range(1, 9)
+    ]
+    players[0]["personality_profile"] = "questioning"
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+
+    assert load_player_configs(config_file)[0].personality_profile == "questioning"
+    assert create_game(seed=1, config_path=config_file).players[0].personality_profile == "questioning"
+
+    players[0]["personality_profile"] = "win-at-all-costs"
+    config_file.write_text(json.dumps({"players": players}), encoding="utf-8")
+    with pytest.raises(ValueError, match="personality_profile"):
+        load_player_configs(config_file)
 
 
 @pytest.mark.parametrize(
