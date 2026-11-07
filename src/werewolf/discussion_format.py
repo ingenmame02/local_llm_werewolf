@@ -13,6 +13,13 @@ class DiscussionOutput:
     result: str = ""
 
 
+@dataclass(frozen=True)
+class DiscussionClaim:
+    claim: str
+    result: str = ""
+    ignored_trailing_text: bool = False
+
+
 def has_discussion_output_markers(content: str) -> bool:
     return CO_MARKER in content or RESULT_MARKER in content or BODY_MARKER in content
 
@@ -55,3 +62,38 @@ def parse_discussion_output(content: str) -> DiscussionOutput | None:
     if has_body and not body:
         return None
     return DiscussionOutput(claim=claim, body=body, result=result)
+
+
+def parse_discussion_claim(content: str) -> DiscussionClaim | None:
+    """Parse a CO decision and safely ignore prose outside its structured lines."""
+    if content.count(CO_MARKER) != 1 or content.count(RESULT_MARKER) > 1:
+        return None
+    lines = content.strip().splitlines()
+    if not lines:
+        return None
+    claim_match = re.fullmatch(r"【CO】\s*(?P<claim>.+?)\s*", lines[0].strip())
+    if claim_match is None:
+        return None
+    claim = claim_match.group("claim").strip()
+    claim = {
+        "COなし": "なし",
+        "CO無し": "なし",
+        "COしない": "なし",
+        "CO保留": "保留",
+    }.get(claim, claim)
+    remaining = lines[1:]
+    result = ""
+    if remaining and remaining[0].strip().startswith(RESULT_MARKER):
+        result_line = remaining.pop(0).strip()
+        result = result_line[len(RESULT_MARKER) :].strip()
+        if not result:
+            return None
+    ignored_trailing_text = any(line.strip() for line in remaining)
+    if claim in {"なし", "保留"} and result:
+        result = ""
+        ignored_trailing_text = True
+    return DiscussionClaim(
+        claim=claim,
+        result=result,
+        ignored_trailing_text=ignored_trailing_text,
+    )

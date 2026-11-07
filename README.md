@@ -3,18 +3,24 @@ python src/werewolf/cli.py --mode ollama --num-predict 2048 --timeout 180
 python src/werewolf/cli.py `
   --mode ollama `
   --models-file config/players.json `
+  --seed 20261106 `
   --timeout 180 `
-  --num-predict 2048 `
-  --log-dir logs
+  --temperature 0.7 `
+  --log-dir logs `
+  --private-log `
+  --show-private
 
 
 $env:CUDA_VISIBLE_DEVICES="0,1"
 $env:OLLAMA_SCHED_SPREAD="1"
 $env:OLLAMA_FLASH_ATTENTION="1"
 $env:OLLAMA_CONTEXT_LENGTH="8192"
+
+
+$env:OLLAMA_NUM_PARALLEL="1"
 ollama serve
 
-`--num-ctx`は省略時、Ollama APIリクエストには含まれず、サーバー／モデル側の既定値が使われます。必要な場合だけCLIの`--num-ctx`または`config/players.json`のプレイヤー別`num_ctx`で指定してください。
+`--num-ctx`は省略時、Ollama APIリクエストには含まれず、サーバー／モデル側の既定値が使われます。現在の`config/players.json`では全プレイヤーの`num_ctx`を12288に設定しているため、プレイヤーごとのAPI要求へ明示されます。プレイヤー別`num_ctx`はCLIの`--num-ctx`より優先されます。
 
 --show-privateで管理者用ログを生成し、端末にも表示
 --private-logで管理者用ログだけを生成
@@ -55,12 +61,24 @@ python scripts/benchmark_context.py --context-lengths 4096 8192 --rounds 2
 
 新形式は1回の生成でCOと議論本文を分離します。COは公開主張の構造化に使い、会話履歴には本文だけを追加します。旧形式の明示的な文章COも互換のため受け付けます。
 
+二段階COを全プレイヤーに適用して1ゲーム確認する場合は、次のように実行します。全員にCO専用リクエストが追加されるため、従来方式より呼び出し回数・所要時間が増える可能性があります。
+
+```powershell
+python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 20261106 --timeout 180 --discussion-claim-mode all --log-dir evaluation-results/task027-task028-game --private-log
+```
+
+`--discussion-claim-mode candidates`は占い師・CO公開済みプレイヤーを対象とする比較用です。`all`は全員に二段階COを適用します。ログには非公開情報が含まれるため、共有時は取り扱いに注意してください。
+
+CO専用応答では、構造化されたCO／結果行だけを採用し、余分な説明文は議論本文へ混入しないよう破棄します。COなし・保留に誤った結果行が付いた場合も、結果を公開せずCOなし・保留として扱います。COプロンプトは会話履歴を重ねず、既に記録された公開COと占い師本人の結果だけを渡します。
+
 ```text
 【CO】なし または 占い師CO：対象=Player 2、判定=人間、理由=占い結果、投票提案=Player 3へ投票
 【本文】Player 2への疑いは弱めます。Player 3の発言も確認したいです。
 ```
 
 昼議論プロンプトには、確定ルール・ゲーム台帳とは分けて「人狼セオリーカード」を含めます。単独占い師COは1巡目後も対抗がいない場合に限って真寄りと評価し、真確定にはしません。未公開の人狼判定は早期公開を促し、人間判定だけの場合はCO・結果を保留する選択肢も示します。
+
+`config/players.json`ではプレイヤーごとに弱い議論スタイル（分析、質問、慎重、合意形成、直感、主張など）を指定します。個性は昼の議論本文だけに適用し、CO判定や対象選択には適用しません。議論の質・事実整合性・質問回答・形式指示より優先度を下げ、追加の説明や質問を強制しない設定です。
 
 再試行では失敗理由に応じた修正指示と、直近の公開発言・公開COなど必要な情報だけを再送します。占い師本人の非公開結果は、その占い師の再試行にのみ含めます。モデルごとの生成上限は`config/players.json`のプレイヤー別`num_predict`で調整できます。
 

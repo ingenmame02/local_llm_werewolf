@@ -1,0 +1,437 @@
+{
+  "generated_at": "2026-11-06T11:23:55.814123+00:00",
+  "models_file": "C:\\Users\\yukic\\local_llm_werewolf\\config\\players.json",
+  "models_filter": [
+    "calm3"
+  ],
+  "personality_override": null,
+  "personality_profiles": {
+    "werewolf-calm3-22b-8k": "analytical"
+  },
+  "selected_models": [
+    "werewolf-calm3-22b-8k"
+  ],
+  "rounds": 3,
+  "timeout": 120.0,
+  "transport_retries": 0,
+  "semantic_retries": 3,
+  "total_retries": 3,
+  "fallback_count": 1,
+  "avg_eval_count": 47.4,
+  "avg_eval_duration_ms": 1685.73,
+  "specific_rate": 0.733,
+  "specific_valid_rate": 0.733,
+  "budget_exhausted_count": 0,
+  "request_attempts": 18,
+  "empty_response_count": 0,
+  "thinking_only_count": 0,
+  "truncated_count": 0,
+  "failure_reasons": {
+    "seer_result_without_claim": 3,
+    "co_missing": 1
+  },
+  "cli_num_predict_by_action": {},
+  "default_action_num_predict": {
+    "discussion": 1536,
+    "wolf_discussion": 768,
+    "attack": 256,
+    "seer": 256,
+    "vote": 256,
+    "co_correction": 256
+  },
+  "minimal_action_max_num_predict": {
+    "attack": 768,
+    "seer": 768,
+    "vote": 768,
+    "co_correction": 384
+  },
+  "budget_resolution_priority": [
+    "player_by_action",
+    "cli_by_action",
+    "global_capped",
+    "player_global",
+    "cli_global",
+    "default_by_action"
+  ],
+  "applied_action_num_predict": {
+    "werewolf-calm3-22b-8k": {
+      "discussion": {
+        "num_predict": 1536,
+        "source": "player_by_action"
+      },
+      "vote": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      },
+      "attack": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      },
+      "seer": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      },
+      "co_correction": {
+        "num_predict": 256,
+        "source": "player_by_action"
+      }
+    }
+  },
+  "cli_thinking": "auto",
+  "cli_thinking_by_action": {},
+  "default_thinking_by_action": {
+    "discussion": true,
+    "wolf_discussion": true,
+    "attack": false,
+    "seer": false,
+    "vote": false,
+    "co_correction": false
+  },
+  "thinking_resolution_priority": [
+    "player_by_action",
+    "cli_by_action",
+    "player_global",
+    "cli_global",
+    "default_by_action"
+  ],
+  "applied_thinking": {
+    "werewolf-calm3-22b-8k": {
+      "discussion": {
+        "thinking": false,
+        "source": "player_by_action"
+      },
+      "vote": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "attack": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "seer": {
+        "thinking": false,
+        "source": "default_by_action"
+      },
+      "co_correction": {
+        "thinking": false,
+        "source": "default_by_action"
+      }
+    }
+  },
+  "thinking_off_requests": 15,
+  "thinking_retry_off_requests": 0,
+  "thinking_capability_fallback_requests": 0,
+  "thinking_budget_adaptive_requests": 0,
+  "thinking_budget_exhausted_requests": 0,
+  "thinking_supported_models": {
+    "werewolf-calm3-22b-8k": true
+  },
+  "thinking_budget_ok_models": {
+    "werewolf-calm3-22b-8k": true
+  },
+  "thinking_affordable_num_predict": {
+    "discussion": 3072,
+    "wolf_discussion": 1536
+  },
+  "options": {
+    "temperature": 0.7,
+    "num_ctx": 4096
+  },
+  "models": {
+    "werewolf-calm3-22b-8k": {
+      "total_actions": 15,
+      "format_compliance_rate": 0.933,
+      "parse_success_rate": 0.933,
+      "parse_failure_rate": 0.067,
+      "error_count": 0,
+      "transport_retries": 0,
+      "semantic_retries": 3,
+      "total_retries": 3,
+      "fallback_count": 1,
+      "invalid_target_count": 0,
+      "invalid_target_rate": 0.0,
+      "seer_target_invalid_count": 0,
+      "seer_target_invalid_rate": 0.0,
+      "fallback_rate": 0.067,
+      "seer_co_total": 3,
+      "seer_co_established": 2,
+      "seer_co_established_rate": 0.667,
+      "seer_co_result_published_rate": 1.0,
+      "seer_co_published_in_game": 3,
+      "seer_co_published_in_game_rate": 1.0,
+      "average_response_seconds": 4.205,
+      "avg_eval_count": 47.4,
+      "avg_eval_duration_ms": 1685.73,
+      "specific_count": 11,
+      "specific_rate": 0.733,
+      "specific_valid_rate": 0.733,
+      "personality_profile": "analytical",
+      "discussion_signal_distribution": {
+        "question_targets": {
+          "target_counts": {},
+          "distinct_targets": 0
+        },
+        "suspicion_targets": {
+          "target_counts": {
+            "Player 2": 1
+          },
+          "distinct_targets": 1
+        },
+        "suspicion_reasons": {
+          "reason_counts": {
+            "discussion_behavior": 2,
+            "other": 1,
+            "role_claim_evidence": 3
+          },
+          "distinct_reasons": 3
+        },
+        "vote_proposals": {
+          "target_counts": {},
+          "distinct_targets": 0
+        }
+      },
+      "budget_exhausted_count": 0,
+      "request_attempts": 18,
+      "empty_response_count": 0,
+      "thinking_only_count": 0,
+      "truncated_count": 0,
+      "failure_reasons": {
+        "seer_result_without_claim": 3,
+        "co_missing": 1
+      },
+      "options": {
+        "temperature": 0.7,
+        "num_ctx": 4096
+      },
+      "cli_num_predict_by_action": {},
+      "default_action_num_predict": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 256,
+        "seer": 256,
+        "vote": 256,
+        "co_correction": 256
+      },
+      "player_num_predict": 1024,
+      "player_num_predict_by_action": {
+        "discussion": 1536,
+        "wolf_discussion": 768,
+        "attack": 256,
+        "seer": 256,
+        "vote": 256,
+        "co_correction": 256
+      },
+      "applied_action_num_predict": {
+        "discussion": {
+          "num_predict": 1536,
+          "source": "player_by_action"
+        },
+        "vote": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        },
+        "attack": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        },
+        "seer": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        },
+        "co_correction": {
+          "num_predict": 256,
+          "source": "player_by_action"
+        }
+      },
+      "player_thinking": null,
+      "player_thinking_by_action": {
+        "discussion": false,
+        "wolf_discussion": false
+      },
+      "applied_thinking": {
+        "discussion": {
+          "thinking": false,
+          "source": "player_by_action"
+        },
+        "vote": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "attack": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "seer": {
+          "thinking": false,
+          "source": "default_by_action"
+        },
+        "co_correction": {
+          "thinking": false,
+          "source": "default_by_action"
+        }
+      },
+      "thinking_off_requests": 15,
+      "thinking_retry_off_requests": 0,
+      "thinking_capability_fallback_requests": 0,
+      "thinking_budget_adaptive_requests": 0,
+      "thinking_budget_exhausted_requests": 0,
+      "thinking_supported": true,
+      "thinking_budget_ok": true,
+      "by_action": {
+        "discussion": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 0,
+          "specific_rate": 0.0,
+          "specific_valid_rate": 0.0,
+          "avg_eval_count": 54.33,
+          "avg_eval_duration_ms": 2003.67,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "discussion"
+        },
+        "discussion_seer_co": {
+          "total": 3,
+          "format_compliant": 2,
+          "parse_valid": 2,
+          "transport_retries": 0,
+          "semantic_retries": 3,
+          "total_retries": 3,
+          "fallback_count": 1,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 0.667,
+          "parse_success_rate": 0.667,
+          "specific_count": 2,
+          "specific_rate": 0.667,
+          "specific_valid_rate": 0.667,
+          "avg_eval_count": 31.0,
+          "avg_eval_duration_ms": 1047.0,
+          "budget_exhausted_count": 0,
+          "request_attempts": 6,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {
+            "seer_result_without_claim": 3,
+            "co_missing": 1
+          },
+          "action_budget_key": "co_correction"
+        },
+        "vote": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 56.67,
+          "avg_eval_duration_ms": 2002.33,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "vote"
+        },
+        "attack": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 43.67,
+          "avg_eval_duration_ms": 1542.67,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "attack"
+        },
+        "seer": {
+          "total": 3,
+          "format_compliant": 3,
+          "parse_valid": 3,
+          "transport_retries": 0,
+          "semantic_retries": 0,
+          "total_retries": 0,
+          "fallback_count": 0,
+          "invalid_target_count": 0,
+          "invalid_target_rate": 0.0,
+          "format_compliance_rate": 1.0,
+          "parse_success_rate": 1.0,
+          "specific_count": 3,
+          "specific_rate": 1.0,
+          "specific_valid_rate": 1.0,
+          "avg_eval_count": 51.33,
+          "avg_eval_duration_ms": 1833.0,
+          "budget_exhausted_count": 0,
+          "request_attempts": 3,
+          "thinking_off_requests": 3,
+          "thinking_retry_off_requests": 0,
+          "thinking_capability_fallback_requests": 0,
+          "thinking_budget_adaptive_requests": 0,
+          "thinking_budget_exhausted_requests": 0,
+          "empty_response_count": 0,
+          "thinking_only_count": 0,
+          "truncated_count": 0,
+          "failure_reasons": {},
+          "action_budget_key": "seer"
+        }
+      }
+    }
+  }
+}

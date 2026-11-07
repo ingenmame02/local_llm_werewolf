@@ -25,7 +25,7 @@ try:
 except ImportError:
     psutil = None
 
-from evaluate_models import evaluate_scenario, generate_scenarios
+from evaluate_models import evaluate_scenario, generate_scenarios, select_player_configs
 from werewolf import OllamaClient, Player, Role, load_player_configs
 
 
@@ -147,9 +147,16 @@ def run_context_benchmark(
     timeout: float,
     temperature: float,
     base_url: str,
+    model_filters: tuple[str, ...],
+    action_types: tuple[str, ...],
 ) -> list[dict[str, Any]]:
-    configs = load_player_configs(models_file)
-    player_names = tuple(config.name for config in configs)
+    all_configs = load_player_configs(models_file)
+    configs = select_player_configs(all_configs, list(model_filters))
+    if len(configs) > 2:
+        raise ValueError(
+            "Context pilot selected more than two configured players; narrow --models."
+        )
+    player_names = tuple(config.name for config in all_configs)
     client = OllamaClient(base_url=base_url, timeout=timeout)
     reports: list[dict[str, Any]] = []
     for context_length in contexts:
@@ -168,6 +175,12 @@ def run_context_benchmark(
                     response_language=config.response_language,
                 )
                 for scenario in generate_scenarios(actor, player_names):
+                    if scenario.action_type not in action_types:
+                        continue
+                    prompt_char_count = (
+                        len(scenario.prompt_ctx.system_prompt)
+                        + len(scenario.prompt_ctx.user_prompt)
+                    )
                     result = evaluate_scenario(
                         client,
                         config.model,
@@ -184,8 +197,15 @@ def run_context_benchmark(
                             "discussion_format": result.get("discussion_format"),
                             "is_format_compliant": result["is_format_compliant"],
                             "is_parse_valid": result["is_parse_valid"],
+                            "fallback_used": result["fallback_used"],
                             "elapsed_seconds": result["elapsed_seconds"],
                             "retry_count": result["retry_count"],
+                            "failure_reasons": result["failure_reasons"],
+                            "done_reason": result["done_reason"],
+                            "prompt_chars": prompt_char_count,
+                            "input_tokens": result["prompt_eval_count"],
+                            "output_tokens": result["eval_count"],
+                            "context_length": context_length,
                             "error_kind": (
                                 result["error"].get("kind")
                                 if result["error"] is not None
@@ -226,6 +246,10 @@ def run_context_benchmark(
                     sum(record["is_parse_valid"] for record in records) / count,
                     4,
                 ),
+                "fallback_rate": round(
+                    sum(record["fallback_used"] for record in records) / count,
+                    4,
+                ),
                 "average_elapsed_seconds": round(
                     statistics.fmean(
                         record["elapsed_seconds"] for record in records
@@ -242,6 +266,9 @@ def run_context_benchmark(
             {
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
                 "num_ctx_request": context_length,
+                "model_filters": list(model_filters),
+                "action_types": list(action_types),
+                "rounds": rounds,
                 "num_parallel_expected": 1,
                 "num_parallel_process_environment": os.environ.get(
                     "OLLAMA_NUM_PARALLEL"
@@ -271,7 +298,21 @@ def main() -> int:
         "--context-lengths",
         nargs="+",
         type=int,
-        default=[4096, 8192],
+        default=[8192, 12288, 16384],
+    )
+    parser.add_argument(
+        "--models",
+        action="append",
+        required=True,
+        metavar="MODEL_OR_NAME",
+        help="Model/player substring filter. Supply one or two filters to limit the pilot.",
+    )
+    parser.add_argument(
+        "--actions",
+        action="append",
+        choices=("discussion", "vote", "attack", "seer", "discussion_seer_co"),
+        default=None,
+        help="Scenario type to run (repeatable); defaults to discussion only.",
     )
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=180.0)
@@ -282,6 +323,9 @@ def main() -> int:
         parser.error("context lengths must be positive")
     if args.rounds <= 0:
         parser.error("--rounds must be positive")
+    if len(args.models) > 2:
+        parser.error("Use at most two --models filters for the context pilot.")
+    action_types = tuple(args.actions or ["discussion"])
     if psutil is None:
         print(
             "注意: psutilがありません。CPU/メモリ使用量は未計測です。"
@@ -295,6 +339,8 @@ def main() -> int:
         args.timeout,
         args.temperature,
         args.base_url,
+        tuple(args.models),
+        action_types,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("a", encoding="utf-8") as output_file:

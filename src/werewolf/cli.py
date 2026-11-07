@@ -123,11 +123,25 @@ class GameLogger:
                 stats["actions"] += 1
                 stats["retries"] += int(record.get("total_retries", 0))
                 stats["fallback_count"] += int(bool(record.get("fallback_used")))
+                content_preserved = bool(record.get("content_preserved"))
+                stats["content_preserved_count"] += int(content_preserved)
+                stats["content_lost_fallback_count"] += int(
+                    bool(record.get("fallback_used")) and not content_preserved
+                )
+                for failure_class in record.get("failure_classes", ()):
+                    if isinstance(failure_class, str):
+                        counts = stats["failure_classes"]
+                        counts[failure_class] = counts.get(failure_class, 0) + 1
                 stats["elapsed_seconds"] = round(
                     float(stats["elapsed_seconds"])
                     + float(record.get("elapsed_seconds", 0.0)),
                     3,
                 )
+                input_token_count = record.get("input_token_count")
+                if isinstance(input_token_count, int) and not isinstance(
+                    input_token_count, bool
+                ):
+                    stats["input_token_count_total"] += input_token_count
                 response_metadata = record.get("response_metadata")
                 if isinstance(response_metadata, dict):
                     eval_count = response_metadata.get("eval_count")
@@ -172,6 +186,10 @@ class GameLogger:
             "retries": 0,
             "fallback_count": 0,
             "fallback_rate": 0.0,
+            "content_preserved_count": 0,
+            "content_lost_fallback_count": 0,
+            "failure_classes": {},
+            "input_token_count_total": 0,
             "timeout_count": 0,
             "parse_failure_count": 0,
             "empty_response_count": 0,
@@ -216,11 +234,15 @@ class GameLogger:
                     stats["empty_response_count"] / actions, 4
                 )
                 stats["avg_eval_count"] = round(stats["eval_count_total"] / actions, 2)
+                stats["avg_input_token_count"] = round(
+                    stats["input_token_count_total"] / actions, 2
+                )
                 stats["avg_eval_duration_ms"] = round(
                     stats["eval_duration_ms_total"] / actions, 2
                 )
             else:
                 stats["avg_eval_count"] = 0.0
+                stats["avg_input_token_count"] = 0.0
                 stats["avg_eval_duration_ms"] = 0.0
 
         public_players_data = [
@@ -245,6 +267,7 @@ class GameLogger:
                         "parsed_targets": getattr(t, "parsed_targets", ()),
                         "selected_target": getattr(t, "selected_target", None),
                         "fallback_used": getattr(t, "fallback_used", False),
+                        "content_preserved": getattr(t, "content_preserved", False),
                         "error": getattr(t, "error", None),
                         "failure_reasons": getattr(t, "failure_reasons", ()),
                         "response_metadata": getattr(t, "response_metadata", ()),
@@ -558,6 +581,9 @@ def run_cli_game(args: argparse.Namespace) -> int:
             seed=args.seed,
             options=options,
             event_callback=on_action_event,
+            discussion_claim_mode=getattr(
+                args, "discussion_claim_mode", "legacy"
+            ),
         )
     else:
         actions = MockActions()
@@ -800,6 +826,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Ollama thinking generation ('auto' keeps per-action defaults: "
             "discussion/wolf_discussion on, attack/seer/vote/co_correction off)"
+        ),
+    )
+    parser.add_argument(
+        "--discussion-claim-mode",
+        choices=("legacy", "candidates", "all"),
+        default="legacy",
+        help=(
+            "Discussion claim generation: legacy combined response, staged for "
+            "seer/claimants, or staged for every player."
         ),
     )
     parser.add_argument(

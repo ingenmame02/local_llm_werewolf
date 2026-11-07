@@ -43,6 +43,9 @@ def test_system_prompt_common_structure_and_role_description() -> None:
         assert "人狼ゲームのプレイヤーとして行動してください。" in sys_prompt
         assert f"あなたの役職は「{ROLE_NAMES_JA[role]}」です。" in sys_prompt
         assert "ユーザーメッセージのルールカードと確定事実に従い" in sys_prompt
+        assert "このゲームで提示された情報" in sys_prompt
+        assert "過去のゲーム、以前の役職" in sys_prompt
+        assert "記録にないため判断できない" in sys_prompt
         assert ROLE_DESCRIPTIONS_JA[role] in sys_prompt
 
 
@@ -79,12 +82,19 @@ def test_personality_changes_style_only_and_keeps_discussion_facts_and_role_fixe
     second = PromptBuilder.build_discussion_prompt(
         questioning, alive, history, state=state
     )
-    profile_block = "【個性プロファイル（話し方・議論姿勢のみ）】"
+    profile_block = "【個性プロファイル（弱い話し方の傾向）】"
     assert first.user_prompt == second.user_prompt
     assert first.system_prompt.split(profile_block)[0] == second.system_prompt.split(profile_block)[0]
     assert first.system_prompt != second.system_prompt
     assert "役職の目的・勝利条件・行動制約" in first.system_prompt
+    assert "議論の質・事実整合性・質問への回答・形式指示より低い優先度" in first.system_prompt
     assert "Player 2: 人狼" in first.user_prompt
+
+    claim_prompt = PromptBuilder.build_discussion_claim_prompt(
+        analytical, alive, day=1, state=state
+    )
+    assert profile_block not in claim_prompt.system_prompt
+    assert "Player 3さん、誰を疑っていますか？" not in claim_prompt.user_prompt
 
 
 def test_confidentiality_other_players_role_never_leaks_in_discussion_and_vote() -> None:
@@ -250,6 +260,7 @@ def test_discussion_prompts_include_identity_facts_and_role_scoped_seer_results(
         assert "Day 2: " + dead_player.name in prompt
         assert "Player 1 → Player 3" in prompt
         assert "確定事実として扱わないでください" in prompt
+        assert "COや占い結果は公開された主張であり、真役職の確定とは区別" in prompt
         assert secret_wolf_chat not in prompt
         if player.role is Role.SEER:
             assert secret_result in prompt

@@ -41,7 +41,18 @@ def test_loads_all_eight_models_from_configuration() -> None:
         4096,
     ]
     assert configs[0].personality_profile == configs[4].personality_profile == "analytical"
-    assert len({config.personality_profile for config in configs}) >= 2
+    assert {
+        config.personality_profile for config in configs
+    } == {
+        "analytical",
+        "questioning",
+        "cautious",
+        "consensus",
+        "intuitive",
+        "assertive",
+        "balanced",
+    }
+    assert (configs[6].num_predict_by_action or {}).get("co_correction") == 1024
 
 
 def test_create_game_assigns_expected_roles_and_wolf_partners() -> None:

@@ -224,6 +224,55 @@ def test_discussion_records_public_seer_claim_and_report_without_truth_leak() ->
     assert all("role" not in event for event in events)
 
 
+def test_staged_claim_is_registered_before_body_and_next_player_turn() -> None:
+    state = make_state(Role.SEER, Role.WOLF, Role.VILLAGER)
+    state.seer_results["P2"] = "wolf"
+
+    class StagedActions(MockActions):
+        discussion_claim_mode = "all"
+
+        def should_stage_discussion_claim(self, player):
+            return True
+
+        def choose_discussion_claim(self, player, day, alive, history):
+            if player == "P0":
+                return "【CO】占い師CO\n【結果】対象=P2 判定=人狼"
+            return "【CO】なし"
+
+        def discuss_body(self, player, day, alive, history):
+            if player == "P0":
+                assert any(
+                    claim.claimant == "P0"
+                    and claim.target == "P2"
+                    and claim.result == "wolf"
+                    for claim in state.public_role_claims
+                )
+            if player == "P1":
+                assert any(
+                    claim.claimant == "P0"
+                    and claim.target == "P2"
+                    and claim.result == "wolf"
+                    for claim in state.public_role_claims
+                )
+                assert any(
+                    message.speaker == "P0"
+                    and "対象=P2 判定=人狼" in message.content
+                    for message in history
+                )
+            return f"{player}は本文だけで議論します。"
+
+    GameEngine(state, StagedActions()).run_discussion()
+
+    assert any(
+        claim.claimant == "P0" and claim.target == "P2" and claim.result == "wolf"
+        for claim in state.public_role_claims
+    )
+    assert any(
+        message.speaker == "P0" and message.content == "P0は本文だけで議論します。"
+        for message in state.conversation_log
+    )
+
+
 @pytest.mark.parametrize(
     ("content", "expected_role"),
     [

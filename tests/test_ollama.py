@@ -5,6 +5,7 @@ from urllib.error import HTTPError
 
 import pytest
 
+from werewolf.discussion_format import parse_discussion_claim
 from werewolf import (
     ActionKind,
     ActionParser,
@@ -858,6 +859,122 @@ def test_two_block_discussion_accepts_co_none_and_hold_without_retry() -> None:
         assert actions.traces[-1].fallback_used is False
 
 
+def test_staged_claim_prompt_is_short_and_thinking_is_disabled() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P1"] = "wolf"
+    client = FakeClient("【CO】占い師CO\n【結果】対象=P1 判定=人狼")
+    actions = OllamaActions(state, client, discussion_claim_mode="all")
+    history = (Message("P2", "CO判断に不要な古い会話内容です。"),)
+
+    claim = actions.choose_discussion_claim(
+        "P0", 1, tuple(state.alive_players), history
+    )
+
+    assert claim == "【CO】占い師CO\n【結果】対象=P1 判定=人狼"
+    assert len(client.prompts[0]) < 800
+    assert "CO判断に不要な古い会話内容" not in client.prompts[0]
+    assert "理由・本文・前置きは不要" in client.prompts[0]
+    assert "【結果】対象=P1 判定=人狼" in client.prompts[0]
+    assert "個性プロファイル" not in client.prompts[0]
+    assert "【本文】" not in client.prompts[0]
+    assert client.options[0]["thinking"] is False
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_staged_claim_discards_body_and_stray_result_for_no_claim() -> None:
+    parsed = parse_discussion_claim(
+        "【CO】COなし\n【結果】なし\n説明を誤って追加"
+    )
+    assert parsed is not None
+    assert parsed.claim == "なし"
+    assert parsed.result == ""
+    assert parsed.ignored_trailing_text is True
+
+    events: list[dict[str, object]] = []
+    client = FakeClient(
+        "【CO】COなし\n【結果】なし\n"
+        "Player 1とPlayer 3の主張を確認したいです。"
+    )
+    actions = OllamaActions(
+        make_state(),
+        client,
+        discussion_claim_mode="all",
+        event_callback=events.append,
+    )
+
+    claim = actions.choose_discussion_claim(
+        "P0", 1, ("P0", "P1", "P2"), ()
+    )
+
+    assert claim == "【CO】なし"
+    assert len(client.prompts) == 1
+    assert actions.traces[-1].fallback_used is False
+    assert any(
+        event["type"] == "discussion_claim_extra_text_discarded"
+        for event in events
+    )
+    completion = next(
+        event
+        for event in events
+        if event["type"] == "llm_action_completed"
+    )
+    assert completion["content"] == "【CO】なし"
+
+
+def test_staged_seer_claim_keeps_valid_result_and_discards_explanation() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P1"] = "wolf"
+    client = FakeClient(
+        "【CO】占い師CO\n【結果】対象=P1 判定=人狼\n"
+        "この結果を見て投票先を決めました。"
+    )
+    actions = OllamaActions(state, client, discussion_claim_mode="all")
+
+    claim = actions.choose_discussion_claim(
+        "P0", 1, tuple(state.alive_players), ()
+    )
+
+    assert claim == "【CO】占い師CO\n【結果】対象=P1 判定=人狼"
+    assert len(client.prompts) == 1
+    assert actions.traces[-1].fallback_used is False
+
+
+def test_invalid_staged_claim_retries_once_then_deterministically_publishes_wolf_result() -> None:
+    state = make_state()
+    state.players[0].role = Role.SEER
+    state.seer_results["P1"] = "wolf"
+    client = FakeClient("占い師だと思う", "【CO】なし")
+    actions = OllamaActions(state, client, discussion_claim_mode="all")
+
+    claim = actions.choose_discussion_claim(
+        "P0", 1, tuple(state.alive_players), ()
+    )
+
+    assert claim == "【CO】占い師CO\n【結果】対象=P1 判定=人狼"
+    assert len(client.prompts) == 2
+    assert "COだけを再回答してください" in client.prompts[1]
+    assert actions.traces[-1].fallback_used is True
+    assert "wolf_result_not_disclosed" in actions.traces[-1].failure_reasons
+
+
+def test_discussion_claim_modes_stage_all_or_only_seer_and_existing_claimants() -> None:
+    state = make_state()
+    legacy = OllamaActions(state, FakeClient(), discussion_claim_mode="legacy")
+    candidates = OllamaActions(
+        state, FakeClient(), discussion_claim_mode="candidates"
+    )
+    all_players = OllamaActions(state, FakeClient(), discussion_claim_mode="all")
+
+    assert not legacy.should_stage_discussion_claim("P0")
+    assert not candidates.should_stage_discussion_claim("P0")
+    assert all_players.should_stage_discussion_claim("P0")
+
+    state.players[0].role = Role.SEER
+    assert candidates.should_stage_discussion_claim("P0")
+
+
 def test_seer_can_hold_only_human_results_without_publishing_them() -> None:
     state = make_state()
     state.players[0].role = Role.SEER
@@ -1515,6 +1632,217 @@ def test_discussion_can_refer_to_a_dead_player_without_proposing_an_action() -> 
     assert len(client.prompts) == 1
 
 
+def test_discussion_dead_player_question_is_retried_to_a_living_player() -> None:
+    state = make_state()
+    state.mark_dead("P1")
+    client = FakeClient(
+        "P1さんに初夜の占い理由を説明してもらいたいです。",
+        "P1さんに初夜の占い理由を説明してもらいたいです。"
+        "P2さんに投票先の根拠を説明してください。",
+    )
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    answer = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert "P1さんは死亡しており回答できないため" in answer
+    assert "P2さんに記録から分かる経緯を確認します。" in answer
+    assert "P2さんに投票先の根拠を説明してください。" in answer
+    assert actions.traces[-1].failure_reasons == ("dead_player_question",)
+    assert any(
+        event["type"] == "discussion_integrity_repaired"
+        and event["reason"] == "dead_player_question"
+        for event in events
+    )
+    assert "死亡者は回答できません" in client.prompts[1]
+
+
+@pytest.mark.parametrize(
+    ("speech", "expected_issue"),
+    [
+        ("P1は以前のゲームで人狼だったそうです。", "external_game_memory"),
+        ("P1は昨日の投票でP2に投票したそうです。", "unverified_past_vote_reference"),
+    ],
+)
+def test_unavailable_external_memory_and_past_vote_are_retried(
+    speech: str, expected_issue: str
+) -> None:
+    state = make_state()
+    client = FakeClient(
+        speech,
+        "その情報は現在のゲーム記録にないため、記録にないため判断できません。"
+        "現在の発言と投票を確認します。",
+    )
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    answer = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert "記録にないため判断できない" in client.prompts[1]
+    assert answer.startswith("その情報は現在のゲーム記録にないため")
+    assert expected_issue in actions.traces[-1].failure_reasons
+    assert any(
+        event["type"] == "llm_action_parse_failed"
+        and event["reason"] == expected_issue
+        for event in events
+    )
+
+
+def test_external_memory_is_partially_repaired_after_a_second_invalid_response() -> None:
+    state = make_state()
+    client = FakeClient(
+        "P1は以前のゲームで人狼だったそうです。",
+        "P1は以前のゲームで人狼だったそうです。P2の投票理由を確認します。",
+    )
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    answer = actions.discuss("P0", 1, tuple(state.alive_players), ())
+
+    assert answer.startswith("その情報は現在のゲーム記録にないため")
+    assert "P2の投票理由を確認します。" in answer
+    assert "以前のゲームで人狼だった" not in answer
+    assert actions.traces[-1].failure_reasons == ("external_game_memory",)
+    assert any(
+        event["type"] == "discussion_integrity_repaired"
+        and event["reason"] == "external_game_memory"
+        for event in events
+    )
+
+
+def test_logged_past_vote_and_death_are_preserved_as_current_game_facts() -> None:
+    state = make_state()
+    state.day = 2
+    state.mark_dead("P1")
+    state.vote_history.append((1, False, {"P0": "P1", "P2": "P1"}))
+    state.executions.append((1, "P1"))
+    response = "昨日の投票記録ではP1に票が集まり、P1が処刑されました。"
+    client = FakeClient(response)
+    actions = OllamaActions(state, client)
+
+    answer = actions.discuss("P0", 2, tuple(state.alive_players), ())
+
+    assert answer == response
+    assert len(client.prompts) == 1
+
+
+def test_yesterdays_vote_must_match_that_day_not_an_older_vote() -> None:
+    state = make_state()
+    state.day = 3
+    state.vote_history.extend(
+        [
+            (1, False, {"P2": "P1"}),
+            (2, False, {"P2": "P0"}),
+        ]
+    )
+    client = FakeClient(
+        "昨日の投票ではP2がP1に投票しました。",
+        "昨日の投票結果は現在のログを確認してから判断します。",
+    )
+    actions = OllamaActions(state, client)
+
+    answer = actions.discuss("P0", 3, tuple(state.alive_players), ())
+
+    assert answer == "昨日の投票結果は現在のログを確認してから判断します。"
+    assert actions.traces[-1].failure_reasons == (
+        "unverified_past_vote_reference",
+    )
+
+
+def test_dead_player_mention_and_hedged_role_guess_are_allowed() -> None:
+    state = make_state()
+    state.mark_dead("P1")
+    responses = (
+        "P1の過去の発言を参考に、P2へ投票理由を確認します。",
+        "P1は人狼だったかもしれませんが、真の役職は未確認です。",
+    )
+    for response in responses:
+        client = FakeClient(response)
+        actions = OllamaActions(state, client)
+        assert actions.discuss("P0", 1, tuple(state.alive_players), ()) == response
+        assert len(client.prompts) == 1
+
+
+def test_repeated_question_is_detected_across_the_whole_current_day() -> None:
+    state = make_state()
+    history = (
+        Message("P2", "P1さんに、前の発言と違う理由を説明してください。"),
+        Message("P1", "この点はあとで考えます。"),
+        Message("P2", "別の参加者には投票理由を聞きました。"),
+        Message("P1", "追加の根拠を探してみます。"),
+        Message("P2", "今日は投票先を慎重に考えましょう。"),
+        Message("P1", "まだ別の意見も確認したいです。"),
+    )
+    client = FakeClient(
+        "P1さんに、前の発言と違う理由を説明してください。",
+        "P2の投票理由を新しい根拠として確認します。",
+    )
+    actions = OllamaActions(state, client)
+
+    answer = actions.discuss("P0", 1, tuple(state.alive_players), history)
+
+    assert answer == "P2の投票理由を新しい根拠として確認します。"
+    assert actions.traces[-1].failure_reasons == ("repeated_discussion_topic",)
+    assert "当日の議論ですでに出た質問・結論を繰り返さず" in client.prompts[1]
+
+
+def test_same_topic_with_a_new_vote_target_or_evidence_is_not_a_repeat() -> None:
+    state = make_state()
+    history = (
+        Message("P2", "P1さんの投票先と理由を説明してください。"),
+    )
+    actions = OllamaActions(state, FakeClient())
+
+    assert not actions._discussion_topic_repeated(
+        "P1さんの投票先について、新しい根拠からP2へ投票します。",
+        history,
+    )
+    assert not actions._discussion_topic_repeated(
+        "P1さんの投票先と理由を確認します。反証は発言記録にあります。",
+        history,
+    )
+
+
+def test_soft_discussion_issue_keeps_valid_body_after_retry() -> None:
+    state = make_state()
+    history = (
+        Message("P2", "P0さんはどこを疑っていますか？"),
+    )
+    client = FakeClient(
+        "P1を疑います。投票記録の矛盾が根拠です。",
+        "【CO】壊れた\n【本文】P1を疑います。投票記録の矛盾が根拠です。",
+    )
+    events: list[dict[str, object]] = []
+    actions = OllamaActions(state, client, event_callback=events.append)
+
+    response = actions.discuss("P0", 1, tuple(state.alive_players), history)
+
+    assert "P1を疑います。" in response
+    assert response != "パス"
+    assert actions.traces[-1].fallback_used is False
+    assert any(event["type"] == "llm_discussion_soft_issue_kept" for event in events)
+
+
+def test_repetition_check_does_not_cross_a_new_day_boundary() -> None:
+    state = make_state()
+    state.day = 2
+    repeated_question = "P1さんに、前の発言と違う理由を説明してください。"
+    state.conversation_log.append(Message("P2", repeated_question))
+    GameEngine(state, OllamaActions(state, FakeClient())).resolve_morning()
+    state.conversation_log.append(
+        Message("P2", "新しい日の議論を始めましょう。")
+    )
+    history = tuple(state.conversation_log)
+    response = "P1さんに、前の発言と違う理由を説明してください。"
+    client = FakeClient(response)
+    actions = OllamaActions(state, client)
+
+    answer = actions.discuss("P0", 1, tuple(state.alive_players), history)
+
+    assert answer == response
+    assert len(client.prompts) == 1
+
+
 def test_action_lifecycle_events_include_reprompt_fallback_and_timing() -> None:
     client = FakeClient("投票：unknown", "投票：unknown")
     events: list[dict[str, object]] = []
@@ -1522,20 +1850,37 @@ def test_action_lifecycle_events_include_reprompt_fallback_and_timing() -> None:
 
     actions.vote("P0", ("P0", "P1", "P2"), day=1, runoff=False)
 
-    assert [event["type"] for event in events] == [
+    lifecycle_events = [
+        event
+        for event in events
+        if event["type"]
+        in {
+            "llm_action_started",
+            "llm_action_parse_failed",
+            "llm_action_completed",
+        }
+    ]
+    request_events = [
+        event for event in events if event["type"] == "llm_request_configuration"
+    ]
+    assert [event["type"] for event in lifecycle_events] == [
         "llm_action_started",
         "llm_action_parse_failed",
         "llm_action_parse_failed",
         "llm_action_completed",
     ]
-    assert events[0]["player"] == "P0"
-    assert events[0]["action"] == "vote"
-    assert events[0]["private"] is False
-    assert events[1]["will_retry"] is True
-    assert events[2]["will_retry"] is False
-    assert events[3]["semantic_retries"] == 1
-    assert events[3]["fallback_used"] is True
-    assert isinstance(events[3]["elapsed_seconds"], float)
+    assert lifecycle_events[0]["player"] == "P0"
+    assert lifecycle_events[0]["action"] == "vote"
+    assert lifecycle_events[0]["private"] is False
+    assert lifecycle_events[1]["failure_class"] == "invalid_target"
+    assert lifecycle_events[1]["will_retry"] is True
+    assert lifecycle_events[2]["will_retry"] is False
+    assert lifecycle_events[3]["semantic_retries"] == 1
+    assert lifecycle_events[3]["fallback_used"] is True
+    assert isinstance(lifecycle_events[3]["elapsed_seconds"], float)
+    assert len(request_events) == 2
+    assert request_events[0]["raw_prompt_char_count"] > 0
+    assert request_events[0]["requested_num_ctx"] is None
 
 
 # ---------------------------------------------------------------------------

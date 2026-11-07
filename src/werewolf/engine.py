@@ -11,7 +11,7 @@ from .models import (
     PublicSeerClaim,
     Role,
 )
-from .discussion_format import parse_discussion_output
+from .discussion_format import parse_discussion_claim, parse_discussion_output
 
 _CLAIMED_ROLE_NAMES = {
     "占い師": "seer",
@@ -231,6 +231,9 @@ class GameEngine:
             )
         self.check_winner()
         if self.state.winner is None:
+            self.state.conversation_log.append(
+                Message("system", f"Day {self.state.day} begins.")
+            )
             self.state.phase = Phase.DAY_DISCUSSION
 
     def run_discussion(self) -> None:
@@ -240,38 +243,82 @@ class GameEngine:
             for player in self.state.players:
                 if not player.is_alive:
                     continue
-                content = self.actions.discuss(
-                    player.name,
-                    self.state.day,
-                    tuple(self.state.alive_players),
-                    tuple(self.state.conversation_log),
+                stage_claim = getattr(
+                    self.actions, "should_stage_discussion_claim", None
                 )
-                structured_output = parse_discussion_output(content)
-                if structured_output is None:
-                    self.state.conversation_log.append(Message(player.name, content))
-                    self._record_public_role_claim(player.name, content)
-                else:
-                    # 会話本文へは`【本文】`だけを登録し、COブロック・結果ブロックは分離する。
-                    if structured_output.body:
-                        self.state.conversation_log.append(
-                            Message(player.name, structured_output.body)
-                        )
-                    # COが「なし」「保留」の間は、結果ブロックを公開状態へ登録しない。
-                    if structured_output.claim not in {"なし", "保留"}:
-                        claim_parts = [
+                choose_claim = getattr(
+                    self.actions, "choose_discussion_claim", None
+                )
+                discuss_body = getattr(self.actions, "discuss_body", None)
+                use_staged_claim = (
+                    callable(stage_claim)
+                    and callable(choose_claim)
+                    and callable(discuss_body)
+                    and stage_claim(player.name)
+                )
+                if use_staged_claim:
+                    claim_response = choose_claim(
+                        player.name,
+                        self.state.day,
+                        tuple(self.state.alive_players),
+                        tuple(self.state.conversation_log),
+                    )
+                    decision = parse_discussion_claim(claim_response)
+                    if decision is not None and decision.claim not in {"なし", "保留"}:
+                        public_claim = "\n".join(
                             part
-                            for part in (
-                                structured_output.claim,
-                                structured_output.result,
-                                structured_output.body,
-                            )
+                            for part in (decision.claim, decision.result)
                             if part
-                        ]
+                        )
+                        self.state.conversation_log.append(
+                            Message(player.name, public_claim)
+                        )
                         self._record_public_role_claim(
                             player.name,
-                            "\n".join(claim_parts),
-                            claim_text=structured_output.claim,
+                            public_claim,
+                            claim_text=decision.claim,
                         )
+                    body = discuss_body(
+                        player.name,
+                        self.state.day,
+                        tuple(self.state.alive_players),
+                        tuple(self.state.conversation_log),
+                    )
+                    if body:
+                        self.state.conversation_log.append(Message(player.name, body))
+                else:
+                    content = self.actions.discuss(
+                        player.name,
+                        self.state.day,
+                        tuple(self.state.alive_players),
+                        tuple(self.state.conversation_log),
+                    )
+                    structured_output = parse_discussion_output(content)
+                    if structured_output is None:
+                        self.state.conversation_log.append(Message(player.name, content))
+                        self._record_public_role_claim(player.name, content)
+                    else:
+                        # 会話本文へは`【本文】`だけを登録し、COブロック・結果ブロックは分離する。
+                        if structured_output.body:
+                            self.state.conversation_log.append(
+                                Message(player.name, structured_output.body)
+                            )
+                        # COが「なし」「保留」の間は、結果ブロックを公開状態へ登録しない。
+                        if structured_output.claim not in {"なし", "保留"}:
+                            claim_parts = [
+                                part
+                                for part in (
+                                    structured_output.claim,
+                                    structured_output.result,
+                                    structured_output.body,
+                                )
+                                if part
+                            ]
+                            self._record_public_role_claim(
+                                player.name,
+                                "\n".join(claim_parts),
+                                claim_text=structured_output.claim,
+                            )
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:

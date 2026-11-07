@@ -43,6 +43,9 @@ ROLE_DESCRIPTIONS_JA: dict[Role, str] = {
 COMMON_SYSTEM_TEMPLATE = """人狼ゲームのプレイヤーとして行動してください。
 あなたの役職は「{role}」です。
 {role_description}
+このゲームで提示された情報と、あなた自身の役職・能力だけを使ってください。過去のゲーム、以前の役職、
+学習時の記憶、実在する人物・プレイヤーの情報を参照してはいけません。
+ゲーム台帳に記録のない出来事・投票・発言・役職は「記録にないため判断できない」と答えてください。
 ユーザーメッセージのルールカードと確定事実に従い、指定された形式だけを簡潔に返してください。"""
 
 RULE_CARD = """【ルール】
@@ -51,6 +54,10 @@ RULE_CARD = """【ルール】
 狂人は襲撃不可。占い結果は人狼/人間。自分への投票不可。同票は再投票1回後に抽選。
 襲撃者は公開されません。死亡者の真役職も公開されず、役職の推測を確定事実として扱わないでください。
 昼の「パス」は有効な発言スキップで、空応答とは異なる。
+このゲームのプロンプト・台帳・公開会話だけを根拠にしてください。過去のゲーム、以前の役職、
+学習時の記憶、実在する人物・プレイヤーの情報は使わないでください。
+記録にない情報を問われた場合は「記録にないため判断できない」と答えてください。
+「昨日」「前のターン」「過去の投票」は、このゲームの記録にある内容だけを指します。
 
 """
 
@@ -182,6 +189,17 @@ class PromptBuilder:
             if state is not None and state.vote_history
             else "なし"
         )
+        vote_history = (
+            "、".join(
+                f"{vote_day}日目{'決選' if runoff else '通常'}: "
+                + " / ".join(
+                    f"{voter}→{target}" for voter, target in votes.items()
+                )
+                for vote_day, runoff, votes in state.vote_history
+            )
+            if state is not None and state.vote_history
+            else "なし"
+        )
         current_turn = (
             f"{state.discussion_turn}/3"
             if state is not None and phase.startswith("昼")
@@ -308,11 +326,16 @@ class PromptBuilder:
             f"- 最新の襲撃死亡者：{latest_attack}\n"
             f"- 最新の処刑者：{latest_execution}\n"
             f"- 最新の投票結果：{latest_vote}\n"
+            f"- このゲームの投票履歴（台帳にある全記録）：{vote_history}\n"
             f"- 占い師CO主張者：{claimant_status}\n"
             f"- 公開された役職・占い結果の主張：{'、'.join(public_role_claims) or 'なし'}\n"
             "- 単独COは真役職の確定を意味しません。COがないことも真占い師の不存在を意味しません。\n"
+            "- 公開されたCO・占い結果はプレイヤーの主張であり、真役職の確定情報ではありません。\n"
             f"- CO候補の扱い：{claimant_guidance}"
             f"- 死亡者の真役職：非公開（推測で確定扱いしない）\n"
+            "- 死亡者の過去の発言や投票に言及しても構いませんが、死亡者へ返答・説明・行動を求めず、生存者へ質問してください。\n"
+            "- 昨日・前ターン・過去の投票に触れる場合は、このゲームの確定記録と一致する情報だけを使ってください。\n"
+            "- ゲーム内の確定事実、公開された未確認の主張、自分の推測を区別し、推測は推測として述べてください。\n"
             f"- 応答言語：{actor.response_language}\n"
             "\n"
             "【情報の区分】\n"
@@ -322,19 +345,25 @@ class PromptBuilder:
         )
 
     @staticmethod
-    def build_system_prompt(player: Player) -> str:
+    def build_system_prompt(
+        player: Player, include_personality: bool = False
+    ) -> str:
         role_ja = ROLE_NAMES_JA[player.role]
         role_desc = ROLE_DESCRIPTIONS_JA[player.role]
-        return COMMON_SYSTEM_TEMPLATE.format(
+        system_prompt = COMMON_SYSTEM_TEMPLATE.format(
             role=role_ja,
             role_description=role_desc,
-        ) + (
-            "\n\n【個性プロファイル（話し方・議論姿勢のみ）】\n"
-            f"{PERSONALITY_PROFILES[player.personality_profile]}\n"
-            "このプロファイルは注目点や表現の傾向だけを示します。役職の目的・勝利条件・"
-            "行動制約、確定事実、公開情報・秘匿情報の範囲、出力形式を変更しません。"
-            "結論や投票先を指定するものではなく、状況に応じて推理してください。"
         )
+        if include_personality:
+            system_prompt += (
+                "\n\n【個性プロファイル（弱い話し方の傾向）】\n"
+                f"{PERSONALITY_PROFILES[player.personality_profile]}\n"
+                "これは議論の質・事実整合性・質問への回答・形式指示より低い優先度です。"
+                "追加の説明や質問を強制せず、自然に合う場合だけ反映してください。"
+                "役職の目的・勝利条件・行動制約、確定事実、公開情報・秘匿情報の範囲、"
+                "出力形式を変更せず、根拠のない結論や投票先も指定しません。"
+            )
+        return system_prompt
 
     @classmethod
     def build_wolf_discuss_prompt(
@@ -487,6 +516,7 @@ class PromptBuilder:
         conversation_history: tuple[Message, ...],
         day: int = 1,
         state: GameState | None = None,
+        include_claim: bool = True,
     ) -> PromptContext:
         if not actor.is_alive:
             raise ValueError(f"Dead player {actor.name} cannot act.")
@@ -494,14 +524,15 @@ class PromptBuilder:
         player_history = tuple(
             message for message in conversation_history if message.speaker != "system"
         )
+        current_day_history = cls.current_day_messages(conversation_history)
         formatted_history = (
             "\n".join(f"{m.speaker}: {m.content}" for m in player_history[:-1])
             if len(player_history) > 1
             else "なし"
         )
-        previous_message = player_history[-1] if player_history else None
+        previous_message = current_day_history[-1] if current_day_history else None
         directly_addressed = cls._is_directed_to_player(
-            actor, previous_message, player_history
+            actor, previous_message, current_day_history
         )
         own_seer_results = (
             state.seer_results
@@ -543,6 +574,21 @@ class PromptBuilder:
                 for target, result in own_seer_results.items()
             ]
         role_ja = ROLE_NAMES_JA[actor.role]
+        output_format_instruction = (
+            "【指示】\n"
+            "次のブロックをこの順番で出力してください。省略・順序変更は禁止です。\n"
+            "【CO】なし または 公開する役職主張・理由・投票提案\n"
+            "【結果】対象=Player X 判定=人狼/人間（占い結果を公開する場合のみ）\n"
+            "【本文】議論本文\n"
+            "COを保留する場合は【CO】保留とし、主張を公開しない場合は【CO】なしとしてください。"
+            "本文を空にしたり、COと本文を同じブロックに混ぜたりしないでください。\n"
+            "COブロックには公開するCOだけを書き、本文には回答・推理・質問・投票方針を書いてください。"
+            "占い結果を公開する場合は先頭を【CO】占い師とし、理由・投票提案は【本文】で書いても構いません。"
+            "COのない結果だけの出力は受理されません。\n"
+            "COブロックが「なし」または「保留」のときは、本文で役職COや占い対象・判定を明かさないでください。\n"
+            if include_claim
+            else "【指示】先行するCO判定は完了しています。議論本文だけを出力し、CO・結果ブロックや役職主張を繰り返さないでください。\n"
+        )
         user_prompt = (
             cls._fact_header(
                 actor,
@@ -590,18 +636,8 @@ class PromptBuilder:
                 if human_results_can_be_held
                 else ""
             )
-            + "【指示】\n"
-            "次のブロックをこの順番で出力してください。省略・順序変更は禁止です。\n"
-            "【CO】なし または 公開する役職主張・理由・投票提案\n"
-            "【結果】対象=Player X 判定=人狼/人間（占い結果を公開する場合のみ）\n"
-            "【本文】議論本文\n"
-            "COを保留する場合は【CO】保留とし、主張を公開しない場合は【CO】なしとしてください。"
-            "本文を空にしたり、COと本文を同じブロックに混ぜたりしないでください。\n"
-            "COブロックには公開するCOだけを書き、本文には回答・推理・質問・投票方針を書いてください。"
-            "占い結果を公開する場合は先頭を【CO】占い師とし、理由・投票提案は【本文】で書いても構いません。"
-            "COのない結果だけの出力は受理されません。\n"
-            "COブロックが「なし」または「保留」のときは、本文で役職COや占い対象・判定を明かさないでください。\n"
-            "上記を踏まえて、今の状況についてあなたの考えを述べてください。\n"
+            + output_format_instruction
+            + "上記を踏まえて、今の状況についてあなたの考えを述べてください。\n"
             + (
                 f"- 最初の一文で{previous_message.speaker}への回答を明示し、その質問に直接答えてください\n"
                 if directly_addressed and previous_message is not None
@@ -614,17 +650,29 @@ class PromptBuilder:
             "- 指定された応答言語で発言してください\n"
             "- 5～8文を目安に、質問への回答・確認できる事実・疑う対象と根拠・次に確認したい点をそれぞれ具体的に説明してください\n"
             "- 文量は控えめよりやや多めまで構いませんが、【本文】を途中で止めずに最後まで出力し、同じ内容を繰り返さないでください\n"
-            "- 直前の質問への回答：直前の発言者への回答を最初の一文に含めてください\n" + chr(10) +             "- 確認できる事実：ゲーム台帳に記録された確定事実（死亡者、投票結果、占い師COなど）に基づく発言を含めてください\n" + chr(10) +             "- 疑う対象と根拠：誰を疑うか、その根拠を具体的に述べてください\n" + chr(10) +             "- 次に確認したい点：次に誰に何を聞きたいか、何を確認したいかを述べてください\n" + chr(10) +             "- 新しい推理・根拠・質問・投票方針のいずれかを最低1つ加え、過去発言を単純に繰り返さないでください\n"
+            "- 直前の質問への回答：直前の発言者への回答を最初の一文に含めてください\n"
+            "- 確認できる事実：ゲーム台帳に記録された確定事実（死亡者、投票結果、占い師COなど）に基づく発言を含めてください\n"
+            "- 疑う対象と根拠：誰を疑うか、その根拠を具体的に述べてください\n"
+            "- 次に確認したい点：次に誰に何を聞きたいか、何を確認したいかを述べてください\n"
+            "- 新しい推理・根拠・質問・投票方針のいずれかを最低1つ加え、過去発言を単純に繰り返さないでください\n"
             "- 自分自身を第三者として説明せず、自分がしていない発言や起きていない出来事を作らないでください\n"
+            "- このゲームで提示された情報だけを使い、過去ゲーム・以前の役職・学習時の記憶・実在の人物情報を根拠にしないでください\n"
+            "- ゲーム台帳にない情報は「記録にないため判断できない」とし、昨日や過去の投票は台帳に記録されたものだけを参照してください\n"
+            "- COや占い結果は公開された主張であり、真役職の確定とは区別してください。死亡者の役職は推測としてのみ述べてください\n"
+            "- 死亡者への質問・回答要求はせず、同じ確認事項は当日の議論で既に出ていないか確認し、生存者へ新しい質問をしてください\n"
             "- 昼議論中です。「夜です」など現在フェーズを取り違える発言はせず、確定事実欄のフェーズを確認してください\n"
             "- 情報不足の場合も、誰に何を聞きたいかを1つ具体的に述べて、無内容な様子見だけを繰り返さないでください\n"
             "- 普段のあなたらしい話し方でお願いします\n"
             "- パスする場合は、前後に説明や句読点を付けず「パス」とだけ出力してください\n"
-            "- 役職COをする場合は、全モデルで使える通常の発言に定型文を必ず含めてください。claim_roleツールは利用できる場合だけ補助的に使い、文章でのCOを省略しないでください\n"
-            "- 占い師CO・結果の形式：占い師CO：対象=Player X、判定=人狼/人間、理由=理由、投票提案=Player Xへ投票\n"
-            "- 占い結果の最小形式：【CO】占い師 の次に【結果】対象=Player X 判定=人狼/人間（理由・投票提案は本文で任意）。COなしの結果のみは受理されません\n"
-            "- 占い師以外の形式：主張する役職名の後に「CO：理由=理由」と続ける（例：狂人CO：理由=対抗します）\n"
-            "- COを保留する場合や発言をパスする場合は、CO形式を出力しないでください\n"
+            + (
+                "- 役職COをする場合は、全モデルで使える通常の発言に定型文を必ず含めてください。claim_roleツールは利用できる場合だけ補助的に使い、文章でのCOを省略しないでください\n"
+                "- 占い師CO・結果の形式：占い師CO：対象=Player X、判定=人狼/人間、理由=理由、投票提案=Player Xへ投票\n"
+                "- 占い結果の最小形式：【CO】占い師 の次に【結果】対象=Player X 判定=人狼/人間（理由・投票提案は本文で任意）。COなしの結果のみは受理されません\n"
+                "- 占い師以外の形式：主張する役職名の後に「CO：理由=理由」と続ける（例：狂人CO：理由=対抗します）\n"
+                "- COを保留する場合や発言をパスする場合は、CO形式を出力しないでください\n"
+                if include_claim
+                else "- 既に登録された公開CO・結果を本文で重複して再出力しないでください\n"
+            )
             + (
                 "- 真占い師として、未公開の人狼判定がある場合は初回の昼議論で上記の占い師CO形式を通常発言として出し、対象・判定・理由・投票提案を公開してください\n"
                 + "次の3行の最小例のまま出力して構いません。COなしで本文に判定だけ書くのは不可です。\n"
@@ -633,12 +681,12 @@ class PromptBuilder:
                 + f"  【本文】初夜の占い結果です。{pending_wolf_results[0]}への投票を提案します。\n"
                 + "\n".join(f"  - 対象：{target}／判定：人狼" for target in pending_wolf_results)
                 + "\n"
-                if pending_wolf_results
+                if pending_wolf_results and include_claim
                 else ""
             )
             + (
                 "- 人間判定だけの場合は、襲撃リスクを考慮して上記の占い師CO形式で結果を公開するか、占い師COを保留してください\n"
-                if own_seer_results
+                if own_seer_results and include_claim
                 and all(result == "human" for result in own_seer_results.values())
                 else ""
             )
@@ -655,9 +703,96 @@ class PromptBuilder:
             + "\n発言または「パス」のみを出力してください。"
         )
         return PromptContext(
+            system_prompt=cls.build_system_prompt(
+                actor, include_personality=True
+            ),
+            user_prompt=user_prompt,
+        ).compact(recent_lines=6)
+
+    @classmethod
+    def build_discussion_claim_prompt(
+        cls,
+        actor: Player,
+        alive_players: tuple[str, ...],
+        day: int,
+        state: GameState,
+    ) -> PromptContext:
+        own_results = state.seer_results if actor.role is Role.SEER else {}
+        pending_wolf_results = [
+            target
+            for target, result in own_results.items()
+            if result == "wolf"
+            and not any(
+                claim.claimant == actor.name
+                and claim.target == target
+                and claim.result == "wolf"
+                for claim in state.seer_claims
+            )
+        ]
+        public_claims = [
+            f"{claim.claimant}={ROLE_NAMES_JA.get(Role(claim.claimed_role), claim.claimed_role)}"
+            + (
+                f"（{claim.target}={('人狼' if claim.result == 'wolf' else '人間')}）"
+                if claim.target is not None and claim.result is not None
+                else ""
+            )
+            for claim in state.public_role_claims
+        ]
+        private_results = (
+            "、".join(
+                f"{target}={'人狼' if result == 'wolf' else '人間'}"
+                for target, result in own_results.items()
+            )
+            or "なし"
+        )
+        user_prompt = (
+            f"【昼のCO判定】{day}日目。生存者：{', '.join(alive_players)}\n"
+            f"【現在の公開CO・結果】{'; '.join(public_claims) or 'なし'}\n"
+            + (
+                f"【占い師本人だけの非公開結果】{private_results}\n"
+                if actor.role is Role.SEER
+                else ""
+            )
+            + "【指示】議論本文を作る前に、公開する役職COを決めてください。人狼ゲームでは誰でもCO・対抗COできます。"
+            "出力は次の選択肢から最大2行だけにしてください。\n"
+            "COなし：「【CO】なし」／保留：「【CO】保留」／COする場合："
+            "「【CO】占い師CO」「【CO】人狼CO」「【CO】狂人CO」「【CO】村人CO」のいずれか1行。\n"
+            "占い師COと同時に結果を公表する場合だけ、2行目に"
+            "「【結果】対象=Player X 判定=人狼/人間」を追加してください。"
+            "なし・保留・他役職COに結果行を付けないでください。理由・本文・前置きは不要です。\n"
+            + (
+                f"未公開の人狼判定があるため、次の2行をそのまま出力してください。\n"
+                f"【CO】占い師CO\n【結果】対象={pending_wolf_results[0]} 判定=人狼\n"
+                if pending_wolf_results
+                else "真の占い師の場合、人間判定だけならCO・結果を保留しても構いません。\n"
+                if actor.role is Role.SEER and own_results
+                else ""
+            )
+            + "選んだCOの行だけを出力し、会話の要約や説明は繰り返さないでください。"
+        )
+        return PromptContext(
             system_prompt=cls.build_system_prompt(actor),
             user_prompt=user_prompt,
         ).compact(recent_lines=6)
+
+    @staticmethod
+    def current_day_messages(
+        conversation_history: tuple[Message, ...],
+    ) -> tuple[Message, ...]:
+        """Return dialogue after the latest system event, which starts the current day."""
+        last_system_event = max(
+            (
+                index
+                for index, message in enumerate(conversation_history)
+                if message.speaker == "system"
+            ),
+            default=-1,
+        )
+        return tuple(
+            message
+            for message in conversation_history[last_system_event + 1 :]
+            if message.speaker != "system"
+        )
 
     @staticmethod
     def _is_directed_to_player(
