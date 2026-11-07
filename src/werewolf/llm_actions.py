@@ -63,6 +63,17 @@ SOFT_DISCUSSION_ISSUES: frozenset[str] = frozenset(
     {"discussion_output_format", "question_not_answered_first", "repeated_discussion_topic"}
 )
 
+LEDGER_REPAIR_ISSUES: frozenset[str] = frozenset(
+    {
+        "external_game_memory",
+        "unverified_past_vote_reference",
+        "unverified_dead_role",
+        "dead_player_question",
+        "dead_player_action_target",
+        "repeated_discussion_topic",
+    }
+)
+
 
 def classify_failure_reason(reason: str | None) -> str | None:
     if reason is None:
@@ -241,16 +252,27 @@ class OllamaActions(ActionPolicy):
         options: dict[str, object] | None = None,
         event_callback: Callable[[dict[str, object]], None] | None = None,
         discussion_claim_mode: str = "legacy",
+        context_strategy: str = "hybrid_retrieval",
     ) -> None:
         if discussion_claim_mode not in {"legacy", "candidates", "all"}:
             raise ValueError(
                 "discussion_claim_mode must be 'legacy', 'candidates', or 'all'."
+            )
+        if context_strategy not in {
+            "full_transcript",
+            "structured_ledger",
+            "hybrid_retrieval",
+        }:
+            raise ValueError(
+                "context_strategy must be 'full_transcript', "
+                "'structured_ledger', or 'hybrid_retrieval'."
             )
         self.state = state
         self.client = client
         self.options = options
         self.event_callback = event_callback
         self.discussion_claim_mode = discussion_claim_mode
+        self.context_strategy = context_strategy
         self._rng = random.Random(state.seed if seed is None else seed)
         self.traces: list[ActionTrace] = []
         self._seer_info_used_day: dict[str, int] = {}
@@ -306,16 +328,20 @@ class OllamaActions(ActionPolicy):
     ) -> str:
         started_at = self._start_action("seer", self._player(seer))
         actor = self._player(seer)
-        living_candidates = self._valid_candidates(actor, candidates)
+        living_candidates = self._valid_candidates(
+            actor, candidates, forbid_self=True
+        )
         unscanned_candidates = tuple(
             candidate
             for candidate in living_candidates
             if candidate not in self.state.seer_results
         )
-        eligible_candidates = unscanned_candidates or living_candidates
+        eligible_candidates = unscanned_candidates
+        if not eligible_candidates:
+            raise ValueError(f"No valid unscanned seer targets for {seer}.")
         prompt_ctx = PromptBuilder.build_seer_prompt(
             actor=actor,
-            alive_players=eligible_candidates,
+            alive_players=tuple(self.state.alive_players),
             seer_results=results,
             day=self.state.day,
             state=self.state,
@@ -340,6 +366,7 @@ class OllamaActions(ActionPolicy):
             conversation_history=history,
             day=day,
             state=self.state,
+            context_strategy=self.context_strategy,
         )
         return self._free_text_with_context(
             "discussion",
@@ -349,16 +376,38 @@ class OllamaActions(ActionPolicy):
             started_at,
             recent_messages=history,
             budget_key="discussion",
+            context_diagnostics=prompt_ctx.diagnostics,
         )
 
     def should_stage_discussion_claim(self, player: str) -> bool:
         if self.discussion_claim_mode == "legacy":
             return False
         if self.discussion_claim_mode == "all":
-            return True
+            checked_key = (self.state.day, player)
+            has_claim = player in self.state.claim_ledger.public_claims or any(
+                claim.claimant == player for claim in self.state.public_role_claims
+            )
+            has_unpublished_result = self._has_unpublished_seer_result(player)
+            if checked_key not in self.state.discussion_claim_checks:
+                self.state.discussion_claim_checks.add(checked_key)
+                return not has_claim or has_unpublished_result
+            if has_unpublished_result:
+                return True
+            return any(
+                message.speaker != player
+                and re.search(r"(?:CO|主張).*(?:訂正|更新|見直)", message.content)
+                for message in self.state.conversation_log[-4:]
+            )
         actor = self._player(player)
         return actor.role is Role.SEER or any(
             claim.claimant == player for claim in self.state.public_role_claims
+        )
+
+    def _has_unpublished_seer_result(self, player: str) -> bool:
+        return any(
+            (player, target) not in self.state.claim_ledger.public_seer_results
+            and not self._has_published_seer_result(player, target, result)
+            for target, result in self.state.seer_results.items()
         )
 
     def choose_discussion_claim(
@@ -406,6 +455,7 @@ class OllamaActions(ActionPolicy):
             day=day,
             state=self.state,
             include_claim=False,
+            context_strategy=self.context_strategy,
         )
         return self._free_text_with_context(
             "discussion_body",
@@ -415,6 +465,7 @@ class OllamaActions(ActionPolicy):
             started_at,
             recent_messages=history,
             budget_key="discussion",
+            context_diagnostics=prompt_ctx.diagnostics,
         )
 
     def vote(
@@ -754,7 +805,16 @@ class OllamaActions(ActionPolicy):
         started_at: float,
         recent_messages: tuple[Message, ...] | None = None,
         budget_key: str = "discussion",
+        context_diagnostics: dict[str, object] | None = None,
     ) -> str:
+        if context_diagnostics is not None:
+            self._emit(
+                "discussion_context_selected",
+                action,
+                actor,
+                started_at,
+                **context_diagnostics,
+            )
         raw_responses: list[str] = []
         last_error: OllamaError | None = None
         transport_attempts = 0
@@ -858,6 +918,28 @@ class OllamaActions(ActionPolicy):
                         will_retry=True,
                     )
                     continue
+                if (
+                    attempt == 0
+                    and error.kind == "timeout"
+                    and action
+                    in {
+                        "discussion",
+                        "discussion_body",
+                        "discussion_claim",
+                        "wolf_discussion",
+                    }
+                ):
+                    self._emit(
+                        "llm_action_parse_failed",
+                        action,
+                        actor,
+                        started_at,
+                        failure_class=classify_failure_reason(last_response_issue),
+                        reason=last_response_issue,
+                        will_retry=True,
+                        retry_strategy="short_prompt_thinking_off",
+                    )
+                    continue
                 self._emit(
                     "llm_action_parse_failed",
                     action,
@@ -926,17 +1008,40 @@ class OllamaActions(ActionPolicy):
                     actor, action, started_at, metadata
                 )
             if (
+                attempt == 0
+                and action in {"discussion", "discussion_body"}
+                and response_issue in LEDGER_REPAIR_ISSUES
+            ):
+                original_issue = response_issue
+                repaired = self._repair_discussion_response(
+                    actor, response_text, original_issue, recent_messages
+                )
+                if repaired is not None:
+                    repaired_issue = self._discussion_response_issue(
+                        actor, repaired, recent_messages
+                    )
+                    if repaired_issue is None:
+                        response_text = repaired
+                        response_issue = None
+                        uses_seer_info = self._references_seer_result(
+                            actor, response_text
+                        )
+                        holds_human_seer_result = self._holds_human_seer_result(
+                            action, actor, response_text
+                        )
+                        self._emit(
+                            "ledger_repair",
+                            action,
+                            actor,
+                            started_at,
+                            reason=original_issue,
+                            body_preserved=bool(response_text),
+                            regeneration_avoided=True,
+                        )
+            if (
                 attempt == 1
                 and action in {"discussion", "discussion_body"}
-                and response_issue
-                in {
-                    "external_game_memory",
-                    "unverified_past_vote_reference",
-                    "unverified_dead_role",
-                    "dead_player_question",
-                    "dead_player_action_target",
-                    "repeated_discussion_topic",
-                }
+                and response_issue in LEDGER_REPAIR_ISSUES
             ):
                 original_issue = response_issue
                 repaired = self._repair_discussion_response(
@@ -961,6 +1066,15 @@ class OllamaActions(ActionPolicy):
                             actor,
                             started_at,
                             reason=original_issue,
+                        )
+                        self._emit(
+                            "ledger_repair",
+                            action,
+                            actor,
+                            started_at,
+                            reason=original_issue,
+                            body_preserved=response_text == repaired,
+                            regeneration_avoided=False,
                         )
             if (
                 action in {"discussion", "discussion_body"}
@@ -1395,16 +1509,16 @@ class OllamaActions(ActionPolicy):
         retry_guidance = {
             "empty_content": (
                 "前回は本文が空でした。思考・前置きを出さず、"
-                "【本文】へ5～8文の最終回答だけを出力してください。"
+                "【本文】へ3～5文の最終回答だけを出力してください。"
             ),
             "thinking_only_response": (
                 "前回は思考だけで最終回答がありませんでした。思考を出さず、"
-                "【本文】へ5～8文の最終回答だけを出力してください。"
+                "【本文】へ3～5文の最終回答だけを出力してください。"
             ),
             "generation_truncated": (
-                "前回は生成上限で途切れました。二層形式のまま、【本文】を5～8文で"
+                "前回は生成上限で途切れました。二層形式のまま、【本文】を3～5文で"
                 "途中で止めずに最後まで出力してください。思考・前置き・説明は出さず、"
-                "回答・確認できる事実・疑う根拠・次に確認したい点の4要素をすべて含めてください。"
+                "質問への回答、新しい根拠または反証、現時点の疑いと投票意向を順に含めてください。"
             ),
             "discussion_output_format": "前回は二層形式が不正でした。必ず「【CO】なし または CO内容」の次行に「【本文】議論本文」を出力してください。CO保留は「【CO】保留」とし、本文は空にしないでください。",
             "discussion_claim_format": (
@@ -1584,13 +1698,13 @@ class OllamaActions(ActionPolicy):
             )
             + f"【修正指示】{guidance}\n"
             + (
-                "CO判定は完了しています。マーカーやCOを付けず、本文だけを5～8文で出力してください。"
+                "CO判定は完了しています。マーカーやCOを付けず、本文だけを3～5文で出力してください。"
                 if body_only
                 else "回答は必ず「【CO】なし/保留/CO内容」の次行に「【本文】本文」の2行構造にしてください。"
                 "占い結果を公開する場合のみ「【CO】占い師」＋「【結果】対象=Player X 判定=人狼/人間」の行を追加できます。"
             )
-            + "本文は5～8文を目安に、直前の質問への回答・確認できる事実・疑う対象と根拠・"
-            "次に確認したい点の4要素をすべて含め、途中で止めずに最後まで出力してください。"
+            + "本文は3～5文を目安に、質問への回答、新しい根拠または反証、"
+            "現時点の疑いと投票意向の順に簡潔に述べ、最後まで出力してください。"
         )
 
     @staticmethod
@@ -1809,6 +1923,16 @@ class OllamaActions(ActionPolicy):
         vote_history = self.state.vote_history
         player_names = tuple(player.name for player in self.state.players)
         for sentence in self._discussion_sentences(text):
+            if any(
+                marker in sentence
+                for marker in (
+                    "記録にない",
+                    "台帳に記録がない",
+                    "記録を確認できない",
+                    "判断できない",
+                )
+            ):
+                continue
             previous_vote = re.search(
                 r"(?:昨日|前日|前回|前の(?:ターン|日|ラウンド)?|過去の)"
                 r"(?:の)?(?:投票|票)",
@@ -1974,13 +2098,20 @@ class OllamaActions(ActionPolicy):
                 ),
                 None,
             )
-            alternative = next(
-                (
-                    name
-                    for name in self.state.alive_players
-                    if name != actor.name
-                ),
-                None,
+            question_set = self.state.action_candidate_sets.get(
+                f"question:{actor.name}"
+            )
+            alternative = (
+                question_set.fallback
+                if question_set is not None
+                else next(
+                    (
+                        name
+                        for name in self.state.alive_players
+                        if name != actor.name
+                    ),
+                    None,
+                )
             )
             if target is not None:
                 replacement = (
@@ -1990,13 +2121,20 @@ class OllamaActions(ActionPolicy):
                     else f"{target}さんは死亡しており回答できないため、記録にない点は判断できません。"
                 )
         elif issue == "dead_player_action_target":
-            alternative = next(
-                (
-                    name
-                    for name in self.state.alive_players
-                    if name != actor.name
-                ),
-                None,
+            question_set = self.state.action_candidate_sets.get(
+                f"question:{actor.name}"
+            )
+            alternative = (
+                question_set.fallback
+                if question_set is not None
+                else next(
+                    (
+                        name
+                        for name in self.state.alive_players
+                        if name != actor.name
+                    ),
+                    None,
+                )
             )
             replacement = (
                 f"現在の判断は生存者の{alternative}さんについて検討します。"
@@ -2412,7 +2550,9 @@ class OllamaActions(ActionPolicy):
     def _has_published_seer_result(
         self, claimant: str, target: str, result: str
     ) -> bool:
-        return any(
+        return self.state.claim_ledger.public_seer_results.get(
+            (claimant, target)
+        ) == result or any(
             claim.claimant == claimant
             and claim.target == target
             and claim.result == result
@@ -2452,11 +2592,15 @@ class OllamaActions(ActionPolicy):
                 if value is not None
                 and not option_key.startswith("num_predict_by_action:")
                 and not option_key.startswith("thinking_by_action:")
+                and option_key != "override_player_num_ctx"
             }
             if self.options is not None
             else {}
         )
-        if actor.num_ctx is not None:
+        override_player_num_ctx = bool(
+            self.options and self.options.get("override_player_num_ctx")
+        )
+        if actor.num_ctx is not None and not override_player_num_ctx:
             options["num_ctx"] = actor.num_ctx
         if num_predict is not None:
             options["num_predict"] = num_predict
@@ -2921,7 +3065,10 @@ class OllamaActions(ActionPolicy):
         if callable(getattr(self.client, "context_diagnostics", None)):
             context_diagnostics = self.client.context_diagnostics(actor.model)
         requested_num_ctx = options.get("num_ctx") if options else None
-        if actor.num_ctx is not None:
+        override_player_num_ctx = bool(
+            self.options and self.options.get("override_player_num_ctx")
+        )
+        if actor.num_ctx is not None and not override_player_num_ctx:
             num_ctx_source = "player_setting"
         elif self.options is not None and self.options.get("num_ctx") is not None:
             num_ctx_source = "cli_setting"

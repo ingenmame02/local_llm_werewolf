@@ -57,6 +57,31 @@ python scripts/benchmark_context.py --context-lengths 4096 8192 --rounds 2
 
 結果は`evaluation-results/context-benchmark.jsonl`に保存されます。GPU使用率とVRAMは`nvidia-smi`対応GPUがある場合に記録されます。`ollama ps`のPROCESSORはCPU/GPUへのロード割当であり、使用率そのものではありません。Modelfile設定やサーバー環境変更後はモデルを再ロードし、実際のCONTEXTとPROCESSORを確認してください。
 
+TASK-030では会話コンテキストを`full_transcript`（公開会話全文）、`structured_ledger`（台帳と現在の質問）、`hybrid_retrieval`（直近発言と関連発言。既定）から選べます。比較ベンチマークは同一の固定シナリオ・生成設定でコンテキスト長と戦略を組み合わせ、質問回答率、新しい根拠カテゴリの有無、投票意向の具体性、再試行・フォールバック、入出力トークン、処理時間、CPU/RAM/GPU/VRAMをJSONLに記録します。コンテキスト拡大による改善・残存・新規失敗も比較します。32k以上を採用する基準は事前に固定し、最低10件の議論で質問回答率・新根拠カテゴリ率・投票意向具体率のいずれかが10ポイント以上改善、解析成功率が悪化せず、平均応答時間の増加が25%以内の場合に限ります。`thinking_present`は記録しますが、Ollama応答から思考トークンだけを分離して正確に数える値は取得できません。
+
+```powershell
+ollama create werewolf-calm3-22b-32k -f modelfiles\calm3-22b-32k.Modelfile
+ollama show werewolf-calm3-22b-32k --modelfile
+```
+
+32k派生モデルは8kモデルと同じ重みを使い、既定コンテキストだけを32kに設定します。専用設定`config/players_task030_32k.json`はPlayer 1だけを派生モデルへ切り替え、残りのプレイヤーと議論条件はそのままにします。まず1条件だけ試し、JSONLの`loaded_context`が32768になったことを確認してください。`loaded_context`が`null`の場合はモデルが診断時にアンロード済みです。Ollamaサーバープロセスに`OLLAMA_KEEP_ALIVE=5m`と`OLLAMA_NUM_PARALLEL=1`を設定して再起動し、パイロットを再実行してください。16k以下のままなら32k実測とは見なさず、Ollamaサーバー設定や利用可能メモリを確認します。32kはモデル・VRAMで実行可能な場合のみ指定してください。
+
+```powershell
+python scripts\benchmark_context.py --models-file config\players_task030_32k.json --models werewolf-calm3-22b-32k --context-lengths 32768 --context-strategies hybrid_retrieval --rounds 1 --actions discussion --output evaluation-results\task030-calm3-32k-pilot.jsonl
+```
+
+`loaded_context`が32768と確認できたら、各条件10ラウンドの本比較を実行します。8k側も同じラウンド数で取り直す場合は、既定設定ファイルを使い、モデル名を`werewolf-calm3-22b-8k`、出力先を別ファイルにしてください。単一ゲームを同じ条件で比較するときは`--seed`とモデル設定を固定し、`--context-strategy`と`--num-ctx`だけを切り替えます。`config/players.json`のプレイヤー別`num_ctx`を指定値で上書きするには`--override-player-num-ctx`も付けてください。全履歴モードのプロンプト監査には公開発言のSHA-256、通し発言番号、選択理由、除外範囲が記録され、会話本文や非公開の狼相談・占い結果は診断イベントに含めません。
+
+```powershell
+python scripts\benchmark_context.py --models-file config\players_task030_32k.json --models werewolf-calm3-22b-32k --context-lengths 8192 12288 16384 32768 --context-strategies full_transcript structured_ledger hybrid_retrieval --rounds 10 --actions discussion --output evaluation-results\task030-calm3-32k-r10.jsonl
+```
+
+比較対照の8kモデルも10ラウンドで実行する場合は、32k結果とは別ファイルへ保存します。
+
+```powershell
+python scripts\benchmark_context.py --models-file config\players.json --models werewolf-calm3-22b-8k --context-lengths 8192 12288 16384 --context-strategies full_transcript structured_ledger hybrid_retrieval --rounds 10 --actions discussion --output evaluation-results\task030-calm3-8k-r10.jsonl
+```
+
 ## 議論応答形式
 
 新形式は1回の生成でCOと議論本文を分離します。COは公開主張の構造化に使い、会話履歴には本文だけを追加します。旧形式の明示的な文章COも互換のため受け付けます。
@@ -68,6 +93,10 @@ python src/werewolf/cli.py --mode ollama --models-file config/players.json --see
 ```
 
 `--discussion-claim-mode candidates`は占い師・CO公開済みプレイヤーを対象とする比較用です。`all`は全員に二段階COを適用します。ログには非公開情報が含まれるため、共有時は取り扱いに注意してください。
+
+公開COと占い結果は`ClaimLedger`で冪等に管理され、同一COの再送は本文から取り除かれます。`all`でもCO判定は同じプレイヤーに毎ターン行わず、初回判定・未公開の新しい占い結果・明示的な訂正要求時に限定します。候補外の襲撃・占い・投票は短い再回答後に合法候補へ補正し、死亡者への回答要求など台帳で修復できる違反は再生成せず`ledger_repair`として記録します。
+
+ゲーム結果JSONLには公開FactLedgerと比較用の`ledger_metrics`（CO呼び出し、実送信・再試行、重複CO、台帳修復、本文保持、質問未回答、処理時間）が含まれます。占い師本人だけの結果、候補集合、生成前後の台帳スナップショットは管理者用の`--private-log`にのみ記録されます。同一シードでモードを比較する場合は、各モードを同じ`--seed`で実行し、JSONLの`discussion_claim_mode`と`ledger_metrics`を比較してください。
 
 CO専用応答では、構造化されたCO／結果行だけを採用し、余分な説明文は議論本文へ混入しないよう破棄します。COなし・保留に誤った結果行が付いた場合も、結果を公開せずCOなし・保留として扱います。COプロンプトは会話履歴を重ねず、既に記録された公開COと占い師本人の結果だけを渡します。
 

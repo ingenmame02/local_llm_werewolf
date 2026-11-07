@@ -10,6 +10,7 @@ from werewolf import (
     ChatResponse,
     GameEngine,
     GameState,
+    LedgerFact,
     MockActions,
     OllamaActions,
     OllamaClient,
@@ -32,6 +33,8 @@ def test_cli_parser_options() -> None:
         "--timeout", "60.0",
         "--temperature", "0.5",
         "--num-ctx", "2048",
+        "--override-player-num-ctx",
+        "--context-strategy", "full_transcript",
         "--num-predict", "256",
         "--log-dir", "custom_logs",
         "--show-private",
@@ -42,10 +45,13 @@ def test_cli_parser_options() -> None:
     assert args.timeout == 60.0
     assert args.temperature == 0.5
     assert args.num_ctx == 2048
+    assert args.override_player_num_ctx is True
+    assert args.context_strategy == "full_transcript"
     assert args.num_predict == 256
     assert args.log_dir == Path("custom_logs")
     assert args.show_private is True
     assert parser.parse_args([]).num_ctx is None
+    assert parser.parse_args([]).context_strategy == "hybrid_retrieval"
     private_args = parser.parse_args(["--private-log"])
     assert private_args.private_log is True
 
@@ -82,6 +88,19 @@ def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path:
             "input_token_count": 80,
             "elapsed_seconds": 1.25,
             "error": None,
+            "response_metadata": {
+                "eval_count": 24,
+                "done_reason": "stop",
+                "thinking_present": True,
+            },
+        }
+    )
+    logger.append_record(
+        {
+            "type": "discussion_context_selected",
+            "model": "slow-model",
+            "context_strategy": "hybrid_retrieval",
+            "transcript_sha256": "a" * 64,
         }
     )
     # 実際のOllamaリクエストで送信した思考生成（think）をカウントする
@@ -131,10 +150,14 @@ def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path:
         "parse_failure_count": 1,
         "elapsed_seconds": 13.75,
         "failure_reasons": {"empty_content": 1},
-        "eval_count_total": 0,
+        "eval_count_total": 24,
+        "output_token_count_total": 24,
         "eval_duration_ms_total": 0,
+        "done_reason_counts": {"stop": 1},
+        "thinking_present_response_count": 1,
+        "context_strategy_counts": {"hybrid_retrieval": 1},
         "action_budgets": {},
-        "avg_eval_count": 0.0,
+        "avg_eval_count": 12.0,
         "avg_input_token_count": 100.0,
         "avg_eval_duration_ms": 0.0,
         "thinking_disabled_requests": 2,
@@ -156,6 +179,78 @@ def test_game_logger_records_model_tool_capability(tmp_path: Path) -> None:
     assert result["model_capabilities"] == {
         "werewolf-calm3-22b-8k": {"claim_role_tool": False}
     }
+
+
+def test_game_logger_records_ledger_metrics_without_publicizing_private_facts(
+    tmp_path: Path,
+) -> None:
+    logger = GameLogger(
+        "ledger",
+        tmp_path,
+        {"discussion_claim_mode": "all"},
+        private_enabled=True,
+    )
+    state = create_game(seed=10)
+    seer = next(player for player in state.players if player.role is Role.SEER)
+    state.fact_ledger.confirmed_facts.append(
+        LedgerFact(
+            day=1,
+            kind="seer_result",
+            description="PRIVATE_SENTINEL: Player 2 is wolf",
+            visibility="seer",
+            actor=seer.name,
+        )
+    )
+    logger.append_record(
+        {"type": "llm_action_started", "action": "discussion_claim"}
+    )
+    logger.append_record(
+        {
+            "type": "llm_request_configuration",
+            "request_number": 1,
+        }
+    )
+    logger.append_record(
+        {
+            "type": "llm_request_configuration",
+            "request_number": 2,
+        }
+    )
+    logger.append_record(
+        {
+            "type": "llm_action_completed",
+            "action": "discussion_body",
+            "content_preserved": True,
+            "total_retries": 1,
+            "elapsed_seconds": 2.5,
+        }
+    )
+    logger.append_record({"type": "ledger_repair"})
+    logger.append_record({"type": "duplicate_claim_suppressed"})
+    logger.append_record({"type": "claim_role_published"})
+    logger.append_record(
+        {
+            "type": "llm_action_parse_failed",
+            "reason": "question_not_answered_first",
+        }
+    )
+    logger.finalize(state)
+
+    public_result = json.loads(
+        logger.log_file.read_text(encoding="utf-8").splitlines()[-1]
+    )
+    private_result = json.loads(
+        logger.private_log_file.read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert public_result["discussion_claim_mode"] == "all"
+    assert public_result["ledger_metrics"]["discussion_claim_calls"] == 1
+    assert public_result["ledger_metrics"]["llm_requests_sent"] == 2
+    assert public_result["ledger_metrics"]["retry_requests_sent"] == 1
+    assert public_result["ledger_metrics"]["ledger_repairs"] == 1
+    assert public_result["ledger_metrics"]["duplicate_claims_suppressed"] == 1
+    assert public_result["ledger_metrics"]["question_not_answered_rate"] == 1.0
+    assert "PRIVATE_SENTINEL" not in json.dumps(public_result)
+    assert "PRIVATE_SENTINEL" in json.dumps(private_result)
 
 
 def test_mock_actions_completes_game_via_cli(tmp_path: Path, capsys) -> None:

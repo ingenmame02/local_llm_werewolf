@@ -79,6 +79,22 @@ class GameLogger:
         self._sequence = 0
         self._private_sequence = 0
         self._model_stats: dict[str, dict[str, Any]] = {}
+        self._ledger_metrics: dict[str, int | float] = {
+            "discussion_claim_calls": 0,
+            "llm_requests_sent": 0,
+            "retry_requests_sent": 0,
+            "completed_actions": 0,
+            "retries": 0,
+            "fallbacks": 0,
+            "discussion_bodies": 0,
+            "discussion_bodies_preserved": 0,
+            "question_not_answered": 0,
+            "ledger_repairs": 0,
+            "duplicate_claims_suppressed": 0,
+            "public_claim_updates": 0,
+            "llm_elapsed_seconds": 0.0,
+            "discussion_context_selections": 0,
+        }
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
         # 1行目にゲーム開始メタデータを書き込み
@@ -100,6 +116,63 @@ class GameLogger:
     ) -> None:
         diagnostic_record = private_record if private_record is not None else record
         model = diagnostic_record.get("model", record.get("model"))
+        event_type = diagnostic_record.get("type")
+        action = diagnostic_record.get("action")
+        if event_type == "llm_action_started" and action == "discussion_claim":
+            self._ledger_metrics["discussion_claim_calls"] += 1
+        if event_type == "llm_request_configuration":
+            self._ledger_metrics["llm_requests_sent"] += 1
+            request_number = diagnostic_record.get("request_number")
+            if isinstance(request_number, int) and request_number > 1:
+                self._ledger_metrics["retry_requests_sent"] += 1
+        if event_type == "llm_action_completed":
+            self._ledger_metrics["completed_actions"] += 1
+            self._ledger_metrics["retries"] += int(
+                diagnostic_record.get("total_retries", 0)
+            )
+            transport_retries = diagnostic_record.get("transport_retries", 0)
+            if isinstance(transport_retries, int) and not isinstance(
+                transport_retries, bool
+            ):
+                self._ledger_metrics["llm_requests_sent"] += transport_retries
+                self._ledger_metrics["retry_requests_sent"] += transport_retries
+            self._ledger_metrics["fallbacks"] += int(
+                bool(diagnostic_record.get("fallback_used"))
+            )
+            if action in {"discussion", "discussion_body"}:
+                self._ledger_metrics["discussion_bodies"] += 1
+                self._ledger_metrics["discussion_bodies_preserved"] += int(
+                    bool(diagnostic_record.get("content_preserved"))
+                )
+            self._ledger_metrics["llm_elapsed_seconds"] = round(
+                float(self._ledger_metrics["llm_elapsed_seconds"])
+                + float(diagnostic_record.get("elapsed_seconds", 0.0)),
+                3,
+            )
+        if event_type == "llm_action_parse_failed":
+            if diagnostic_record.get("reason") == "question_not_answered_first":
+                self._ledger_metrics["question_not_answered"] += 1
+        if event_type == "ledger_repair":
+            self._ledger_metrics["ledger_repairs"] += 1
+        if event_type == "duplicate_claim_suppressed":
+            self._ledger_metrics["duplicate_claims_suppressed"] += 1
+        if event_type in {
+            "claim_role_published",
+            "claim_role_corrected",
+            "seer_result_claim",
+            "seer_result_corrected",
+        }:
+            self._ledger_metrics["public_claim_updates"] += 1
+        if event_type == "discussion_context_selected":
+            self._ledger_metrics["discussion_context_selections"] += 1
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(
+                    model, self._new_model_stats()
+                )
+                strategy = diagnostic_record.get("context_strategy")
+                if isinstance(strategy, str):
+                    strategies = stats["context_strategy_counts"]
+                    strategies[strategy] = strategies.get(strategy, 0) + 1
         if (
             isinstance(model, str)
             and diagnostic_record.get("type") == "llm_action_parse_failed"
@@ -147,9 +220,17 @@ class GameLogger:
                     eval_count = response_metadata.get("eval_count")
                     if isinstance(eval_count, int) and not isinstance(eval_count, bool):
                         stats["eval_count_total"] += eval_count
+                        stats["output_token_count_total"] += eval_count
                     eval_duration_ms = response_metadata.get("eval_duration_ms")
                     if isinstance(eval_duration_ms, int) and not isinstance(eval_duration_ms, bool):
                         stats["eval_duration_ms_total"] += eval_duration_ms
+                    done_reason = response_metadata.get("done_reason")
+                    if isinstance(done_reason, str):
+                        done_reasons = stats["done_reason_counts"]
+                        done_reasons[done_reason] = done_reasons.get(done_reason, 0) + 1
+                    stats["thinking_present_response_count"] += int(
+                        bool(response_metadata.get("thinking_present"))
+                    )
                 budget_key = record.get("action_budget_key")
                 num_predict = record.get("num_predict")
                 if isinstance(budget_key, str) and isinstance(num_predict, int):
@@ -190,6 +271,7 @@ class GameLogger:
             "content_lost_fallback_count": 0,
             "failure_classes": {},
             "input_token_count_total": 0,
+            "output_token_count_total": 0,
             "timeout_count": 0,
             "parse_failure_count": 0,
             "empty_response_count": 0,
@@ -204,6 +286,9 @@ class GameLogger:
             # 思考生成（think=false）で送信したリクエスト数
             "thinking_disabled_requests": 0,
             "thinking_enabled_requests": 0,
+            "thinking_present_response_count": 0,
+            "done_reason_counts": {},
+            "context_strategy_counts": {},
             # 思考生成非対応と判明して think=off へ切り替えたモデルの数
             "thinking_capability_fallbacks": 0,
             # 思考が生成上限を消費して切り詰め、think=offへ自動切替した回数
@@ -283,12 +368,78 @@ class GameLogger:
             "winner_reason": state.winner_reason,
             "winner_counts": dict(state.winner_counts),
             "error_occurred": error is not None,
+            "discussion_claim_mode": self.metadata.get(
+                "discussion_claim_mode", "legacy"
+            ),
+            "context_strategy": self.metadata.get(
+                "context_strategy", "hybrid_retrieval"
+            ),
             "players": public_players_data,
             "alive_players": state.alive_players,
             "seer_claims": [asdict(claim) for claim in state.seer_claims],
             "public_role_claims": [
                 asdict(claim) for claim in state.public_role_claims
             ],
+            "claim_ledger": {
+                "public_claims": [
+                    asdict(claim)
+                    for claim in state.claim_ledger.public_claims.values()
+                ],
+                "public_seer_results": [
+                    {
+                        "claimant": claimant,
+                        "target": target,
+                        "result": result,
+                    }
+                    for (claimant, target), result
+                    in state.claim_ledger.public_seer_results.items()
+                ],
+            },
+            "fact_ledger": {
+                "confirmed_facts": [
+                    asdict(fact)
+                    for fact in state.fact_ledger.confirmed_facts
+                    if fact.visibility == "public"
+                ],
+                "public_claims": [
+                    asdict(claim) for claim in state.fact_ledger.public_claims
+                ],
+                "model_inferences": [
+                    asdict(fact) for fact in state.fact_ledger.model_inferences
+                ],
+            },
+            "ledger_metrics": {
+                **self._ledger_metrics,
+                "retry_rate": round(
+                    int(self._ledger_metrics["retries"])
+                    / max(1, int(self._ledger_metrics["completed_actions"])),
+                    4,
+                ),
+                "fallback_rate": round(
+                    int(self._ledger_metrics["fallbacks"])
+                    / max(1, int(self._ledger_metrics["completed_actions"])),
+                    4,
+                ),
+                "discussion_body_preservation_rate": round(
+                    int(self._ledger_metrics["discussion_bodies_preserved"])
+                    / max(1, int(self._ledger_metrics["discussion_bodies"])),
+                    4,
+                ),
+                "question_not_answered_rate": round(
+                    int(self._ledger_metrics["question_not_answered"])
+                    / max(1, int(self._ledger_metrics["discussion_bodies"])),
+                    4,
+                ),
+                "duplicate_claim_rate": round(
+                    int(self._ledger_metrics["duplicate_claims_suppressed"])
+                    / max(
+                        1,
+                        int(self._ledger_metrics["public_claim_updates"])
+                        + int(self._ledger_metrics["duplicate_claims_suppressed"]),
+                    ),
+                    4,
+                ),
+            },
             "conversation_log": conversation_data,
             "votes": state.votes,
             "model_stats": self._model_stats,
@@ -312,6 +463,24 @@ class GameLogger:
             ],
             "wolf_chat_log": wolf_chat_data,
             "seer_results": state.seer_results,
+            "fact_ledger": {
+                "confirmed_facts": [
+                    asdict(fact) for fact in state.fact_ledger.confirmed_facts
+                ],
+                "public_claims": [
+                    asdict(claim) for claim in state.fact_ledger.public_claims
+                ],
+                "model_inferences": [
+                    asdict(fact) for fact in state.fact_ledger.model_inferences
+                ],
+            },
+            "action_candidate_sets": {
+                key: asdict(candidate_set)
+                for key, candidate_set in state.action_candidate_sets.items()
+            },
+            "ledger_snapshots": [
+                asdict(snapshot) for snapshot in state.ledger_snapshots
+            ],
             "traces": private_traces_data,
         }
         self.append_record(public_summary, private_summary)
@@ -345,6 +514,10 @@ def run_cli_game(args: argparse.Namespace) -> int:
         options["num_predict"] = args.num_predict
     if args.num_ctx is not None:
         options["num_ctx"] = args.num_ctx
+    if getattr(args, "override_player_num_ctx", False) and args.num_ctx is None:
+        raise ValueError("--override-player-num-ctx requires --num-ctx.")
+    if getattr(args, "override_player_num_ctx", False):
+        options["override_player_num_ctx"] = True
     if args.thinking in {"on", "off"}:
         options["thinking"] = args.thinking == "on"
     for key, value in action_num_predict.items():
@@ -358,6 +531,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
     meta = {
         "mode": args.mode,
         "seed": args.seed,
+        "discussion_claim_mode": getattr(
+            args, "discussion_claim_mode", "legacy"
+        ),
+        "context_strategy": getattr(
+            args, "context_strategy", "hybrid_retrieval"
+        ),
         "options": options,
         "timeout": args.timeout,
         "num_predict": args.num_predict,
@@ -584,6 +763,9 @@ def run_cli_game(args: argparse.Namespace) -> int:
             discussion_claim_mode=getattr(
                 args, "discussion_claim_mode", "legacy"
             ),
+            context_strategy=getattr(
+                args, "context_strategy", "hybrid_retrieval"
+            ),
         )
     else:
         actions = MockActions()
@@ -799,6 +981,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--override-player-num-ctx",
+        action="store_true",
+        help=(
+            "Make --num-ctx override per-player num_ctx settings; requires --num-ctx"
+        ),
+    )
+    parser.add_argument(
         "--num-predict",
         type=int,
         default=None,
@@ -835,6 +1024,19 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Discussion claim generation: legacy combined response, staged for "
             "seer/claimants, or staged for every player."
+        ),
+    )
+    parser.add_argument(
+        "--context-strategy",
+        choices=(
+            "full_transcript",
+            "structured_ledger",
+            "hybrid_retrieval",
+        ),
+        default="hybrid_retrieval",
+        help=(
+            "Discussion context: full public transcript, structured ledgers only, "
+            "or hybrid evidence retrieval (default)."
         ),
     )
     parser.add_argument(

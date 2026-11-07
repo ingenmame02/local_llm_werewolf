@@ -33,7 +33,13 @@ from .llm_actions import (
     resolve_thinking,
 )
 from .models import (
+    ActionCandidateSet,
+    ClaimLedger,
+    ClaimRecord,
+    FactLedger,
     GameState,
+    LedgerFact,
+    LedgerSnapshot,
     Message,
     Phase,
     Player,
@@ -58,12 +64,18 @@ from .prompts import (
 )
 
 __all__ = [
+    "ActionCandidateSet",
+    "ClaimLedger",
+    "ClaimRecord",
+    "FactLedger",
     "GameState",
     "GameEngine",
     "ActionKind",
     "ActionParser",
     "ActionTrace",
     "Message",
+    "LedgerFact",
+    "LedgerSnapshot",
     "MockActions",
     "OllamaActions",
     "ChatResponse",

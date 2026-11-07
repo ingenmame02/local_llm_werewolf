@@ -1,9 +1,13 @@
 import random
 import re
+from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from .models import (
+    ActionCandidateSet,
+    ClaimRecord,
     GameState,
+    LedgerFact,
     Message,
     Phase,
     Player,
@@ -19,6 +23,13 @@ _CLAIMED_ROLE_NAMES = {
     "狂人": "madman",
     "村人": "villager",
 }
+
+
+@dataclass(frozen=True)
+class _ClaimPublication:
+    role_published: bool = False
+    result_published: bool = False
+    duplicate_suppressed: bool = False
 
 
 def extract_public_role_claim(content: str) -> str | None:
@@ -190,11 +201,21 @@ class GameEngine:
             if player.is_alive and player.role is not Role.WOLF
         )
         if candidates:
-            target = self.actions.choose_attack(
-                tuple(wolf.name for wolf in wolves), candidates
+            candidate_set = ActionCandidateSet(
+                action="attack",
+                actor=wolves[0].name,
+                day=self.state.day,
+                candidates=candidates,
+                fallback=candidates[0],
             )
+            self.state.action_candidate_sets["attack"] = candidate_set
+            self.state.snapshot_ledgers("before", "attack", wolves[0].name)
+            target = self.actions.choose_attack(
+                tuple(wolf.name for wolf in wolves), candidate_set.candidates
+            )
+            self.state.snapshot_ledgers("after", "attack", wolves[0].name)
             self.state.pending_attack = (
-                target if target in candidates else self._rng.choice(candidates)
+                target if target in candidate_set.candidates else candidate_set.fallback
             )
         else:
             self.state.pending_attack = None
@@ -206,18 +227,47 @@ class GameEngine:
             return
 
         seer = seers[0]
-        candidates = tuple(player.name for player in self.state.players if player.is_alive)
+        candidates = tuple(
+            player.name
+            for player in self.state.players
+            if player.is_alive
+            and player.name != seer.name
+            and player.name not in self.state.seer_results
+        )
+        candidate_set = ActionCandidateSet(
+            action="seer",
+            actor=seer.name,
+            day=self.state.day,
+            candidates=candidates,
+            fallback=candidates[0] if candidates else None,
+        )
+        self.state.action_candidate_sets["seer"] = candidate_set
         if not candidates:
             return
+        self.state.snapshot_ledgers("before", "seer", seer.name)
         target = self.actions.choose_seer_target(
-            seer.name, candidates, tuple(self.state.seer_results.items())
+            seer.name,
+            candidate_set.candidates,
+            tuple(self.state.seer_results.items()),
         )
-        if target not in candidates:
-            target = self._rng.choice(candidates)
+        self.state.snapshot_ledgers("after", "seer", seer.name)
+        if target not in candidate_set.candidates:
+            target = candidate_set.fallback
+        if target is None:
+            return
         target_player = self._player(target)
         result = "wolf" if target_player.role is Role.WOLF else "human"
         self.state.seer_results[target] = result
         self.state.seer_result_history.append((self.state.day, target, result))
+        self.state.fact_ledger.confirmed_facts.append(
+            LedgerFact(
+                day=self.state.day,
+                kind="seer_result",
+                description=f"{target}: {result}",
+                visibility="seer",
+                actor=seer.name,
+            )
+        )
 
     def resolve_morning(self) -> None:
         self.state.phase = Phase.MORNING
@@ -226,6 +276,13 @@ class GameEngine:
         if victim is not None and self._player(victim).is_alive:
             self.state.mark_dead(victim)
             self.state.attack_deaths.append((self.state.day, victim))
+            self.state.fact_ledger.confirmed_facts.append(
+                LedgerFact(
+                    day=self.state.day,
+                    kind="attack_death",
+                    description=f"{victim} was attacked during the night.",
+                )
+            )
             self.state.conversation_log.append(
                 Message("system", f"{victim} was attacked during the night.")
             )
@@ -243,6 +300,18 @@ class GameEngine:
             for player in self.state.players:
                 if not player.is_alive:
                     continue
+                question_candidates = tuple(
+                    name for name in self.state.alive_players if name != player.name
+                )
+                self.state.action_candidate_sets[f"question:{player.name}"] = (
+                    ActionCandidateSet(
+                        action="question",
+                        actor=player.name,
+                        day=self.state.day,
+                        candidates=question_candidates,
+                        fallback=question_candidates[0] if question_candidates else None,
+                    )
+                )
                 stage_claim = getattr(
                     self.actions, "should_stage_discussion_claim", None
                 )
@@ -250,60 +319,94 @@ class GameEngine:
                     self.actions, "choose_discussion_claim", None
                 )
                 discuss_body = getattr(self.actions, "discuss_body", None)
-                use_staged_claim = (
+                has_staged_interface = (
                     callable(stage_claim)
                     and callable(choose_claim)
                     and callable(discuss_body)
-                    and stage_claim(player.name)
+                    and getattr(self.actions, "discussion_claim_mode", "legacy")
+                    != "legacy"
                 )
-                if use_staged_claim:
-                    claim_response = choose_claim(
-                        player.name,
-                        self.state.day,
-                        tuple(self.state.alive_players),
-                        tuple(self.state.conversation_log),
-                    )
-                    decision = parse_discussion_claim(claim_response)
-                    if decision is not None and decision.claim not in {"なし", "保留"}:
-                        public_claim = "\n".join(
-                            part
-                            for part in (decision.claim, decision.result)
-                            if part
+                if has_staged_interface:
+                    if stage_claim(player.name):
+                        self.state.snapshot_ledgers(
+                            "before", "discussion_claim", player.name
                         )
-                        self.state.conversation_log.append(
-                            Message(player.name, public_claim)
-                        )
-                        self._record_public_role_claim(
+                        claim_response = choose_claim(
                             player.name,
-                            public_claim,
-                            claim_text=decision.claim,
+                            self.state.day,
+                            tuple(self.state.alive_players),
+                            tuple(self.state.conversation_log),
                         )
+                        self.state.snapshot_ledgers(
+                            "after", "discussion_claim", player.name
+                        )
+                        decision = parse_discussion_claim(claim_response)
+                        if decision is not None and decision.claim not in {"なし", "保留"}:
+                            public_claim = "\n".join(
+                                part
+                                for part in (decision.claim, decision.result)
+                                if part
+                            )
+                            publication = self._record_public_role_claim(
+                                player.name,
+                                public_claim,
+                                claim_text=decision.claim,
+                            )
+                            public_lines = []
+                            if publication.role_published:
+                                public_lines.append(decision.claim)
+                            if publication.result_published and decision.result:
+                                public_lines.append(f"【結果】{decision.result}")
+                            if (
+                                publication.duplicate_suppressed
+                                and not publication.result_published
+                            ):
+                                public_lines = []
+                            if public_lines:
+                                self.state.conversation_log.append(
+                                    Message(player.name, "\n".join(public_lines))
+                                )
+                    self.state.snapshot_ledgers(
+                        "before", "discussion_body", player.name
+                    )
                     body = discuss_body(
                         player.name,
                         self.state.day,
                         tuple(self.state.alive_players),
                         tuple(self.state.conversation_log),
                     )
+                    self.state.snapshot_ledgers(
+                        "after", "discussion_body", player.name
+                    )
                     if body:
                         self.state.conversation_log.append(Message(player.name, body))
+                        self._record_model_inference(player.name, body)
                 else:
+                    self.state.snapshot_ledgers("before", "discussion", player.name)
                     content = self.actions.discuss(
                         player.name,
                         self.state.day,
                         tuple(self.state.alive_players),
                         tuple(self.state.conversation_log),
                     )
+                    self.state.snapshot_ledgers("after", "discussion", player.name)
                     structured_output = parse_discussion_output(content)
                     if structured_output is None:
-                        self.state.conversation_log.append(Message(player.name, content))
-                        self._record_public_role_claim(player.name, content)
-                    else:
-                        # 会話本文へは`【本文】`だけを登録し、COブロック・結果ブロックは分離する。
-                        if structured_output.body:
+                        publication = self._record_public_role_claim(
+                            player.name, content
+                        )
+                        body = (
+                            self._remove_duplicate_claim(content)
+                            if publication.duplicate_suppressed
+                            else content
+                        )
+                        if body:
                             self.state.conversation_log.append(
-                                Message(player.name, structured_output.body)
+                                Message(player.name, body)
                             )
-                        # COが「なし」「保留」の間は、結果ブロックを公開状態へ登録しない。
+                            self._record_model_inference(player.name, body)
+                    else:
+                        publication = _ClaimPublication()
                         if structured_output.claim not in {"なし", "保留"}:
                             claim_parts = [
                                 part
@@ -314,11 +417,19 @@ class GameEngine:
                                 )
                                 if part
                             ]
-                            self._record_public_role_claim(
+                            publication = self._record_public_role_claim(
                                 player.name,
                                 "\n".join(claim_parts),
                                 claim_text=structured_output.claim,
                             )
+                        body = structured_output.body
+                        if publication.duplicate_suppressed:
+                            body = self._remove_duplicate_claim(body)
+                        if body:
+                            self.state.conversation_log.append(
+                                Message(player.name, body)
+                            )
+                            self._record_model_inference(player.name, body)
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:
@@ -366,6 +477,13 @@ class GameEngine:
         self.state.voting_completed_day = day
         self.state.mark_dead(executed)
         self.state.executions.append((day, executed))
+        self.state.fact_ledger.confirmed_facts.append(
+            LedgerFact(
+                day=day,
+                kind="execution",
+                description=f"{executed} was voted out.",
+            )
+        )
         self.state.conversation_log.append(
             Message("system", f"{executed} was voted out.")
         )
@@ -422,23 +540,16 @@ class GameEngine:
 
     def _record_public_role_claim(
         self, speaker: str, content: str, claim_text: str | None = None
-    ) -> None:
+    ) -> _ClaimPublication:
         claimed_role = extract_public_role_claim(
             claim_text if claim_text is not None else content
         )
         if claimed_role is None:
-            return
+            return _ClaimPublication()
 
         names = tuple(player.name for player in self.state.players)
-        existing = next(
-            (
-                claim
-                for claim in self.state.public_role_claims
-                if claim.claimant == speaker and claim.claimed_role == claimed_role
-            ),
-            None,
-        )
-        prior_role = next(
+        ledger_claim = self.state.claim_ledger.public_claims.get(speaker)
+        prior_role = ledger_claim.claimed_role if ledger_claim is not None else next(
             (
                 claim.claimed_role
                 for claim in self.state.public_role_claims
@@ -450,33 +561,75 @@ class GameEngine:
                 else None
             ),
         )
+        correction = bool(
+            re.search(r"(?:訂正|訂正します|誤りでした|撤回します)", content)
+        )
+        role_published = ledger_claim is None
+        duplicate_suppressed = ledger_claim is not None and prior_role == claimed_role
         if prior_role is not None and prior_role != claimed_role:
-            self._emit_public_claim(
-                "claim_role_conflict",
-                day=self.state.day,
+            if not correction or (
+                ledger_claim is not None and not ledger_claim.updateable
+            ):
+                self._emit_public_claim(
+                    "claim_role_conflict",
+                    day=self.state.day,
+                    claimant=speaker,
+                    claimed_role=claimed_role,
+                    previous_role=prior_role,
+                )
+                return _ClaimPublication()
+            role_published = True
+            if ledger_claim is not None:
+                ledger_claim.claimed_role = claimed_role
+                ledger_claim.latest_published_day = self.state.day
+                ledger_claim.latest_published_turn = self.state.discussion_turn
+        elif ledger_claim is None:
+            ledger_claim = ClaimRecord(
                 claimant=speaker,
                 claimed_role=claimed_role,
-                previous_role=prior_role,
+                first_published_day=self.state.day,
+                first_published_turn=self.state.discussion_turn,
+                latest_published_day=self.state.day,
+                latest_published_turn=self.state.discussion_turn,
             )
-            return
+            self.state.claim_ledger.public_claims[speaker] = ledger_claim
+        if duplicate_suppressed:
+            self._emit_public_claim(
+                "duplicate_claim_suppressed",
+                day=self.state.day,
+                discussion_turn=self.state.discussion_turn,
+                claimant=speaker,
+                claimed_role=claimed_role,
+            )
         reason_match = re.search(
             r"(?:理由|根拠)\s*[：:=＝]\s*([^、,，。\n]+)", content
         )
         vote_match = re.search(
             r"(?:投票提案|次の提案)\s*[：:=＝]\s*([^。\n]+)", content
         )
-        if existing is None:
+        if role_published:
             self.state.public_role_claims.append(
                 PublicRoleClaim(
                     day=self.state.day,
                     claimant=speaker,
                     claimed_role=claimed_role,
-                    reason=reason_match.group(1).strip() if reason_match else None,
+                    reason=(
+                        reason_match.group(1).strip()
+                        if reason_match
+                        else "訂正"
+                        if correction
+                        else None
+                    ),
                     vote_proposal=vote_match.group(1).strip() if vote_match else None,
                 )
             )
+            self.state.fact_ledger.public_claims.append(
+                self.state.public_role_claims[-1]
+            )
             self._emit_public_claim(
-                "claim_role_published",
+                "claim_role_corrected"
+                if correction and prior_role is not None
+                else "claim_role_published",
                 day=self.state.day,
                 claimant=speaker,
                 claimed_role=claimed_role,
@@ -484,7 +637,10 @@ class GameEngine:
             )
 
         if claimed_role != Role.SEER.value:
-            return
+            return _ClaimPublication(
+                role_published=role_published,
+                duplicate_suppressed=duplicate_suppressed,
+            )
 
         has_claimed = any(
             claim.claimant == speaker for claim in self.state.seer_claims
@@ -501,29 +657,29 @@ class GameEngine:
 
         result = extract_public_seer_result(content, names)
         if result is None:
-            return
+            return _ClaimPublication(
+                role_published=role_published,
+                duplicate_suppressed=duplicate_suppressed,
+            )
         target, claimed_result = result
-        previous_result = next(
-            (
-                claim.result
-                for claim in self.state.public_role_claims
-                if claim.claimant == speaker
-                and claim.claimed_role == Role.SEER.value
-                and claim.target == target
-                and claim.result is not None
-            ),
-            next(
-                (
-                    claim.result
-                    for claim in self.state.seer_claims
-                    if claim.claimant == speaker
-                    and claim.target == target
-                    and claim.result is not None
-                ),
-                None,
-            ),
+        if target == speaker:
+            self._emit_public_claim(
+                "illegal_seer_claim_target",
+                day=self.state.day,
+                claimant=speaker,
+                target=target,
+                reason="self_target",
+            )
+            return _ClaimPublication(
+                role_published=role_published,
+                duplicate_suppressed=duplicate_suppressed,
+            )
+        result_key = (speaker, target)
+        previous_result = self.state.claim_ledger.public_seer_results.get(result_key)
+        result_published = previous_result is None or (
+            previous_result != claimed_result and correction
         )
-        if previous_result is not None and previous_result != claimed_result:
+        if previous_result is not None and previous_result != claimed_result and not correction:
             self._emit_public_claim(
                 "claim_role_conflict",
                 day=self.state.day,
@@ -533,14 +689,19 @@ class GameEngine:
                 claimed_result=claimed_result,
                 previous_result=previous_result,
             )
-            return
-        if any(
-            claim.claimant == speaker
-            and claim.target == target
-            and claim.result == claimed_result
-            for claim in self.state.seer_claims
-        ):
-            return
+            return _ClaimPublication(
+                role_published=role_published,
+                duplicate_suppressed=duplicate_suppressed,
+            )
+        if not result_published:
+            return _ClaimPublication(
+                role_published=role_published,
+                duplicate_suppressed=duplicate_suppressed,
+            )
+        self.state.claim_ledger.public_seer_results[result_key] = claimed_result
+        if ledger_claim is not None:
+            ledger_claim.latest_published_day = self.state.day
+            ledger_claim.latest_published_turn = self.state.discussion_turn
         self.state.seer_claims.append(
             PublicSeerClaim(
                 day=self.state.day,
@@ -556,17 +717,58 @@ class GameEngine:
                 claimed_role=Role.SEER.value,
                 target=target,
                 result=claimed_result,
-                reason=reason_match.group(1).strip() if reason_match else None,
+                reason=(
+                    reason_match.group(1).strip()
+                    if reason_match
+                    else "訂正"
+                    if correction
+                    else None
+                ),
                 vote_proposal=vote_match.group(1).strip() if vote_match else None,
             )
         )
+        self.state.fact_ledger.public_claims.append(
+            self.state.public_role_claims[-1]
+        )
         self._emit_public_claim(
-            "seer_result_claim",
+            "seer_result_corrected"
+            if correction and previous_result is not None
+            else "seer_result_claim",
             day=self.state.day,
             claimant=speaker,
             target=target,
             claimed_result=claimed_result,
         )
+        return _ClaimPublication(
+            role_published=role_published,
+            result_published=True,
+            duplicate_suppressed=duplicate_suppressed,
+        )
+
+    def _remove_duplicate_claim(self, content: str) -> str:
+        role = extract_public_role_claim(content)
+        if role is None:
+            return content.strip()
+        lines = content.splitlines()
+        if len(lines) > 1 and extract_public_role_claim(lines[0]) == role:
+            return "\n".join(lines[1:]).strip()
+        sentence = re.search(r"[。！？!?]", content)
+        if sentence is not None and extract_public_role_claim(
+            content[: sentence.end()]
+        ) == role:
+            return content[sentence.end() :].strip()
+        return ""
+
+    def _record_model_inference(self, speaker: str, content: str) -> None:
+        if content.strip() and content.strip() != "パス":
+            self.state.fact_ledger.model_inferences.append(
+                LedgerFact(
+                    day=self.state.day,
+                    kind="unverified_model_statement",
+                    description=content.strip(),
+                    actor=speaker,
+                )
+            )
 
     def _emit_public_claim(self, event_type: str, **details: object) -> None:
         if self.event_callback is not None:
@@ -610,6 +812,16 @@ class GameEngine:
             )
             if not eligible:
                 raise ValueError(f"No eligible living vote targets for {voter}.")
+            candidate_set = ActionCandidateSet(
+                action=f"vote:{ballot_id}",
+                actor=voter,
+                day=day,
+                candidates=eligible,
+                fallback=eligible[0],
+            )
+            self.state.action_candidate_sets[f"vote:{ballot_id}:{voter}"] = (
+                candidate_set
+            )
             self._emit_voting_event(
                 "vote_started",
                 voting_phase_id=ballot_id,
@@ -617,8 +829,18 @@ class GameEngine:
                 voter=voter,
                 attempt=vote_attempt,
             )
-            choice = self.actions.vote(voter, candidates, self.state.day, runoff)
-            selected = choice if choice in eligible else self._rng.choice(eligible)
+            self.state.snapshot_ledgers("before", candidate_set.action, voter)
+            choice = self.actions.vote(
+                voter, candidate_set.candidates, self.state.day, runoff
+            )
+            self.state.snapshot_ledgers("after", candidate_set.action, voter)
+            selected = (
+                choice
+                if choice in candidate_set.candidates
+                else candidate_set.fallback
+            )
+            if selected is None:
+                raise RuntimeError(f"No deterministic vote fallback for {voter}.")
             votes[voter] = selected
             self._emit_voting_event(
                 "vote_completed",
@@ -630,6 +852,14 @@ class GameEngine:
                 fallback_used=choice not in eligible,
             )
         self.state.completed_vote_phases.add(ballot_id)
+        for voter, target in votes.items():
+            self.state.fact_ledger.confirmed_facts.append(
+                LedgerFact(
+                    day=day,
+                    kind="vote",
+                    description=f"{voter} voted for {target}.",
+                )
+            )
         self._emit_voting_event(
             "voting_ballot_completed",
             voting_phase_id=ballot_id,

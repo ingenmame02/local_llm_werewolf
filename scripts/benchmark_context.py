@@ -28,6 +28,18 @@ except ImportError:
 from evaluate_models import evaluate_scenario, generate_scenarios, select_player_configs
 from werewolf import OllamaClient, Player, Role, load_player_configs
 
+CONTEXT_ADOPTION_CRITERIA = {
+    "minimum_discussion_scenarios": 10,
+    "minimum_absolute_quality_metric_gain": 0.1,
+    "quality_metrics": [
+        "question_answer_rate",
+        "novel_evidence_category_rate",
+        "vote_intent_specificity_rate",
+    ],
+    "parse_success_must_not_regress": True,
+    "maximum_average_latency_ratio": 1.25,
+}
+
 
 class ResourceSampler:
     def __init__(self, interval_seconds: float = 1.0) -> None:
@@ -149,6 +161,7 @@ def run_context_benchmark(
     base_url: str,
     model_filters: tuple[str, ...],
     action_types: tuple[str, ...],
+    context_strategies: tuple[str, ...] = ("hybrid_retrieval",),
 ) -> list[dict[str, Any]]:
     all_configs = load_player_configs(models_file)
     configs = select_player_configs(all_configs, list(model_filters))
@@ -159,7 +172,12 @@ def run_context_benchmark(
     player_names = tuple(config.name for config in all_configs)
     client = OllamaClient(base_url=base_url, timeout=timeout)
     reports: list[dict[str, Any]] = []
-    for context_length in contexts:
+    configurations = [
+        (context_length, context_strategy)
+        for context_length in contexts
+        for context_strategy in context_strategies
+    ]
+    for context_length, context_strategy in configurations:
         sampler = ResourceSampler()
         sampler.start()
         model_records: dict[str, list[dict[str, Any]]] = {
@@ -174,7 +192,9 @@ def run_context_benchmark(
                     role=Role.VILLAGER,
                     response_language=config.response_language,
                 )
-                for scenario in generate_scenarios(actor, player_names):
+                for scenario in generate_scenarios(
+                    actor, player_names, context_strategy
+                ):
                     if scenario.action_type not in action_types:
                         continue
                     prompt_char_count = (
@@ -197,11 +217,28 @@ def run_context_benchmark(
                             "discussion_format": result.get("discussion_format"),
                             "is_format_compliant": result["is_format_compliant"],
                             "is_parse_valid": result["is_parse_valid"],
+                            "parse_success": result["is_parse_valid"],
                             "fallback_used": result["fallback_used"],
                             "elapsed_seconds": result["elapsed_seconds"],
                             "retry_count": result["retry_count"],
+                            "request_attempts": result["request_attempts"],
+                            "num_predict": result["num_predict"],
+                            "num_predict_by_attempt": result[
+                                "num_predict_by_attempt"
+                            ],
                             "failure_reasons": result["failure_reasons"],
                             "done_reason": result["done_reason"],
+                            "thinking_present": result["thinking_present"],
+                            "question_expected": scenario.question_expected,
+                            "question_answered": result["question_answered"],
+                            "new_evidence_categories": result[
+                                "new_evidence_categories"
+                            ],
+                            "discussion_signals": result["discussion_signals"],
+                            "vote_intent_specific": bool(
+                                result["discussion_signals"].get("vote_proposals")
+                            ),
+                            "context_diagnostics": scenario.prompt_ctx.diagnostics,
                             "prompt_chars": prompt_char_count,
                             "input_tokens": result["prompt_eval_count"],
                             "output_tokens": result["eval_count"],
@@ -224,6 +261,11 @@ def run_context_benchmark(
             discussion_records = [
                 record for record in records if record["action_type"] == "discussion"
             ]
+            question_records = [
+                record
+                for record in discussion_records
+                if record["question_expected"]
+            ]
             model_summary[model] = {
                 "scenario_count": count,
                 "discussion_two_block_rate": (
@@ -242,13 +284,40 @@ def run_context_benchmark(
                     sum(record["is_format_compliant"] for record in records) / count,
                     4,
                 ),
+                "fallback_rate": round(
+                    sum(record["fallback_used"] for record in records) / count,
+                    4,
+                ),
                 "parse_success_rate": round(
                     sum(record["is_parse_valid"] for record in records) / count,
                     4,
                 ),
-                "fallback_rate": round(
-                    sum(record["fallback_used"] for record in records) / count,
-                    4,
+                "question_answer_rate": (
+                    round(
+                        sum(record["question_answered"] is True for record in question_records)
+                        / len(question_records),
+                        4,
+                    )
+                    if question_records
+                    else None
+                ),
+                "novel_evidence_category_rate": (
+                    round(
+                        sum(bool(record["new_evidence_categories"]) for record in discussion_records)
+                        / len(discussion_records),
+                        4,
+                    )
+                    if discussion_records
+                    else None
+                ),
+                "vote_intent_specificity_rate": (
+                    round(
+                        sum(record["vote_intent_specific"] for record in discussion_records)
+                        / len(discussion_records),
+                        4,
+                    )
+                    if discussion_records
+                    else None
                 ),
                 "average_elapsed_seconds": round(
                     statistics.fmean(
@@ -266,10 +335,12 @@ def run_context_benchmark(
             {
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
                 "num_ctx_request": context_length,
+                "context_strategy": context_strategy,
                 "model_filters": list(model_filters),
                 "action_types": list(action_types),
                 "rounds": rounds,
                 "num_parallel_expected": 1,
+                "seed": 42,
                 "num_parallel_process_environment": os.environ.get(
                     "OLLAMA_NUM_PARALLEL"
                 ),
@@ -277,6 +348,103 @@ def run_context_benchmark(
                 "models": model_summary,
             }
         )
+    reference_context = min(contexts)
+    reports_by_configuration = {
+        (report["context_strategy"], report["num_ctx_request"]): report
+        for report in reports
+    }
+    for report in reports:
+        reference = reports_by_configuration.get(
+            (report["context_strategy"], reference_context)
+        )
+        report["context_adoption_criteria"] = CONTEXT_ADOPTION_CRITERIA
+        if reference is None or report["num_ctx_request"] == reference_context:
+            report["context_expansion_comparison"] = None
+            continue
+        comparisons: dict[str, Any] = {}
+        for model, current_summary in report["models"].items():
+            baseline_summary = reference["models"].get(model)
+            if baseline_summary is None:
+                continue
+            baseline_results = {
+                (record["round"], record["action_type"]): record
+                for record in baseline_summary["results"]
+            }
+            current_results = {
+                (record["round"], record["action_type"]): record
+                for record in current_summary["results"]
+            }
+            improved: list[dict[str, Any]] = []
+            persistent: list[dict[str, Any]] = []
+            newly_failed: list[dict[str, Any]] = []
+            for scenario_key in sorted(baseline_results.keys() & current_results.keys()):
+                baseline_result = baseline_results[scenario_key]
+                current_result = current_results[scenario_key]
+                baseline_failed = not baseline_result["is_parse_valid"]
+                current_failed = not current_result["is_parse_valid"]
+                details = {
+                    "round": scenario_key[0],
+                    "action_type": scenario_key[1],
+                    "baseline_failure_reasons": baseline_result["failure_reasons"],
+                    "expanded_failure_reasons": current_result["failure_reasons"],
+                }
+                if baseline_failed and not current_failed:
+                    improved.append(details)
+                elif baseline_failed and current_failed:
+                    persistent.append(details)
+                elif not baseline_failed and current_failed:
+                    newly_failed.append(details)
+
+            quality_deltas = {
+                metric: (
+                    round(current_summary[metric] - baseline_summary[metric], 4)
+                    if current_summary[metric] is not None
+                    and baseline_summary[metric] is not None
+                    else None
+                )
+                for metric in CONTEXT_ADOPTION_CRITERIA["quality_metrics"]
+            }
+            discussion_count = sum(
+                record["action_type"] == "discussion"
+                for record in current_summary["results"]
+            )
+            baseline_latency = baseline_summary["average_elapsed_seconds"]
+            current_latency = current_summary["average_elapsed_seconds"]
+            latency_ratio = (
+                round(current_latency / baseline_latency, 4)
+                if baseline_latency > 0
+                else None
+            )
+            quality_gain = any(
+                delta is not None
+                and delta
+                >= CONTEXT_ADOPTION_CRITERIA[
+                    "minimum_absolute_quality_metric_gain"
+                ]
+                for delta in quality_deltas.values()
+            )
+            criteria_met = (
+                discussion_count
+                >= CONTEXT_ADOPTION_CRITERIA["minimum_discussion_scenarios"]
+                and quality_gain
+                and current_summary["parse_success_rate"]
+                >= baseline_summary["parse_success_rate"]
+                and latency_ratio is not None
+                and latency_ratio
+                <= CONTEXT_ADOPTION_CRITERIA["maximum_average_latency_ratio"]
+            )
+            comparisons[model] = {
+                "reference_context": reference_context,
+                "evaluated_context": report["num_ctx_request"],
+                "improved_failures": improved,
+                "persistent_failures": persistent,
+                "new_failures": newly_failed,
+                "quality_metric_deltas": quality_deltas,
+                "discussion_scenario_count": discussion_count,
+                "average_latency_ratio": latency_ratio,
+                "adoption_criteria_met": criteria_met,
+            }
+        report["context_expansion_comparison"] = comparisons
     return reports
 
 
@@ -298,7 +466,21 @@ def main() -> int:
         "--context-lengths",
         nargs="+",
         type=int,
-        default=[8192, 12288, 16384],
+        default=[8192, 12288, 16384, 32768],
+    )
+    parser.add_argument(
+        "--context-strategies",
+        nargs="+",
+        choices=(
+            "full_transcript",
+            "structured_ledger",
+            "hybrid_retrieval",
+        ),
+        default=[
+            "full_transcript",
+            "structured_ledger",
+            "hybrid_retrieval",
+        ],
     )
     parser.add_argument(
         "--models",
@@ -341,6 +523,7 @@ def main() -> int:
         args.base_url,
         tuple(args.models),
         action_types,
+        tuple(args.context_strategies),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("a", encoding="utf-8") as output_file:

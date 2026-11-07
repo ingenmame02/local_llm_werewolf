@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -33,6 +34,7 @@ from werewolf import (
     ActionParser,
     ChatResponse,
     GameState,
+    LedgerFact,
     Message,
     OllamaClient,
     OllamaError,
@@ -40,8 +42,10 @@ from werewolf import (
     Player,
     PromptBuilder,
     PromptContext,
+    PublicRoleClaim,
     Role,
     apply_thinking_floor,
+    create_game,
     load_player_configs,
     parse_action_num_predict_pairs,
     parse_thinking_by_action_pairs,
@@ -67,6 +71,9 @@ class PromptTestScenario:
     expected_seer_result: tuple[str, str] | None = None
     scenario_role: str | None = None
     personality_profile: str = "balanced"
+    question_expected: bool = False
+    questioner_name: str | None = None
+    prior_suspicion_reasons: tuple[str, ...] = ()
 
 
 # 評価シナリオの action_type と行動別生成上限キーの対応
@@ -347,19 +354,94 @@ def evaluate_seer_co_response(
     return co_established, result_published
 
 
-def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list[PromptTestScenario]:
+def generate_scenarios(
+    actor: Player,
+    all_player_names: tuple[str, ...],
+    context_strategy: str = "hybrid_retrieval",
+) -> list[PromptTestScenario]:
     """Generates standard benchmark scenarios for 4 actions: discussion, vote, attack, seer."""
     scenarios: list[PromptTestScenario] = []
 
     # 1. 昼の議論 (discussion)
+    questioner = next(
+        (name for name in all_player_names if name != actor.name), actor.name
+    )
+    vote_target = next(
+        (
+            name
+            for name in all_player_names
+            if name not in {actor.name, questioner}
+        ),
+        questioner,
+    )
     dummy_history = (
-        Message("Player 1", "おはようございます。みなさん怪しい人はいませんか？"),
-        Message("Player 2", "まだ初日なので手がかりが少ないですね。"),
+        Message("system", "Day 1 begins."),
+        Message(
+            questioner,
+            f"{vote_target}への投票理由を根拠に、投票先を再検討したいです。",
+        ),
+        *tuple(
+            Message(
+                all_player_names[index % len(all_player_names)],
+                f"Day 1の議論記録 {index}: 特に新しい情報はありません。",
+            )
+            for index in range(20)
+        ),
+        Message("system", "Day 2 begins."),
+        Message(
+            questioner,
+            f"{actor.name}さん、{vote_target}への昨日の投票理由をどう考えますか？",
+        ),
+    )
+    discussion_state = create_game(seed=42)
+    discussion_state.day = 2
+    discussion_state.vote_history.append((1, False, {questioner: vote_target}))
+    dead_names = tuple(
+        name
+        for name in reversed(all_player_names)
+        if name not in {actor.name, questioner, vote_target}
+    )[:2]
+    for player in discussion_state.players:
+        if player.name in dead_names:
+            player.is_alive = False
+    alive_names = tuple(
+        name for name in all_player_names if name not in dead_names
+    )
+    if dead_names:
+        discussion_state.attack_deaths.append((2, dead_names[0]))
+    if len(dead_names) > 1:
+        discussion_state.executions.append((1, dead_names[1]))
+    discussion_state.public_role_claims.append(
+        PublicRoleClaim(
+            day=1,
+            claimant=questioner,
+            claimed_role=Role.SEER.value,
+            target=vote_target,
+            result="human",
+        )
+    )
+    discussion_state.fact_ledger.confirmed_facts.append(
+        LedgerFact(
+            day=1,
+            kind="vote",
+            description=f"{questioner} voted for {vote_target}.",
+        )
+    )
+    prior_signals = extract_discussion_signals(
+        "\n".join(
+            message.content
+            for message in dummy_history
+            if message.speaker != "system"
+        ),
+        all_player_names,
     )
     disc_ctx = PromptBuilder.build_discussion_prompt(
         actor=actor,
-        alive_players=all_player_names,
+        alive_players=alive_names,
         conversation_history=dummy_history,
+        day=2,
+        state=discussion_state,
+        context_strategy=context_strategy,
     )
     scenarios.append(
         PromptTestScenario(
@@ -371,6 +453,9 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
             player_names=all_player_names,
             scenario_role=actor.role.value,
             personality_profile=actor.personality_profile,
+            question_expected=True,
+            questioner_name=questioner,
+            prior_suspicion_reasons=tuple(prior_signals["suspicion_reasons"]),
         )
     )
 
@@ -492,6 +577,7 @@ def generate_scenarios(actor: Player, all_player_names: tuple[str, ...]) -> list
         conversation_history=dummy_history,
         day=1,
         state=seer_state,
+        context_strategy=context_strategy,
     )
     scenarios.append(
         PromptTestScenario(
@@ -815,6 +901,30 @@ def evaluate_scenario(
     # raw_response は後方互換性のため最終応答（またはNone）を設定
     last_raw_response = raw_responses[-1] if raw_responses else None
 
+    discussion_signals = (
+        extract_discussion_signals(last_raw_response, scenario.player_names)
+        if scenario.action_type in {"discussion", "discussion_seer_co"}
+        and last_raw_response is not None
+        else {}
+    )
+    question_answered: bool | None = None
+    if scenario.question_expected:
+        structured = parse_discussion_output(last_raw_response or "")
+        body = (
+            structured.body
+            if structured is not None
+            else last_raw_response or ""
+        )
+        first_sentence = re.split(r"[。！？\n]", body, maxsplit=1)[0]
+        question_answered = bool(
+            scenario.questioner_name
+            and scenario.questioner_name in first_sentence
+        )
+    new_evidence_categories = sorted(
+        set(discussion_signals.get("suspicion_reasons", ()))
+        - set(scenario.prior_suspicion_reasons)
+    )
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model": model,
@@ -844,12 +954,9 @@ def evaluate_scenario(
         "raw_responses": raw_responses,
         "parsed_target": parsed_target,
         "invalid_target": invalid_target,
-        "discussion_signals": (
-            extract_discussion_signals(last_raw_response, scenario.player_names)
-            if scenario.action_type in {"discussion", "discussion_seer_co"}
-            and last_raw_response is not None
-            else {}
-        ),
+        "discussion_signals": discussion_signals,
+        "question_answered": question_answered,
+        "new_evidence_categories": new_evidence_categories,
         "is_format_compliant": is_format_compliant,
         "is_parse_valid": is_parse_valid,
         "is_specific": is_specific,

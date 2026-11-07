@@ -1,0 +1,2 @@
+FROM werewolf-calm3-22b-8k:latest
+PARAMETER num_ctx 32768

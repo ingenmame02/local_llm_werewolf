@@ -123,7 +123,7 @@ def test_first_night_skips_wolf_discussion_and_attack_but_keeps_seer_action() ->
 
         def choose_seer_target(self, seer, candidates, results):
             self.seer_actions += 1
-            return "P2"
+            return "P3"
 
     state = make_state(
         Role.WOLF, Role.WOLF, Role.SEER, Role.VILLAGER, Role.VILLAGER
@@ -144,7 +144,7 @@ def test_first_night_skips_wolf_discussion_and_attack_but_keeps_seer_action() ->
     assert state.attack_deaths == []
     assert state.day == 1
     assert state.phase is Phase.DAY_DISCUSSION
-    assert state.seer_results == {"P2": "human"}
+    assert state.seer_results == {"P3": "human"}
 
 
 def test_second_night_runs_normal_wolf_attack() -> None:
@@ -271,6 +271,120 @@ def test_staged_claim_is_registered_before_body_and_next_player_turn() -> None:
         message.speaker == "P0" and message.content == "P0は本文だけで議論します。"
         for message in state.conversation_log
     )
+
+
+def test_repeated_public_claim_is_logged_once_and_keeps_each_body() -> None:
+    state = make_state(Role.VILLAGER, Role.WOLF, Role.SEER)
+    events: list[dict[str, object]] = []
+
+    class RepeatedClaimActions(MockActions):
+        discussion_claim_mode = "all"
+
+        def should_stage_discussion_claim(self, player):
+            return player == "P0"
+
+        def choose_discussion_claim(self, player, day, alive, history):
+            return "【CO】村人CO"
+
+        def discuss_body(self, player, day, alive, history):
+            return f"根拠{state.discussion_turn}を確認します。"
+
+    GameEngine(
+        state,
+        RepeatedClaimActions(),
+        event_callback=events.append,
+    ).run_discussion()
+
+    assert len(
+        [claim for claim in state.public_role_claims if claim.claimant == "P0"]
+    ) == 1
+    assert len(
+        [
+            message
+            for message in state.conversation_log
+            if message.speaker == "P0" and "村人CO" in message.content
+        ]
+    ) == 1
+    assert [
+        message.content
+        for message in state.conversation_log
+        if message.speaker == "P0" and message.content.startswith("根拠")
+    ] == ["根拠1を確認します。", "根拠2を確認します。", "根拠3を確認します。"]
+    assert sum(event["type"] == "duplicate_claim_suppressed" for event in events) == 2
+    assert state.claim_ledger.public_claims["P0"].first_published_turn == 1
+
+
+def test_new_seer_result_and_explicit_correction_update_claim_ledger() -> None:
+    state = make_state(Role.SEER, Role.WOLF, Role.VILLAGER)
+
+    class CorrectingSeerActions(MockActions):
+        discussion_claim_mode = "all"
+
+        def should_stage_discussion_claim(self, player):
+            return player == "P0"
+
+        def choose_discussion_claim(self, player, day, alive, history):
+            if state.discussion_turn == 3:
+                return (
+                    "【CO】占い師CO：訂正\n"
+                    "【結果】対象=P1 判定=人間"
+                )
+            return "【CO】占い師CO\n【結果】対象=P1 判定=人狼"
+
+        def discuss_body(self, player, day, alive, history):
+            return f"{player}は公開記録を確認します。"
+
+    events: list[dict[str, object]] = []
+    GameEngine(
+        state,
+        CorrectingSeerActions(),
+        event_callback=events.append,
+    ).run_discussion()
+
+    assert state.claim_ledger.public_seer_results[("P0", "P1")] == "human"
+    assert state.public_role_claims[-1].reason == "訂正"
+    claim = state.claim_ledger.public_claims["P0"]
+    assert (claim.first_published_turn, claim.latest_published_turn) == (1, 3)
+    assert claim.updateable
+    assert sum(event["type"] == "claim_role_published" for event in events) == 1
+    assert sum(event["type"] == "duplicate_claim_suppressed" for event in events) == 2
+    assert sum(event["type"] == "seer_result_corrected" for event in events) == 1
+    assert sum(
+        message.speaker == "P0" and "占い師CO" in message.content
+        for message in state.conversation_log
+    ) == 1
+    assert any(
+        message.speaker == "P0" and "【結果】対象=P1 判定=人間" in message.content
+        for message in state.conversation_log
+    )
+
+
+def test_seer_candidates_exclude_self_dead_and_previously_scanned_targets() -> None:
+    state = make_state(
+        Role.SEER, Role.WOLF, Role.VILLAGER, Role.VILLAGER, Role.VILLAGER
+    )
+    state.mark_dead("P1")
+    state.seer_results["P2"] = "human"
+
+    class InvalidChoiceActions(MockActions):
+        seen_candidates = ()
+
+        def choose_seer_target(self, seer, candidates, results):
+            self.seen_candidates = candidates
+            return seer
+
+    actions = InvalidChoiceActions()
+    engine = GameEngine(state, actions)
+    engine.run_seer_phase()
+
+    assert actions.seen_candidates == ("P3", "P4")
+    assert state.action_candidate_sets["seer"].candidates == ("P3", "P4")
+    assert state.seer_results == {"P2": "human", "P3": "human"}
+    before, after = state.ledger_snapshots
+    assert before.boundary == "before"
+    assert after.boundary == "after"
+    assert before.seer_results == after.seer_results == (("P2", "human"),)
+    assert before.public_claims == after.public_claims == ()
 
 
 @pytest.mark.parametrize(
