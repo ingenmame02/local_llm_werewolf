@@ -164,6 +164,8 @@ def test_game_logger_aggregates_retries_fallbacks_and_latency_by_model(tmp_path:
         "thinking_enabled_requests": 1,
         "thinking_capability_fallbacks": 0,
         "thinking_budget_fallbacks": 0,
+        "secret_leak_count": 0,
+        "secret_leak_actions": {},
     }
 
 
@@ -462,12 +464,17 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
     expect_private_log: bool,
 ) -> None:
     private_wolf_text = "WOLF_PRIVATE_MARKER"
+    secret_leak_text = "私が占い師を騙っている設定上、P2を疑います。"
     attack_response = "ATTACK_RAW_RESPONSE_MARKER"
     seer_response = "SEER_RAW_RESPONSE_MARKER"
     vote_response = "VOTE_RAW_RESPONSE_MARKER"
+    discussion_calls = 0
 
     def mock_chat(self, model, messages, options=None, tools=None):
+        nonlocal discussion_calls
         prompt = messages[-1]["content"]
+        if "安全再要求" in prompt:
+            return "P2さんの発言をもう一度確認したいです。"
         if "これまでの相談内容" in prompt:
             return private_wolf_text
         if "襲撃対象：" in prompt:
@@ -483,6 +490,10 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
         if "選択可能な候補:" in prompt:
             line = next(line for line in prompt.splitlines() if "選択可能な候補:" in line)
             return f"{vote_response}\n投票：{line.split(':', 1)[1].split(',', 1)[0].strip()}"
+        if "【本文】議論本文" in prompt:
+            discussion_calls += 1
+            if discussion_calls == 1:
+                return secret_leak_text
         return "公開発言です。PUBLIC_DAY_SPEECH"
 
     monkeypatch.setattr(OllamaClient, "ping", lambda self: True)
@@ -505,10 +516,12 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
         argv.append(private_option)
 
     assert run_cli_game(build_parser().parse_args(argv)) == 0
+    assert discussion_calls >= 1
 
     output = capsys.readouterr().out
     assert "[Day 2][夜・人狼相談][Player " in output
     assert "応答待ち..." in output
+    assert secret_leak_text not in output
     assert "PUBLIC_DAY_SPEECH" in output
     assert (private_wolf_text in output) is show_private
 
@@ -517,6 +530,7 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
         if not path.name.endswith(".private.jsonl")
     )
     public_text = public_log.read_text(encoding="utf-8")
+    assert secret_leak_text not in public_text
     records = [
         json.loads(line)
         for line in public_text.splitlines()
@@ -528,6 +542,7 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
     assert "partner" not in records[-1]["players"][0]
     assert "wolf_chat_log" not in records[-1]
     assert "seer_results" not in records[-1]
+    assert records[-1]["ledger_metrics"]["secret_leaks_detected"] >= 1
     public_attack = next(
         record for record in records if record["type"] == "action_pending_attack"
     )
@@ -552,6 +567,7 @@ def test_ollama_cli_streams_ordered_action_events_and_gates_private_text(
         secret not in public_text
         for secret in (
             private_wolf_text,
+            secret_leak_text,
             attack_response,
             seer_response,
             vote_response,

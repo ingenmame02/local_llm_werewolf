@@ -2,13 +2,14 @@ import random
 import re
 import time
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Callable
 
 from .action_parser import ActionKind, ActionParser
 from .engine import (
     ActionPolicy,
+    diagnose_discussion_body,
     extract_public_role_claim,
     extract_public_seer_result,
     is_public_seer_claim,
@@ -26,6 +27,7 @@ from .config import (
     THINKING_NUM_PREDICT_SOURCE,
 )
 from .discussion_format import (
+    extract_discussion_body,
     has_discussion_output_markers,
     parse_discussion_claim,
     parse_discussion_output,
@@ -33,6 +35,7 @@ from .discussion_format import (
 from .models import GameState, Message, Player, PublicRoleClaim, PublicSeerClaim, Role
 from .ollama import CLAIM_ROLE_TOOL, ChatResponse, OllamaClient, OllamaError, ToolCall
 from .prompts import PromptBuilder, PromptContext, ROLE_NAMES_JA
+from .secret_leak_guard import LeakFinding, SecretLeakGuard
 
 _THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 _UNCLOSED_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
@@ -241,6 +244,39 @@ class ActionTrace:
     failure_reasons: tuple[str, ...] = ()
     response_metadata: tuple[dict[str, str | int | bool | None], ...] = ()
     content_preserved: bool = False
+    # TASK-034: フォールバックとは別に、本文保持・修復・安全フォールバックの内訳を記録する。
+    recovered_content: bool = False
+    repair_applied: bool = False
+    fatal_safety_fallback: bool = False
+    validation_severity: str = "ok"
+
+
+@dataclass
+class ModelDiscussionMetrics:
+    """モデル別の議論本文品質メトリクス。形式弱モデルの判定と予算調整に使う。"""
+
+    model: str
+    calls: int = 0
+    extraction_success: int = 0
+    format_compliant: int = 0
+    failure_reasons: dict[str, int] = field(default_factory=dict)
+    input_token_counts: list[int] = field(default_factory=list)
+    output_token_counts: list[int] = field(default_factory=list)
+    post_retry_success: int = 0
+    fallbacks: int = 0
+    fatal_safety_fallbacks: int = 0
+
+    @property
+    def extraction_success_rate(self) -> float:
+        return self.extraction_success / max(1, self.calls)
+
+    @property
+    def format_compliance_rate(self) -> float:
+        return self.format_compliant / max(1, self.calls)
+
+    @property
+    def fallback_rate(self) -> float:
+        return self.fallbacks / max(1, self.calls)
 
 
 class OllamaActions(ActionPolicy):
@@ -262,10 +298,12 @@ class OllamaActions(ActionPolicy):
             "full_transcript",
             "structured_ledger",
             "hybrid_retrieval",
+            "round_transcript_memory",
         }:
             raise ValueError(
                 "context_strategy must be 'full_transcript', "
-                "'structured_ledger', or 'hybrid_retrieval'."
+                "'structured_ledger', 'hybrid_retrieval', or "
+                "'round_transcript_memory'."
             )
         self.state = state
         self.client = client
@@ -276,6 +314,9 @@ class OllamaActions(ActionPolicy):
         self._rng = random.Random(state.seed if seed is None else seed)
         self.traces: list[ActionTrace] = []
         self._seer_info_used_day: dict[str, int] = {}
+        # TASK-034: モデル別の議論本文メトリクス・形式弱モデル判定。
+        self._discussion_metrics: dict[str, ModelDiscussionMetrics] = {}
+        self._discussion_format_weak_models: set[str] = set()
 
     def wolf_discuss(
         self, wolf: str, partner: str, history: tuple[Message, ...]
@@ -440,10 +481,10 @@ class OllamaActions(ActionPolicy):
             recent_messages=history,
             budget_key="co_correction",
         )
-        decision = parse_discussion_claim(response)
-        if decision is None:
-            return self._deterministic_discussion_claim(actor) or "【CO】なし"
         return response
+
+    def deterministic_discussion_claim(self, player: str) -> str:
+        return self._deterministic_discussion_claim(self._player(player)) or "【CO】なし"
 
     def discuss_body(
         self,
@@ -454,6 +495,7 @@ class OllamaActions(ActionPolicy):
     ) -> str:
         actor = self._player(player)
         started_at = self._start_action("discussion_body", actor)
+        round_transcript = tuple(self.state.current_round_transcript)
         prompt_ctx = PromptBuilder.build_discussion_prompt(
             actor=actor,
             alive_players=alive,
@@ -461,9 +503,11 @@ class OllamaActions(ActionPolicy):
             day=day,
             state=self.state,
             include_claim=False,
-            context_strategy=self.context_strategy,
+            context_strategy=actor.context_strategy or self.context_strategy,
+            free_form_priority=actor.model in self._discussion_format_weak_models,
         )
-        return self._free_text_with_context(
+        # ステージ1: 通常要求。_free_text_with_context 内で1回の意味的再試行まで行う。
+        body = self._free_text_with_context(
             "discussion_body",
             actor,
             prompt_ctx,
@@ -473,6 +517,112 @@ class OllamaActions(ActionPolicy):
             budget_key="discussion",
             context_diagnostics=prompt_ctx.diagnostics,
         )
+        # TASK-034: 本文抽出＋重大度診断＋段階的処理。
+        # 本文が存在する場合はパスへ置換せず情報を保持。空または致命的違反のみ安全フォールバック。
+        extracted = extract_discussion_body(body)
+        previous_message = round_transcript[-1] if round_transcript else None
+        diagnosis = diagnose_discussion_body(
+            extracted,
+            actor,
+            self.state,
+            previous_message=previous_message,
+            round_transcript=round_transcript,
+        )
+        repair_applied = self._last_free_text_retries >= 1
+        fatal_safety_fallback = False
+        recovered_content = False
+
+        if diagnosis.fatal or extracted is None:
+            fatal_safety_fallback = diagnosis.fatal
+            final_body = "パス"
+        elif diagnosis.repairable and extracted and extracted.strip():
+            # 修復可能だが有用な本文あり：本文を保持し、すでに再試行で回収済みとみなす。
+            recovered_content = True
+            final_body = body
+        else:
+            # 警告または問題なし：本文をそのまま採用。
+            recovered_content = bool(extracted and extracted.strip())
+            final_body = body
+
+        self._record_discussion_body_metrics(
+            actor.model,
+            extracted,
+            diagnosis,
+            repair_applied,
+            fatal_safety_fallback,
+            final_body,
+        )
+        return final_body
+
+    def retry_after_secret_leak(
+        self,
+        player: str,
+        day: int,
+        alive: tuple[str, ...],
+        history: tuple[Message, ...],
+        leak_categories: tuple[str, ...],
+    ) -> str | None:
+        actor = self._player(player)
+        started_at = self._start_action("discussion_safety_retry", actor)
+        prompt_ctx = PromptBuilder.build_discussion_prompt(
+            actor=actor,
+            alive_players=alive,
+            conversation_history=history,
+            day=day,
+            state=self.state,
+            context_strategy=actor.context_strategy or self.context_strategy,
+        )
+        messages = [
+            {"role": "system", "content": prompt_ctx.system_prompt},
+            {
+                "role": "user",
+                "content": prompt_ctx.user_prompt
+                + "\n【安全再要求】\n"
+                "前の生成内容は使用せず、最初から短く作り直してください。"
+                "内部役職・陣営・相方・非公開情報・モデルや設定を明かさず、"
+                "公開情報だけに基づくゲーム内発言を返してください。"
+                "通常の公開COを行う場合はゲーム内主張としてだけ述べてください。"
+                "理由説明やメタ発言を含めず、議論本文を出力してください。\n"
+                f"検出分類（本文は非開示）：{', '.join(leak_categories)}",
+            },
+        ]
+        try:
+            response = self._chat(
+                actor,
+                messages,
+                action="discussion_safety_retry",
+                started_at=started_at,
+                request_number=1,
+                request_reason="secret_leak_safety_retry",
+                budget_key="discussion",
+                disable_thinking=True,
+            )
+        except OllamaError as error:
+            self._complete_action(
+                "discussion_safety_retry",
+                actor,
+                started_at,
+                semantic_retries=0,
+                transport_attempts=error.attempts,
+                fallback_used=True,
+                error=error,
+                failure_reason="secret_leak_retry_failed",
+                failure_reasons=("secret_leak_retry_failed",),
+            )
+            return None
+        metadata = response.to_metadata()
+        self._complete_action(
+            "discussion_safety_retry",
+            actor,
+            started_at,
+            semantic_retries=0,
+            transport_attempts=response.attempts,
+            fallback_used=False,
+            content=response.content,
+            response_metadata=metadata,
+            content_preserved=bool(response.content.strip()),
+        )
+        return response.content
 
     def vote(
         self, voter: str, candidates: tuple[str, ...], day: int, runoff: bool
@@ -802,6 +952,51 @@ class OllamaActions(ActionPolicy):
             f"候補から1名だけ選び、「{self._label(action)}：名前」の1行だけを返してください。"
         )
 
+    def _public_response_leak_findings(
+        self, action: str, actor: Player, content: str
+    ) -> tuple[LeakFinding, ...]:
+        if action not in {"discussion", "discussion_body", "discussion_claim"}:
+            return ()
+        structured = parse_discussion_output(content)
+        claim_text = ""
+        result_text = ""
+        if structured is not None:
+            claim_text = structured.claim
+            result_text = structured.result
+        elif action == "discussion_claim":
+            decision = parse_discussion_claim(content)
+            if decision is not None:
+                claim_text = decision.claim
+                result_text = decision.result
+        else:
+            claim_text = content
+            result_text = content
+        allowed_claim = extract_public_role_claim(claim_text) is not None
+        allowed_results: frozenset[tuple[str, str]] = frozenset()
+        if (
+            actor.role is Role.SEER
+            and extract_public_role_claim(claim_text) == Role.SEER.value
+        ):
+            result = extract_public_seer_result(
+                f"{claim_text}\n{result_text}",
+                tuple(player.name for player in self.state.players),
+            )
+            if (
+                result is not None
+                and self.state.seer_results.get(result[0]) == result[1]
+            ):
+                allowed_results = frozenset({result})
+        return SecretLeakGuard.inspect(
+            content,
+            actor,
+            self.state,
+            allowed_public_claim=(
+                allowed_claim
+                or SecretLeakGuard.allows_public_claim(content, actor)
+            ),
+            allowed_public_results=allowed_results,
+        )
+
     def _free_text_with_context(
         self,
         action: str,
@@ -826,24 +1021,40 @@ class OllamaActions(ActionPolicy):
         transport_attempts = 0
         last_response_issue: str | None = None
         failure_reasons: list[str] = []
+        # TASK-034: 直近の_free_text_with_context で意味的再試行が行われたかを呼び出し側で参照する。
+        self._last_free_text_retries = 0
         response_metadata_history: list[dict[str, str | int | bool | None]] = []
         last_spoken_result: tuple[str, str] | None = None
         last_soft_discussion: tuple[str, str, dict[str, str | int | bool | None]] | None = None
         for attempt in range(2):
+            # TASK-034: 再要求が行われたかをdiscussion_bodyの後処理で参照する。
+            self._last_free_text_retries = attempt
             is_co_correction = (
                 attempt
                 and action == "discussion"
                 and last_response_issue == "seer_result_without_claim"
             )
             is_light_retry = bool(attempt) and not is_co_correction
+            keeps_round_context = (
+                self.context_strategy == "round_transcript_memory"
+                or actor.context_strategy == "round_transcript_memory"
+            )
             user_prompt = (
                 self._seer_co_correction_prompt(actor, last_spoken_result)
                 if is_co_correction
-                else self._short_discussion_retry_prompt(
+                else (
+                    prompt_ctx.user_prompt
+                    + self._discussion_retry_instruction(
+                        action, actor, last_response_issue
+                    )
+                    + "\n現在ラウンドの全文と継続メモを維持したまま、問題箇所だけ修正してください。"
+                    if keeps_round_context
+                    else self._short_discussion_retry_prompt(
                     actor,
                     last_response_issue,
                     recent_messages,
                     body_only=action == "discussion_body",
+                    )
                 )
                 if is_light_retry and action in {"discussion", "discussion_body"}
                 else self._wolf_consult_light_retry_prompt(
@@ -868,7 +1079,8 @@ class OllamaActions(ActionPolicy):
                 actor,
                 attempt_budget_key,
                 escalated=generation_escalation,
-                thinking_off=attempt == 1,
+                thinking_off=attempt == 1
+                and last_response_issue in GENERATION_ISSUE_REASONS,
             )
             messages = [
                 {"role": "system", "content": prompt_ctx.system_prompt},
@@ -895,9 +1107,12 @@ class OllamaActions(ActionPolicy):
                     ),
                     tool_based=(action == "discussion"),
                     budget_key=attempt_budget_key,
-                    # 再要求（CO補正・軽い再要求）は短い必須項目だけを求めるため、
-                    # 思考をoffにして思考トークンの消費による再失敗を防ぐ。
-                    disable_thinking=attempt == 1,
+                    # TASK-034: 思考オフは生成上限（generation limit等）に限定し、
+                    # 意味検証失敗では思考を維持する。
+                    disable_thinking=(
+                        attempt == 1
+                        and last_response_issue in GENERATION_ISSUE_REASONS
+                    ),
                 )
             except OllamaError as error:
                 last_error = error
@@ -963,6 +1178,44 @@ class OllamaActions(ActionPolicy):
             raw_responses.append(chat_response.content)
             response_text = self._final_response(chat_response.content).strip()
             is_pass = self._is_pass(response_text)
+            leak_findings = self._public_response_leak_findings(
+                action, actor, response_text
+            )
+            leak_findings = tuple(
+                finding
+                for finding in leak_findings
+                if finding.category != "hidden_result_leak"
+            )
+            if leak_findings:
+                self.traces.append(
+                    ActionTrace(
+                        action,
+                        actor.name,
+                        tuple(raw_responses),
+                        (),
+                        None,
+                        False,
+                        failure_reasons=tuple(failure_reasons),
+                        response_metadata=tuple(response_metadata_history),
+                        content_preserved=True,
+                    )
+                )
+                self._complete_action(
+                    action,
+                    actor,
+                    started_at,
+                    attempt,
+                    transport_attempts,
+                    False,
+                    content=response_text,
+                    failure_reasons=tuple(failure_reasons),
+                    content_preserved=True,
+                    recovered_content=False,
+                    repair_applied=self._last_free_text_retries >= 1,
+                    fatal_safety_fallback=False,
+                    validation_severity="ok",
+                )
+                return response_text
             must_use_seer_info = self._must_use_seer_info(action, actor)
             uses_seer_info = self._references_seer_result(actor, response_text)
             holds_human_seer_result = self._holds_human_seer_result(
@@ -3309,6 +3562,10 @@ class OllamaActions(ActionPolicy):
         failure_reasons: tuple[str, ...] = (),
         response_metadata: dict[str, str | int | bool | None] | None = None,
         content_preserved: bool = False,
+        recovered_content: bool = False,
+        repair_applied: bool = False,
+        fatal_safety_fallback: bool = False,
+        validation_severity: str = "ok",
     ) -> None:
         self._emit(
             "llm_action_completed",
@@ -3322,6 +3579,10 @@ class OllamaActions(ActionPolicy):
             + max(0, transport_attempts - (semantic_retries + 1)),
             fallback_used=fallback_used,
             content_preserved=content_preserved,
+            recovered_content=recovered_content,
+            repair_applied=repair_applied,
+            fatal_safety_fallback=fatal_safety_fallback,
+            validation_severity=validation_severity,
             selected_target=selected_target,
             content=content,
             error=error.to_dict() if error is not None else None,

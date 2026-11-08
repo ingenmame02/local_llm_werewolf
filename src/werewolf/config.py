@@ -304,10 +304,12 @@ def load_player_configs(
             "full_transcript",
             "structured_ledger",
             "hybrid_retrieval",
+            "round_transcript_memory",
         }:
             raise ValueError(
                 f"Player context_strategy at index {index} must be "
-                "'full_transcript', 'structured_ledger', or 'hybrid_retrieval'."
+                "'full_transcript', 'structured_ledger', 'hybrid_retrieval', "
+                "or 'round_transcript_memory'."
             )
         if timeout is not None and (
             not isinstance(timeout, (int, float))

@@ -70,6 +70,7 @@ class Player:
             "full_transcript",
             "structured_ledger",
             "hybrid_retrieval",
+            "round_transcript_memory",
         }:
             raise ValueError("Player context_strategy is not supported.")
         if self.timeout is not None and (
@@ -195,7 +196,21 @@ class ReasoningMemo:
     unresolved_questions: list[str] = field(default_factory=list)
     next_targets: list[str] = field(default_factory=list)
     private_role_facts: list[str] = field(default_factory=list)
+    current_round_evidence: list[str] = field(default_factory=list)
+    integrity_alerts: list[str] = field(default_factory=list)
     updates: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class IntegrityAlert:
+    """A public-safety or consistency alert without exposing secret content."""
+
+    day: int
+    discussion_turn: int
+    speaker: str
+    category: str
+    speech_id: int
+    summary: str
 
 
 @dataclass(frozen=True)
@@ -259,6 +274,8 @@ class GameState:
     model_capabilities: dict[str, dict[str, bool]] = field(default_factory=dict)
     reasoning_memos: dict[str, ReasoningMemo] = field(default_factory=dict)
     reasoning_memory_enabled: bool = True
+    current_round_transcript: list[Message] = field(default_factory=list)
+    integrity_alerts: list[IntegrityAlert] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.day < 0:
@@ -301,6 +318,34 @@ class GameState:
         if not player.is_alive:
             raise ValueError(f"Player is already dead: {player_name}")
         player.is_alive = False
+
+    def append_discussion_message(self, message: Message) -> None:
+        """Append a public discussion message and mirror it into the live round."""
+        self.conversation_log.append(message)
+        if message.speaker != "system" and self.phase is Phase.DAY_DISCUSSION:
+            self.current_round_transcript.append(message)
+
+    def begin_discussion_turn(self) -> None:
+        self.current_round_transcript = []
+
+    def add_integrity_alert(
+        self,
+        *,
+        speaker: str,
+        category: str,
+        speech_id: int,
+        summary: str,
+    ) -> None:
+        alert = IntegrityAlert(
+            day=self.day,
+            discussion_turn=self.discussion_turn,
+            speaker=speaker,
+            category=category,
+            speech_id=speech_id,
+            summary=summary,
+        )
+        if alert not in self.integrity_alerts:
+            self.integrity_alerts.append(alert)
 
     def refresh_reasoning_memos(self) -> None:
         """Refresh actor-specific notes using public state and actor-owned secrets only."""
@@ -407,6 +452,21 @@ class GameState:
             elif player.role is Role.WOLF and player.partner is not None:
                 private_facts = [f"[private_wolf_partner] {player.partner}"]
 
+            current_round_objects = {
+                id(message) for message in self.current_round_transcript
+            }
+            current_round_evidence = [
+                f"[speech:{speech_id}] {message.speaker}: {message.content}"
+                for speech_id, message in speech_records
+                if id(message) in current_round_objects
+                and message.speaker != player.name
+            ][-12:]
+            integrity_alerts = [
+                f"[speech:{alert.speech_id}] {alert.speaker}: {alert.category} - {alert.summary}"
+                for alert in self.integrity_alerts
+                if alert.speaker != player.name
+            ][-8:]
+
             previous = self.reasoning_memos.get(player.name)
             current_parts = {
                 "confirmed_facts": public_facts,
@@ -415,6 +475,8 @@ class GameState:
                 "unresolved_questions": unresolved,
                 "next_targets": next_targets,
                 "private_role_facts": private_facts,
+                "current_round_evidence": current_round_evidence,
+                "integrity_alerts": integrity_alerts,
             }
             updates = (
                 ["推理メモを初期化"]

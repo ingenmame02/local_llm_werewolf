@@ -15,7 +15,20 @@ from .models import (
     PublicSeerClaim,
     Role,
 )
-from .discussion_format import parse_discussion_claim, parse_discussion_output
+from .discussion_format import (
+    SEVERITY_FATAL,
+    SEVERITY_OK,
+    SEVERITY_REPAIRABLE,
+    SEVERITY_WARNING,
+    DiscussionBodyDiagnosis,
+    extract_discussion_body,
+    find_repeated_topic,
+    is_pass_body,
+    parse_discussion_claim,
+    parse_discussion_output,
+    split_sentences,
+)
+from .secret_leak_guard import LeakFinding, SecretLeakGuard
 
 _CLAIMED_ROLE_NAMES = {
     "占い師": "seer",
@@ -95,6 +108,212 @@ def extract_public_seer_result(
     return None
 
 
+# 議論本文の検証を重大度別に扱うための分類。
+# 致命的：秘匿役職・未公開結果・狼仲間・システム情報の漏洩のみ。
+# 修復可能：質問順・死亡者参照・未知参照・重複・冗長さなど。
+_FATAL_REASONS = frozenset(
+    {
+        "secret_role_leak",
+        "secret_team_leak",
+        "hidden_result_leak",
+        "prompt_or_config_leak",
+        "seer_result_without_claim",
+        "empty_body",
+    }
+)
+_REPAIRABLE_REASONS = frozenset(
+    {
+        "dead_player_question",
+        "dead_player_action_target",
+        "unverified_dead_role",
+        "unverified_past_vote_reference",
+        "external_game_memory",
+        "invalid_target",
+        "repeated_discussion_topic",
+        "question_not_answered_first",
+    }
+)
+
+
+def _dead_player_names(state: GameState) -> frozenset[str]:
+    return frozenset(player.name for player in state.players if not player.is_alive)
+
+
+def _asks_question(text: str) -> bool:
+    return bool(re.search(r"[？?]|(?:教|聞|なぜ|どうして|何|誰|どこ|いつ)", text))
+
+
+def _references_dead_player(text: str, dead_names: frozenset[str]) -> bool:
+    return any(re.search(rf"{re.escape(name)}(?:さん)?", text) for name in dead_names)
+
+
+def _asserts_dead_role_as_fact(text: str, dead_names: frozenset[str]) -> bool:
+    for name in dead_names:
+        if re.search(
+            rf"{re.escape(name)}(?:さん)?\s*(?:は|が)\s*"
+            r"(?:人狼|狼|人間|占い師|村人|狂人)"
+            r"(?:です|だ|である|と思|だと|らしい|確定|本物|真の)",
+            text,
+        ):
+            return True
+    return False
+
+
+def _references_external_game_memory(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:過去のゲーム|前のゲーム|前回のゲーム|前にやった|別のゲーム|"
+            r"前世|前回の役職|学習|トレーニングデータ|研修|データセット)",
+            text,
+        )
+    )
+
+
+def _directly_addressed(text: str, previous_message: Message, actor_name: str) -> bool:
+    if previous_message is None or not previous_message.content:
+        return False
+    content = previous_message.content
+    return (
+        actor_name in content
+        or re.search(r"(?:あなた|君|君|お前)", content) is not None
+        or _asks_question(content)
+    )
+
+
+def _answers_previous_question(text: str, previous_content: str) -> bool:
+    """直前の質問に対する応答があるかを軽量に判定する。"""
+    if not text or not previous_content:
+        return False
+    important: list[str] = []
+    for sentence in split_sentences(previous_content):
+        important.extend(re.findall(r"Player \d+|[^\s。、,？?]+", sentence))
+    return any(token in text for token in important[:6])
+
+
+def _is_redundant_body(body: str, transcript: tuple[Message, ...]) -> bool:
+    return find_repeated_topic(body, transcript)
+
+
+def _has_published_seer_result(
+    state: GameState, claimant: str, target: str, result: str
+) -> bool:
+    return any(
+        claim.claimant == claimant
+        and claim.target == target
+        and claim.result == result
+        for claim in state.seer_claims
+    ) or (claimant, target) in state.claim_ledger.public_seer_results
+
+
+def diagnose_discussion_body(
+    body: str | None,
+    actor: Player,
+    state: GameState,
+    previous_message: Message | None = None,
+    round_transcript: tuple[Message, ...] = (),
+) -> DiscussionBodyDiagnosis:
+    """議論本文の違反を重大度別に診断する。
+
+    致命的違反（秘匿情報漏洩・未公開の占い結果CO欠落・空本文）は
+    安全フォールバックの対象とし、それ以外は修復可能または品質警告とする。
+    """
+    reasons: list[str] = []
+    fatal = repairable = warning = False
+
+    if body is None or not body.strip():
+        return DiscussionBodyDiagnosis(
+            SEVERITY_FATAL, ("empty_body",), True, False, False, False
+        )
+    stripped = body.strip()
+    if stripped == "パス":
+        return DiscussionBodyDiagnosis(
+            SEVERITY_OK, (), False, False, False, True
+        )
+
+    dead_names = _dead_player_names(state)
+
+    # 致命的：秘匿情報の漏洩（役職・陣営・非公開結果・システム情報）
+    findings = SecretLeakGuard.inspect(stripped, actor, state)
+    if findings:
+        reasons.extend(finding.category for finding in findings)
+        fatal = True
+
+    # 非公開の占い結果をCOなしで発言（真占い師の判定結果に限る）
+    if not fatal and actor.role is Role.SEER:
+        public_result = extract_public_seer_result(
+            stripped, tuple(player.name for player in state.players)
+        )
+        if (
+            public_result is not None
+            and not is_public_seer_claim(stripped)
+            and state.seer_results.get(public_result[0]) == public_result[1]
+            and not _has_published_seer_result(
+                state, actor.name, public_result[0], public_result[1]
+            )
+        ):
+            reasons.append("seer_result_without_claim")
+            fatal = True
+
+    if not fatal:
+        if _references_dead_player(stripped, dead_names):
+            if _asks_question(stripped) and any(
+                name in stripped for name in dead_names
+            ):
+                # 死亡者への質問・回答要求は修復対象
+                reasons.append("dead_player_question")
+                repairable = True
+            elif any(
+                re.search(
+                    rf"{re.escape(name)}\s*(?:を|が)\s*(?:占|襲|投|指|選|指定)",
+                    stripped,
+                )
+                for name in dead_names
+            ):
+                reasons.append("dead_player_action_target")
+                repairable = True
+            else:
+                warning = True
+                reasons.append("dead_player_mention")
+        elif _asserts_dead_role_as_fact(stripped, dead_names):
+            reasons.append("unverified_dead_role")
+            repairable = True
+        elif _references_external_game_memory(stripped):
+            reasons.append("external_game_memory")
+            repairable = True
+        elif (
+            previous_message is not None
+            and _directly_addressed(stripped, previous_message, actor.name)
+            and not _answers_previous_question(stripped, previous_message.content)
+        ):
+            reasons.append("question_not_answered_first")
+            repairable = True
+        elif find_repeated_topic(stripped, round_transcript):
+            reasons.append("repeated_discussion_topic")
+            repairable = True
+
+    if not fatal and not repairable and _is_redundant_body(stripped, round_transcript):
+        warning = True
+        reasons.append("discussion_redundancy")
+
+    severity = (
+        SEVERITY_FATAL
+        if fatal
+        else SEVERITY_REPAIRABLE
+        if repairable
+        else SEVERITY_WARNING
+        if warning
+        else SEVERITY_OK
+    )
+    return DiscussionBodyDiagnosis(
+        severity,
+        tuple(reasons),
+        fatal,
+        repairable,
+        warning,
+        publishable=not fatal,
+    )
+
+
 class ActionPolicy(Protocol):
     def wolf_discuss(
         self, wolf: str, partner: str, history: tuple[Message, ...]
@@ -157,6 +376,133 @@ class GameEngine:
         self.actions = actions
         self._rng = random.Random(state.seed if seed is None else seed)
         self.event_callback = event_callback
+
+    def _record_secret_leak(
+        self,
+        player: Player,
+        action: str,
+        content: str,
+        findings: tuple[LeakFinding, ...],
+        attempt: int,
+    ) -> None:
+        speech_id = sum(
+            message.speaker != "system"
+            for message in self.state.conversation_log
+        ) + 1
+        for category in sorted({finding.category for finding in findings}):
+            self.state.add_integrity_alert(
+                speaker=player.name,
+                category=category,
+                speech_id=speech_id,
+                summary="公開前に秘匿性ガードが検出したため内容は非公開",
+            )
+        if self.event_callback is None:
+            return
+        phase_labels = {
+            Phase.DAY_DISCUSSION: "昼・議論",
+        }
+        self.event_callback(
+            {
+                "type": "secret_role_leak_detected",
+                "day": self.state.day,
+                "phase": self.state.phase.value,
+                "phase_label": phase_labels.get(
+                    self.state.phase, self.state.phase.value
+                ),
+                "player": player.name,
+                "model": player.model,
+                "action": action,
+                "speech_id": speech_id,
+                "leak_categories": sorted({finding.category for finding in findings}),
+                "detection_rules": sorted({finding.rule_id for finding in findings}),
+                "content_sha256": SecretLeakGuard.content_hash(content),
+                "safety_retry": attempt,
+                "private": False,
+                "elapsed_seconds": 0.0,
+            }
+        )
+
+    def _authorized_public_results(
+        self, player_name: str, claim: str, result: str
+    ) -> frozenset[tuple[str, str]]:
+        player = next(player for player in self.state.players if player.name == player_name)
+        if (
+            player.role is not Role.SEER
+            or extract_public_role_claim(claim) != Role.SEER.value
+        ):
+            return frozenset()
+        parsed_result = extract_public_seer_result(
+            f"{claim}\n{result}",
+            tuple(player.name for player in self.state.players),
+        )
+        if (
+            parsed_result is None
+            or self.state.seer_results.get(parsed_result[0]) != parsed_result[1]
+        ):
+            return frozenset()
+        return frozenset({parsed_result})
+
+    def _guard_public_text(
+        self,
+        player_name: str,
+        action: str,
+        content: str,
+        history: tuple[Message, ...],
+        *,
+        allow_retry: bool = True,
+        allow_public_claim: bool = False,
+        allowed_public_results: frozenset[tuple[str, str]] = frozenset(),
+    ) -> str:
+        player = next(player for player in self.state.players if player.name == player_name)
+
+        def findings_for(text: str) -> tuple[LeakFinding, ...]:
+            return SecretLeakGuard.inspect(
+                text,
+                player,
+                self.state,
+                allowed_public_claim=(
+                    allow_public_claim
+                    or SecretLeakGuard.allows_public_claim(text, player)
+                ),
+                allowed_public_results=allowed_public_results,
+            )
+
+        findings = findings_for(content)
+        if not findings:
+            return content
+        self._record_secret_leak(player, action, content, findings, 0)
+
+        retry = getattr(self.actions, "retry_after_secret_leak", None)
+        if allow_retry and callable(retry):
+            candidate = retry(
+                player_name,
+                self.state.day,
+                tuple(self.state.alive_players),
+                history,
+                tuple(sorted({finding.category for finding in findings})),
+            )
+            if isinstance(candidate, str) and candidate.strip():
+                retry_findings = findings_for(candidate)
+                if not retry_findings:
+                    return candidate.strip()
+                self._record_secret_leak(
+                    player, action, candidate, retry_findings, 1
+                )
+                sanitized, _ = SecretLeakGuard.redact(
+                    candidate,
+                    player,
+                    self.state,
+                    allowed_public_results=allowed_public_results,
+                )
+                return sanitized
+
+        sanitized, _ = SecretLeakGuard.redact(
+            content,
+            player,
+            self.state,
+            allowed_public_results=allowed_public_results,
+        )
+        return sanitized
 
     def run(self) -> GameState:
         self.check_winner()
@@ -297,6 +643,7 @@ class GameEngine:
         self.state.phase = Phase.DAY_DISCUSSION
         for turn in range(1, 4):
             self.state.discussion_turn = turn
+            self.state.begin_discussion_turn()
             for player in self.state.players:
                 if not player.is_alive:
                     continue
@@ -337,10 +684,61 @@ class GameEngine:
                             tuple(self.state.alive_players),
                             tuple(self.state.conversation_log),
                         )
+                        decision = parse_discussion_claim(claim_response)
+                        authorized_results = (
+                            self._authorized_public_results(
+                                player.name, decision.claim, decision.result
+                            )
+                            if decision is not None
+                            else frozenset()
+                        )
+                        claim_response = self._guard_public_text(
+                            player.name,
+                            "discussion_claim",
+                            claim_response,
+                            tuple(self.state.conversation_log),
+                            allow_public_claim=(
+                                decision is not None
+                                and extract_public_role_claim(decision.claim)
+                                is not None
+                            ),
+                            allowed_public_results=authorized_results,
+                        )
+                        decision = parse_discussion_claim(claim_response)
+                        deterministic_claim = getattr(
+                            self.actions, "deterministic_discussion_claim", None
+                        )
+                        if decision is None and callable(deterministic_claim):
+                            claim_response = deterministic_claim(player.name)
+                            fallback_decision = parse_discussion_claim(claim_response)
+                            authorized_results = (
+                                self._authorized_public_results(
+                                    player.name,
+                                    fallback_decision.claim,
+                                    fallback_decision.result,
+                                )
+                                if fallback_decision is not None
+                                else frozenset()
+                            )
+                            claim_response = self._guard_public_text(
+                                player.name,
+                                "discussion_claim_fallback",
+                                claim_response,
+                                tuple(self.state.conversation_log),
+                                allow_retry=False,
+                                allow_public_claim=(
+                                    fallback_decision is not None
+                                    and extract_public_role_claim(
+                                        fallback_decision.claim
+                                    )
+                                    is not None
+                                ),
+                                allowed_public_results=authorized_results,
+                            )
+                            decision = parse_discussion_claim(claim_response)
                         self.state.snapshot_ledgers(
                             "after", "discussion_claim", player.name
                         )
-                        decision = parse_discussion_claim(claim_response)
                         if decision is not None and decision.claim not in {"なし", "保留"}:
                             public_claim = "\n".join(
                                 part
@@ -363,7 +761,7 @@ class GameEngine:
                             ):
                                 public_lines = []
                             if public_lines:
-                                self.state.conversation_log.append(
+                                self._append_discussion_message(
                                     Message(player.name, "\n".join(public_lines))
                                 )
                     self.state.snapshot_ledgers(
@@ -375,11 +773,62 @@ class GameEngine:
                         tuple(self.state.alive_players),
                         tuple(self.state.conversation_log),
                     )
+                    body = self._guard_public_text(
+                        player.name,
+                        "discussion_body",
+                        body,
+                        tuple(self.state.conversation_log),
+                    )
                     self.state.snapshot_ledgers(
                         "after", "discussion_body", player.name
                     )
+                    # TASK-034: 検証を重大度別に扱い、本文が存在する場合はパスへ置換せず情報を保持する。
+                    # 致命的違反（秘匿情報漏洩・未公開結果CO欠落）または空本文のみ安全フォールバックする。
+                    round_transcript = tuple(self.state.current_round_transcript)
+                    previous_message = round_transcript[-1] if round_transcript else None
+                    diagnosis = diagnose_discussion_body(
+                        body,
+                        player,
+                        self.state,
+                        previous_message=previous_message,
+                        round_transcript=round_transcript,
+                    )
+                    if diagnosis.fatal:
+                        self.state.add_integrity_alert(
+                            speaker=player.name,
+                            category=(
+                                diagnosis.reasons[0] if diagnosis.reasons else "discussion_invalid"
+                            ),
+                            speech_id=len(self.state.conversation_log) + 1,
+                            summary=(
+                                "本文が空または秘匿情報を含むため公開を差し止め、パスへ置換"
+                                if not body.strip()
+                                else "秘匿情報または未公開占い結果の検出によりパスへ置換"
+                            ),
+                        )
+                        body = "パス"
+                    elif diagnosis.repairable:
+                        self.state.add_integrity_alert(
+                            speaker=player.name,
+                            category=diagnosis.reasons[0] if diagnosis.reasons else "discussion_repair",
+                            speech_id=len(self.state.conversation_log) + 1,
+                            summary=(
+                                "議論本文を修復対象として保持: "
+                                + ",".join(diagnosis.reasons)
+                            ),
+                        )
+                    elif diagnosis.warning:
+                        self.state.add_integrity_alert(
+                            speaker=player.name,
+                            category=diagnosis.reasons[0] if diagnosis.reasons else "discussion_quality",
+                            speech_id=len(self.state.conversation_log) + 1,
+                            summary=(
+                                "議論本文の品質警告（公開保持）: "
+                                + ",".join(diagnosis.reasons)
+                            ),
+                        )
                     if body:
-                        self.state.conversation_log.append(Message(player.name, body))
+                        self._append_discussion_message(Message(player.name, body))
                         self._record_model_inference(player.name, body)
                 else:
                     self.state.snapshot_ledgers("before", "discussion", player.name)
@@ -388,6 +837,32 @@ class GameEngine:
                         self.state.day,
                         tuple(self.state.alive_players),
                         tuple(self.state.conversation_log),
+                    )
+                    structured_output = parse_discussion_output(content)
+                    claim_text = (
+                        structured_output.claim
+                        if structured_output is not None
+                        else content
+                    )
+                    result_text = (
+                        structured_output.result
+                        if structured_output is not None
+                        else content
+                    )
+                    allow_public_claim = (
+                        extract_public_role_claim(claim_text) is not None
+                        or SecretLeakGuard.allows_public_claim(content, player)
+                    )
+                    authorized_results = self._authorized_public_results(
+                        player.name, claim_text, result_text
+                    )
+                    content = self._guard_public_text(
+                        player.name,
+                        "discussion",
+                        content,
+                        tuple(self.state.conversation_log),
+                        allow_public_claim=allow_public_claim,
+                        allowed_public_results=authorized_results,
                     )
                     self.state.snapshot_ledgers("after", "discussion", player.name)
                     structured_output = parse_discussion_output(content)
@@ -401,7 +876,7 @@ class GameEngine:
                             else content
                         )
                         if body:
-                            self.state.conversation_log.append(
+                            self._append_discussion_message(
                                 Message(player.name, body)
                             )
                             self._record_model_inference(player.name, body)
@@ -426,7 +901,7 @@ class GameEngine:
                         if publication.duplicate_suppressed:
                             body = self._remove_duplicate_claim(body)
                         if body:
-                            self.state.conversation_log.append(
+                            self._append_discussion_message(
                                 Message(player.name, body)
                             )
                             self._record_model_inference(player.name, body)
@@ -775,6 +1250,24 @@ class GameEngine:
     def _emit_public_claim(self, event_type: str, **details: object) -> None:
         if self.event_callback is not None:
             self.event_callback({"type": event_type, **details})
+
+    def _append_discussion_message(self, message: Message) -> None:
+        """Append a public speech and emit it immediately for live UIs/loggers."""
+        self.state.append_discussion_message(message)
+        if self.event_callback is not None:
+            self.event_callback(
+                {
+                    "type": "discussion_message",
+                    "day": self.state.day,
+                    "phase": self.state.phase.value,
+                    "phase_label": "昼・議論",
+                    "speaker": message.speaker,
+                    "player": message.speaker,
+                    "action": "discussion",
+                    "private": False,
+                    "content": message.content,
+                }
+            )
 
     def _collect_votes(
         self,

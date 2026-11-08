@@ -92,6 +92,7 @@ class GameLogger:
             "ledger_repairs": 0,
             "duplicate_claims_suppressed": 0,
             "public_claim_updates": 0,
+            "secret_leaks_detected": 0,
             "llm_elapsed_seconds": 0.0,
             "discussion_context_selections": 0,
         }
@@ -173,6 +174,16 @@ class GameLogger:
                 if isinstance(strategy, str):
                     strategies = stats["context_strategy_counts"]
                     strategies[strategy] = strategies.get(strategy, 0) + 1
+        if event_type == "secret_role_leak_detected":
+            self._ledger_metrics["secret_leaks_detected"] += 1
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(
+                    model, self._new_model_stats()
+                )
+                stats["secret_leak_count"] += 1
+                leak_actions = stats["secret_leak_actions"]
+                if isinstance(action, str):
+                    leak_actions[action] = leak_actions.get(action, 0) + 1
         if (
             isinstance(model, str)
             and diagnostic_record.get("type") == "llm_action_parse_failed"
@@ -289,6 +300,8 @@ class GameLogger:
             "thinking_present_response_count": 0,
             "done_reason_counts": {},
             "context_strategy_counts": {},
+            "secret_leak_count": 0,
+            "secret_leak_actions": {},
             # 思考生成非対応と判明して think=off へ切り替えたモデルの数
             "thinking_capability_fallbacks": 0,
             # 思考が生成上限を消費して切り詰め、think=offへ自動切替した回数
@@ -379,6 +392,9 @@ class GameLogger:
             "seer_claims": [asdict(claim) for claim in state.seer_claims],
             "public_role_claims": [
                 asdict(claim) for claim in state.public_role_claims
+            ],
+            "integrity_alerts": [
+                asdict(alert) for alert in state.integrity_alerts
             ],
             "claim_ledger": {
                 "public_claims": [
@@ -481,6 +497,10 @@ class GameLogger:
             "ledger_snapshots": [
                 asdict(snapshot) for snapshot in state.ledger_snapshots
             ],
+            "reasoning_memos": {
+                name: asdict(memo)
+                for name, memo in state.reasoning_memos.items()
+            },
             "traces": private_traces_data,
         }
         self.append_record(public_summary, private_summary)
@@ -628,10 +648,6 @@ def run_cli_game(args: argparse.Namespace) -> int:
         }
         if event.get("error") is not None:
             public_event["error_occurred"] = True
-        if event.get("type") == "llm_action_completed" and event.get("action") == "discussion":
-            content = event.get("content")
-            if isinstance(content, str):
-                public_event["published_message"] = content
         logger.append_record(public_event, event)
         event_type = event["type"]
         day = event["day"]
@@ -726,8 +742,27 @@ def run_cli_game(args: argparse.Namespace) -> int:
             ):
                 print(f"  {label}: {event['selected_target']}", flush=True)
             content = event.get("content")
-            if content and (not private or show_private):
+            if (
+                content
+                and action not in {
+                    "discussion",
+                    "discussion_body",
+                    "discussion_claim",
+                    "discussion_safety_retry",
+                }
+                and (not private or show_private)
+            ):
                 print(f"  {player}: {content}", flush=True)
+
+    def on_engine_event(event: dict[str, object]) -> None:
+        """Persist engine events and display public speeches as they arrive."""
+        logger.append_record(event)
+        if event.get("type") == "discussion_message":
+            print(
+                f"  [{event.get('speaker', event.get('player', '?'))}]: "
+                f"{event.get('content', '')}",
+                flush=True,
+            )
 
     # クライアントとポリシーの設定
     client: OllamaClient | None = None
@@ -774,7 +809,7 @@ def run_cli_game(args: argparse.Namespace) -> int:
         state,
         actions,
         seed=args.seed,
-        event_callback=logger.append_record,
+        event_callback=on_engine_event,
     )
 
     def cleanup_and_exit(signum=None, frame=None):
@@ -861,18 +896,7 @@ def run_cli_game(args: argparse.Namespace) -> int:
 
             # 4. 昼フェーズ（議論）
             print_round_header(state.day, Phase.DAY_DISCUSSION, state.alive_players)
-            prev_log_len = len(state.conversation_log)
             engine.run_discussion()
-            new_msgs = state.conversation_log[prev_log_len:]
-            if not isinstance(actions, OllamaActions):
-                for msg in new_msgs:
-                    print(f"  [{msg.speaker}]: {msg.content}")
-                    logger.append_record({
-                        "type": "discussion_message",
-                        "day": state.day,
-                        "speaker": msg.speaker,
-                        "content": msg.content,
-                    })
 
             # 5. 投票フェーズ（処刑）
             prev_alive = set(state.alive_players)
@@ -1032,11 +1056,12 @@ def build_parser() -> argparse.ArgumentParser:
             "full_transcript",
             "structured_ledger",
             "hybrid_retrieval",
+            "round_transcript_memory",
         ),
         default="hybrid_retrieval",
         help=(
             "Discussion context: full public transcript, structured ledgers only, "
-            "or hybrid evidence retrieval (default)."
+            "hybrid evidence retrieval, or current-round transcript plus memory."
         ),
     )
     parser.add_argument(
