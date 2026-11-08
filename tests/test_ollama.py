@@ -1655,6 +1655,9 @@ def test_empty_generation_is_classified_and_retried_with_more_tokens(
         "eval_count": None,
         "eval_duration_ms": None,
         "prompt_eval_count": None,
+        "requested_num_ctx": None,
+        "effective_num_ctx": None,
+        "num_ctx_source": "ollama_service_default_or_environment",
     }
 
 

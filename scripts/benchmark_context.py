@@ -63,7 +63,10 @@ class ResourceSampler:
         while not self._stop.wait(self.interval_seconds):
             self._sample()
 
-    def _sample(self) -> None:
+    def sample_now(self) -> dict[str, int | float | None]:
+        return self._sample()
+
+    def _sample(self) -> dict[str, int | float | None]:
         sample: dict[str, int | float | None] = {
             "system_cpu_percent": None,
             "system_memory_available_bytes": None,
@@ -122,6 +125,7 @@ class ResourceSampler:
                 sample["gpu_utilization_percent"] = max(value[0] for value in readings)
                 sample["gpu_memory_used_mib"] = sum(value[1] for value in readings)
         self.samples.append(sample)
+        return sample
 
     def summary(self) -> dict[str, int | float | None]:
         result: dict[str, int | float | None] = {
@@ -162,6 +166,7 @@ def run_context_benchmark(
     model_filters: tuple[str, ...],
     action_types: tuple[str, ...],
     context_strategies: tuple[str, ...] = ("hybrid_retrieval",),
+    reasoning_memory_modes: tuple[bool, ...] = (False, True),
 ) -> list[dict[str, Any]]:
     all_configs = load_player_configs(models_file)
     configs = select_player_configs(all_configs, list(model_filters))
@@ -173,11 +178,12 @@ def run_context_benchmark(
     client = OllamaClient(base_url=base_url, timeout=timeout)
     reports: list[dict[str, Any]] = []
     configurations = [
-        (context_length, context_strategy)
+        (context_length, context_strategy, reasoning_memory)
         for context_length in contexts
         for context_strategy in context_strategies
+        for reasoning_memory in reasoning_memory_modes
     ]
-    for context_length, context_strategy in configurations:
+    for context_length, context_strategy, reasoning_memory in configurations:
         sampler = ResourceSampler()
         sampler.start()
         model_records: dict[str, list[dict[str, Any]]] = {
@@ -193,7 +199,10 @@ def run_context_benchmark(
                     response_language=config.response_language,
                 )
                 for scenario in generate_scenarios(
-                    actor, player_names, context_strategy
+                    actor,
+                    player_names,
+                    context_strategy,
+                    reasoning_memory=reasoning_memory,
                 ):
                     if scenario.action_type not in action_types:
                         continue
@@ -210,6 +219,8 @@ def run_context_benchmark(
                             "num_ctx": context_length,
                         },
                     )
+                    diagnostic = client.context_diagnostics(config.model)
+                    memory_usage = sampler.sample_now()
                     model_records[config.model].append(
                         {
                             "round": round_index,
@@ -220,6 +231,10 @@ def run_context_benchmark(
                             "parse_success": result["is_parse_valid"],
                             "fallback_used": result["fallback_used"],
                             "elapsed_seconds": result["elapsed_seconds"],
+                            "requested_num_ctx": context_length,
+                            "effective_num_ctx": diagnostic["ollama_ps_context"],
+                            "num_ctx_source": "benchmark_request",
+                            "reasoning_memory_enabled": reasoning_memory,
                             "retry_count": result["retry_count"],
                             "request_attempts": result["request_attempts"],
                             "num_predict": result["num_predict"],
@@ -227,7 +242,6 @@ def run_context_benchmark(
                                 "num_predict_by_attempt"
                             ],
                             "failure_reasons": result["failure_reasons"],
-                            "done_reason": result["done_reason"],
                             "thinking_present": result["thinking_present"],
                             "question_expected": scenario.question_expected,
                             "question_answered": result["question_answered"],
@@ -241,7 +255,11 @@ def run_context_benchmark(
                             "context_diagnostics": scenario.prompt_ctx.diagnostics,
                             "prompt_chars": prompt_char_count,
                             "input_tokens": result["prompt_eval_count"],
+                            "prompt_eval_count": result["prompt_eval_count"],
                             "output_tokens": result["eval_count"],
+                            "output_token_count": result["eval_count"],
+                            "done_reason": result["done_reason"],
+                            "memory_usage": memory_usage,
                             "context_length": context_length,
                             "error_kind": (
                                 result["error"].get("kind")
@@ -336,6 +354,7 @@ def run_context_benchmark(
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
                 "num_ctx_request": context_length,
                 "context_strategy": context_strategy,
+                "reasoning_memory_enabled": reasoning_memory,
                 "model_filters": list(model_filters),
                 "action_types": list(action_types),
                 "rounds": rounds,
@@ -350,12 +369,20 @@ def run_context_benchmark(
         )
     reference_context = min(contexts)
     reports_by_configuration = {
-        (report["context_strategy"], report["num_ctx_request"]): report
+        (
+            report["context_strategy"],
+            report["reasoning_memory_enabled"],
+            report["num_ctx_request"],
+        ): report
         for report in reports
     }
     for report in reports:
         reference = reports_by_configuration.get(
-            (report["context_strategy"], reference_context)
+            (
+                report["context_strategy"],
+                report["reasoning_memory_enabled"],
+                reference_context,
+            )
         )
         report["context_adoption_criteria"] = CONTEXT_ADOPTION_CRITERIA
         if reference is None or report["num_ctx_request"] == reference_context:
@@ -483,6 +510,12 @@ def main() -> int:
         ],
     )
     parser.add_argument(
+        "--reasoning-memory",
+        choices=("off", "on", "both"),
+        default="both",
+        help="Compare without/with deterministic player reasoning memos.",
+    )
+    parser.add_argument(
         "--models",
         action="append",
         required=True,
@@ -508,6 +541,11 @@ def main() -> int:
     if len(args.models) > 2:
         parser.error("Use at most two --models filters for the context pilot.")
     action_types = tuple(args.actions or ["discussion"])
+    reasoning_memory_modes = (
+        (False, True)
+        if args.reasoning_memory == "both"
+        else (args.reasoning_memory == "on",)
+    )
     if psutil is None:
         print(
             "注意: psutilがありません。CPU/メモリ使用量は未計測です。"
@@ -524,6 +562,7 @@ def main() -> int:
         tuple(args.models),
         action_types,
         tuple(args.context_strategies),
+        reasoning_memory_modes,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("a", encoding="utf-8") as output_file:

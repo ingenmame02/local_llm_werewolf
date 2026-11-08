@@ -358,6 +358,7 @@ def generate_scenarios(
     actor: Player,
     all_player_names: tuple[str, ...],
     context_strategy: str = "hybrid_retrieval",
+    reasoning_memory: bool = False,
 ) -> list[PromptTestScenario]:
     """Generates standard benchmark scenarios for 4 actions: discussion, vote, attack, seer."""
     scenarios: list[PromptTestScenario] = []
@@ -394,6 +395,14 @@ def generate_scenarios(
         ),
     )
     discussion_state = create_game(seed=42)
+    discussion_state.reasoning_memory_enabled = reasoning_memory
+    state_actor = next(
+        (player for player in discussion_state.players if player.name == actor.name),
+        None,
+    )
+    if state_actor is not None:
+        state_actor.role = actor.role
+        state_actor.partner = actor.partner
     discussion_state.day = 2
     discussion_state.vote_history.append((1, False, {questioner: vote_target}))
     dead_names = tuple(
@@ -427,6 +436,8 @@ def generate_scenarios(
             description=f"{questioner} voted for {vote_target}.",
         )
     )
+    if reasoning_memory:
+        discussion_state.refresh_reasoning_memos()
     prior_signals = extract_discussion_signals(
         "\n".join(
             message.content

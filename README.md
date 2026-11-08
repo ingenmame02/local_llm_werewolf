@@ -18,6 +18,7 @@ $env:OLLAMA_CONTEXT_LENGTH="8192"
 
 
 $env:OLLAMA_NUM_PARALLEL="1"
+$env:OLLAMA_KEEP_ALIVE = "5m"
 ollama serve
 
 `--num-ctx`は省略時、Ollama APIリクエストには含まれず、サーバー／モデル側の既定値が使われます。現在の`config/players.json`では全プレイヤーの`num_ctx`を12288に設定しているため、プレイヤーごとのAPI要求へ明示されます。プレイヤー別`num_ctx`はCLIの`--num-ctx`より優先されます。
@@ -58,6 +59,16 @@ python scripts/benchmark_context.py --context-lengths 4096 8192 --rounds 2
 結果は`evaluation-results/context-benchmark.jsonl`に保存されます。GPU使用率とVRAMは`nvidia-smi`対応GPUがある場合に記録されます。`ollama ps`のPROCESSORはCPU/GPUへのロード割当であり、使用率そのものではありません。Modelfile設定やサーバー環境変更後はモデルを再ロードし、実際のCONTEXTとPROCESSORを確認してください。
 
 TASK-030では会話コンテキストを`full_transcript`（公開会話全文）、`structured_ledger`（台帳と現在の質問）、`hybrid_retrieval`（直近発言と関連発言。既定）から選べます。比較ベンチマークは同一の固定シナリオ・生成設定でコンテキスト長と戦略を組み合わせ、質問回答率、新しい根拠カテゴリの有無、投票意向の具体性、再試行・フォールバック、入出力トークン、処理時間、CPU/RAM/GPU/VRAMをJSONLに記録します。コンテキスト拡大による改善・残存・新規失敗も比較します。32k以上を採用する基準は事前に固定し、最低10件の議論で質問回答率・新根拠カテゴリ率・投票意向具体率のいずれかが10ポイント以上改善、解析成功率が悪化せず、平均応答時間の増加が25%以内の場合に限ります。`thinking_present`は記録しますが、Ollama応答から思考トークンだけを分離して正確に数える値は取得できません。
+
+TASK-031では、プレイヤー設定の`num_ctx`（要求値）、`max_num_ctx`、`recommended_num_ctx`、`context_strategy`でモデル別の運用値を指定できます。実効値は`/api/ps`から取得できた場合のみ記録し、取得できない場合は未計測のままです。議論プロンプトにはゲームエンジンが公開台帳・投票・発言IDから決定的に更新したプレイヤー別推理メモを付けます。狼相談や占い師本人の結果は本人専用のメモ領域に分離し、他プレイヤーへ共有しません。
+
+コンテキストベンチマークは既定で推理メモoff/onを別条件として比較します。既存の比較コマンドを一度だけ実行する場合は`--reasoning-memory off`または`--reasoning-memory on`を指定してください。出力JSONLの各試行には要求・実効`num_ctx`、トークン数、終了理由、応答時間、メモリサンプルが記録されます。
+
+例としてCALM3のハイブリッド履歴を、8k／12k／16k要求と推理メモoff/onで各10件比較します。32k条件を追加する場合は、JSONLの`effective_num_ctx`が実際に32768となる環境でのみ評価してください。
+
+```powershell
+python scripts\benchmark_context.py --models werewolf-calm3-22b-8k --context-lengths 8192 12288 16384 --context-strategies hybrid_retrieval --reasoning-memory both --rounds 10 --actions discussion --output evaluation-results\task031-calm3-memory-r10.jsonl
+```
 
 ```powershell
 ollama create werewolf-calm3-22b-32k -f modelfiles\calm3-22b-32k.Modelfile

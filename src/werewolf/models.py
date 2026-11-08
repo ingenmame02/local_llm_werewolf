@@ -37,6 +37,9 @@ class Player:
     thinking: bool | None = None
     thinking_by_action: Mapping[str, bool] | None = None
     personality_profile: str = "balanced"
+    max_num_ctx: int | None = None
+    recommended_num_ctx: int | None = None
+    context_strategy: str | None = None
 
     def __post_init__(self) -> None:
         if self.num_ctx is not None and (
@@ -45,6 +48,30 @@ class Player:
             or self.num_ctx <= 0
         ):
             raise ValueError("Player num_ctx must be a positive integer.")
+        for key, context_value in (
+            ("max_num_ctx", self.max_num_ctx),
+            ("recommended_num_ctx", self.recommended_num_ctx),
+        ):
+            if context_value is not None and (
+                not isinstance(context_value, int)
+                or isinstance(context_value, bool)
+                or context_value <= 0
+            ):
+                raise ValueError(f"Player {key} must be a positive integer.")
+        if (
+            self.max_num_ctx is not None
+            and self.recommended_num_ctx is not None
+            and self.recommended_num_ctx > self.max_num_ctx
+        ):
+            raise ValueError(
+                "Player recommended_num_ctx cannot exceed max_num_ctx."
+            )
+        if self.context_strategy is not None and self.context_strategy not in {
+            "full_transcript",
+            "structured_ledger",
+            "hybrid_retrieval",
+        }:
+            raise ValueError("Player context_strategy is not supported.")
         if self.timeout is not None and (
             not isinstance(self.timeout, (int, float))
             or isinstance(self.timeout, bool)
@@ -160,6 +187,17 @@ class FactLedger:
     model_inferences: list[LedgerFact] = field(default_factory=list)
 
 
+@dataclass
+class ReasoningMemo:
+    confirmed_facts: list[str] = field(default_factory=list)
+    public_claims: list[str] = field(default_factory=list)
+    suspicion_ranking: list[str] = field(default_factory=list)
+    unresolved_questions: list[str] = field(default_factory=list)
+    next_targets: list[str] = field(default_factory=list)
+    private_role_facts: list[str] = field(default_factory=list)
+    updates: list[str] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class ActionCandidateSet:
     action: str
@@ -219,6 +257,8 @@ class GameState:
     ledger_snapshots: list[LedgerSnapshot] = field(default_factory=list)
     # ゲーム中に判明したモデル能力（例：{"model-x": {"claim_role_tool": False}}）。
     model_capabilities: dict[str, dict[str, bool]] = field(default_factory=dict)
+    reasoning_memos: dict[str, ReasoningMemo] = field(default_factory=dict)
+    reasoning_memory_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.day < 0:
@@ -261,6 +301,134 @@ class GameState:
         if not player.is_alive:
             raise ValueError(f"Player is already dead: {player_name}")
         player.is_alive = False
+
+    def refresh_reasoning_memos(self) -> None:
+        """Refresh actor-specific notes using public state and actor-owned secrets only."""
+        public_facts = [
+            f"[fact:{fact.day}:{index}] {fact.description}"
+            for index, fact in enumerate(self.fact_ledger.confirmed_facts, 1)
+            if fact.visibility == "public"
+        ]
+        public_facts.extend(
+            f"[vote:{day}:{'runoff' if runoff else 'initial'}:{voter}] "
+            f"{voter} voted for {target}"
+            for day, runoff, votes in self.vote_history
+            for voter, target in votes.items()
+        )
+        public_facts.extend(
+            f"[death:attack:{day}:{player}] {player} died in an attack"
+            for day, player in self.attack_deaths
+        )
+        public_facts.extend(
+            f"[death:execution:{day}:{player}] {player} was executed"
+            for day, player in self.executions
+        )
+        public_claims = [
+            f"[claim:{index}] Day {claim.day}: {claim.claimant} publicly claimed "
+            f"{claim.claimed_role}"
+            + (
+                f"; {claim.target}={claim.result}"
+                if claim.target is not None and claim.result is not None
+                else ""
+            )
+            + " (unverified)"
+            for index, claim in enumerate(self.public_role_claims, 1)
+        ]
+        public_claims.extend(
+            f"[seer_claim:{index}] Day {claim.day}: {claim.claimant} publicly "
+            f"claimed {claim.target}={claim.result} (unverified)"
+            for index, claim in enumerate(self.seer_claims, 1)
+            if claim.target is not None and claim.result is not None
+        )
+        votes_by_target: dict[str, list[str]] = {}
+        for day, runoff, votes in self.vote_history:
+            ballot = "runoff" if runoff else "initial"
+            for voter, target in votes.items():
+                votes_by_target.setdefault(target, []).append(
+                    f"[vote:{day}:{ballot}:{voter}]"
+                )
+        suspicion_ranking = [
+            f"{target}: {len(sources)} recorded vote(s); evidence {', '.join(sources)}"
+            for target, sources in sorted(
+                votes_by_target.items(),
+                key=lambda item: (-len(item[1]), item[0]),
+            )
+        ]
+        speech_records: list[tuple[int, Message]] = []
+        for message in self.conversation_log:
+            if message.speaker != "system":
+                speech_records.append((len(speech_records) + 1, message))
+
+        for player in self.players:
+            unresolved: list[str] = []
+            for position, (speech_id, message) in enumerate(speech_records):
+                if message.speaker == player.name:
+                    continue
+                is_question = (
+                    "?" in message.content
+                    or "？" in message.content
+                    or any(
+                        cue in message.content
+                        for cue in ("質問", "聞きたい", "確認したい", "教えて")
+                    )
+                )
+                addresses_player = (
+                    player.name in message.content
+                )
+                later_reply = any(
+                    later.speaker == player.name
+                    for _, later in speech_records[position + 1 :]
+                )
+                if is_question and addresses_player and not later_reply:
+                    unresolved.append(
+                        f"[speech:{speech_id}] {message.speaker}からの質問（未回答）"
+                    )
+
+            next_targets = [
+                target
+                for target in (
+                    item.split(":", 1)[0] for item in suspicion_ranking
+                )
+                if target != player.name and target in self.alive_players
+            ][:3]
+            if not next_targets:
+                next_targets = [
+                    name for name in self.alive_players if name != player.name
+                ][:3]
+
+            private_facts: list[str] = []
+            if player.role is Role.SEER:
+                private_facts = [
+                    f"[private_seer:{index}] {target}={result}"
+                    for index, (target, result) in enumerate(
+                        self.seer_results.items(), 1
+                    )
+                ]
+            elif player.role is Role.WOLF and player.partner is not None:
+                private_facts = [f"[private_wolf_partner] {player.partner}"]
+
+            previous = self.reasoning_memos.get(player.name)
+            current_parts = {
+                "confirmed_facts": public_facts,
+                "public_claims": public_claims,
+                "suspicion_ranking": suspicion_ranking,
+                "unresolved_questions": unresolved,
+                "next_targets": next_targets,
+                "private_role_facts": private_facts,
+            }
+            updates = (
+                ["推理メモを初期化"]
+                if previous is None
+                else [
+                    f"{key}を更新"
+                    for key, value in current_parts.items()
+                    if getattr(previous, key) != value
+                ]
+            )
+            self.reasoning_memos[player.name] = ReasoningMemo(
+                **current_parts,
+                updates=updates or ["前回から変更なし"],
+            )
 
     def snapshot_ledgers(
         self, boundary: str, action: str, actor: str

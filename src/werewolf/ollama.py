@@ -83,9 +83,12 @@ class ChatResponse:
     eval_count: int | None = None
     eval_duration_ms: int | None = None
     prompt_eval_count: int | None = None
+    requested_num_ctx: int | None = None
+    effective_num_ctx: int | None = None
+    num_ctx_source: str | None = None
 
     def to_metadata(self) -> dict[str, str | int | bool | None]:
-        return {
+        metadata: dict[str, str | int | bool | None] = {
             "done_reason": self.done_reason,
             "content_length": (
                 self.content_length
@@ -97,6 +100,11 @@ class ChatResponse:
             "eval_duration_ms": self.eval_duration_ms,
             "prompt_eval_count": self.prompt_eval_count,
         }
+        if self.num_ctx_source is not None:
+            metadata["requested_num_ctx"] = self.requested_num_ctx
+            metadata["effective_num_ctx"] = self.effective_num_ctx
+            metadata["num_ctx_source"] = self.num_ctx_source
+        return metadata
 
 
 class OllamaClient:

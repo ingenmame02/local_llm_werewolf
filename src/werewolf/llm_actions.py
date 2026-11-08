@@ -2,7 +2,7 @@ import random
 import re
 import time
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Callable
 
@@ -360,13 +360,19 @@ class OllamaActions(ActionPolicy):
     ) -> str:
         started_at = self._start_action("discussion", self._player(player))
         actor = self._player(player)
+        if (
+            self.state.reasoning_memory_enabled
+            and actor.name not in self.state.reasoning_memos
+        ):
+            self.state.refresh_reasoning_memos()
+        context_strategy = actor.context_strategy or self.context_strategy
         prompt_ctx = PromptBuilder.build_discussion_prompt(
             actor=actor,
             alive_players=alive,
             conversation_history=history,
             day=day,
             state=self.state,
-            context_strategy=self.context_strategy,
+            context_strategy=context_strategy,
         )
         return self._free_text_with_context(
             "discussion",
@@ -2602,6 +2608,26 @@ class OllamaActions(ActionPolicy):
         )
         if actor.num_ctx is not None and not override_player_num_ctx:
             options["num_ctx"] = actor.num_ctx
+        elif (
+            "num_ctx" not in options
+            and (
+                actor.recommended_num_ctx is not None
+                or actor.max_num_ctx is not None
+            )
+        ):
+            options["num_ctx"] = (
+                actor.recommended_num_ctx
+                if actor.recommended_num_ctx is not None
+                else actor.max_num_ctx
+            )
+        if (
+            actor.max_num_ctx is not None
+            and isinstance(options.get("num_ctx"), int)
+            and not isinstance(options.get("num_ctx"), bool)
+        ):
+            options["num_ctx"] = min(
+                int(options["num_ctx"]), actor.max_num_ctx
+            )
         if num_predict is not None:
             options["num_predict"] = num_predict
         thinking_enabled, thinking_source = resolve_thinking(actor, self.options, key)
@@ -3069,9 +3095,31 @@ class OllamaActions(ActionPolicy):
             self.options and self.options.get("override_player_num_ctx")
         )
         if actor.num_ctx is not None and not override_player_num_ctx:
-            num_ctx_source = "player_setting"
+            num_ctx_source = (
+                "player_setting_capped"
+                if actor.max_num_ctx is not None
+                and actor.num_ctx > actor.max_num_ctx
+                else "player_setting"
+            )
+        elif (
+            actor.recommended_num_ctx is not None
+            and (self.options is None or self.options.get("num_ctx") is None)
+        ):
+            num_ctx_source = "player_recommended_setting"
+        elif (
+            actor.max_num_ctx is not None
+            and actor.num_ctx is None
+            and (self.options is None or self.options.get("num_ctx") is None)
+        ):
+            num_ctx_source = "player_maximum_setting"
         elif self.options is not None and self.options.get("num_ctx") is not None:
-            num_ctx_source = "cli_setting"
+            num_ctx_source = (
+                "cli_setting_capped"
+                if actor.max_num_ctx is not None
+                and isinstance(self.options.get("num_ctx"), int)
+                and self.options["num_ctx"] > actor.max_num_ctx
+                else "cli_setting"
+            )
         elif requested_num_ctx is not None:
             num_ctx_source = "api_request"
         else:
@@ -3130,24 +3178,56 @@ class OllamaActions(ActionPolicy):
             if tools is not None and callable(
                 getattr(self.client, "chat_with_metadata", None)
             ):
-                return self.client.chat_with_metadata(
+                response = self.client.chat_with_metadata(
                     actor.model,
                     messages,
                     options=request_options,
                     tools=tools,
                 )
-            if request_options is not None:
+            elif request_options is not None:
                 content = self.client.chat(actor.model, messages, options=request_options)
+                metadata = getattr(self.client, "_last_chat_response", None)
+                if isinstance(metadata, ChatResponse):
+                    response = metadata
+                else:
+                    response = ChatResponse(
+                        content=content,
+                        attempts=max(1, getattr(self.client, "_last_attempts", 1)),
+                        content_length=len(content),
+                        thinking_present=self._has_thinking(content),
+                    )
             else:
                 content = self.client.chat(actor.model, messages)
-            metadata = getattr(self.client, "_last_chat_response", None)
-            if isinstance(metadata, ChatResponse):
-                return metadata
-            return ChatResponse(
-                content=content,
-                attempts=max(1, getattr(self.client, "_last_attempts", 1)),
-                content_length=len(content),
-                thinking_present=self._has_thinking(content),
+                metadata = getattr(self.client, "_last_chat_response", None)
+                if isinstance(metadata, ChatResponse):
+                    response = metadata
+                else:
+                    response = ChatResponse(
+                        content=content,
+                        attempts=max(1, getattr(self.client, "_last_attempts", 1)),
+                        content_length=len(content),
+                        thinking_present=self._has_thinking(content),
+                    )
+            after_diagnostics: dict[str, object] = {}
+            if callable(getattr(self.client, "context_diagnostics", None)):
+                after_diagnostics = self.client.context_diagnostics(actor.model)
+            effective_context = after_diagnostics.get("ollama_ps_context")
+            return replace(
+                response,
+                requested_num_ctx=(
+                    request_options.get("num_ctx")
+                    if request_options
+                    and isinstance(request_options.get("num_ctx"), int)
+                    and not isinstance(request_options.get("num_ctx"), bool)
+                    else None
+                ),
+                effective_num_ctx=(
+                    effective_context
+                    if isinstance(effective_context, int)
+                    and not isinstance(effective_context, bool)
+                    else None
+                ),
+                num_ctx_source=num_ctx_source,
             )
 
         try:
@@ -3267,6 +3347,21 @@ class OllamaActions(ActionPolicy):
             ),
             done_reason=(
                 response_metadata.get("done_reason")
+                if response_metadata is not None
+                else None
+            ),
+            requested_num_ctx=(
+                response_metadata.get("requested_num_ctx")
+                if response_metadata is not None
+                else None
+            ),
+            effective_num_ctx=(
+                response_metadata.get("effective_num_ctx")
+                if response_metadata is not None
+                else None
+            ),
+            num_ctx_source=(
+                response_metadata.get("num_ctx_source")
                 if response_metadata is not None
                 else None
             ),

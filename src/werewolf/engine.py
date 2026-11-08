@@ -430,6 +430,8 @@ class GameEngine:
                                 Message(player.name, body)
                             )
                             self._record_model_inference(player.name, body)
+                if self.state.reasoning_memory_enabled:
+                    self.state.refresh_reasoning_memos()
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:

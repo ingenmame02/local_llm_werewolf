@@ -183,6 +183,9 @@ class PlayerConfig:
     thinking: bool | None = None
     thinking_by_action: Mapping[str, bool] | None = None
     personality_profile: str = "balanced"
+    max_num_ctx: int | None = None
+    recommended_num_ctx: int | None = None
+    context_strategy: str | None = None
 
 
 def validate_action_num_predict(
@@ -249,6 +252,9 @@ def load_player_configs(
         name = entry.get("name")
         model = entry.get("model")
         num_ctx = entry.get("num_ctx")
+        max_num_ctx = entry.get("max_num_ctx")
+        recommended_num_ctx = entry.get("recommended_num_ctx")
+        context_strategy = entry.get("context_strategy")
         timeout = entry.get("timeout")
         num_predict = entry.get("num_predict")
         response_language = entry.get("response_language", "日本語")
@@ -273,6 +279,35 @@ def load_player_configs(
         ):
             raise ValueError(
                 f"Player num_ctx at index {index} must be a positive integer."
+            )
+        for key, context_value in (
+            ("max_num_ctx", max_num_ctx),
+            ("recommended_num_ctx", recommended_num_ctx),
+        ):
+            if context_value is not None and (
+                not isinstance(context_value, int)
+                or isinstance(context_value, bool)
+                or context_value <= 0
+            ):
+                raise ValueError(
+                    f"Player {key} at index {index} must be a positive integer."
+                )
+        if (
+            max_num_ctx is not None
+            and recommended_num_ctx is not None
+            and recommended_num_ctx > max_num_ctx
+        ):
+            raise ValueError(
+                f"Player recommended_num_ctx at index {index} cannot exceed max_num_ctx."
+            )
+        if context_strategy is not None and context_strategy not in {
+            "full_transcript",
+            "structured_ledger",
+            "hybrid_retrieval",
+        }:
+            raise ValueError(
+                f"Player context_strategy at index {index} must be "
+                "'full_transcript', 'structured_ledger', or 'hybrid_retrieval'."
             )
         if timeout is not None and (
             not isinstance(timeout, (int, float))
@@ -314,6 +349,9 @@ def load_player_configs(
                 name=name,
                 model=model,
                 num_ctx=num_ctx,
+                max_num_ctx=max_num_ctx,
+                recommended_num_ctx=recommended_num_ctx,
+                context_strategy=context_strategy,
                 timeout=float(timeout) if timeout is not None else None,
                 num_predict=num_predict,
                 response_language=response_language.strip(),

@@ -101,6 +101,9 @@ def test_context_benchmark_records_filtered_actions_and_generation_metrics(
         def start(self):
             pass
 
+        def sample_now(self):
+            return {"system_memory_available_bytes": 1000}
+
         def stop(self):
             return {"sample_count": 1}
 
@@ -141,7 +144,7 @@ def test_context_benchmark_records_filtered_actions_and_generation_metrics(
             "error": None,
         }
 
-    def generate(_actor, _names, strategy):
+    def generate(_actor, _names, strategy, reasoning_memory=False):
         scenario_strategies.append(strategy)
         return scenarios
 
@@ -162,6 +165,7 @@ def test_context_benchmark_records_filtered_actions_and_generation_metrics(
         ("model-x",),
         ("discussion",),
         ("full_transcript", "structured_ledger"),
+        (False,),
     )
 
     assert requests == [
@@ -194,6 +198,10 @@ def test_context_benchmark_records_filtered_actions_and_generation_metrics(
         assert model_report["fallback_rate"] == 1.0
         assert model_report["results"][0]["prompt_chars"] == len("systemuser")
         assert model_report["results"][0]["input_tokens"] == 120
+        assert model_report["results"][0]["prompt_eval_count"] == 120
         assert model_report["results"][0]["output_tokens"] == 30
+        assert model_report["results"][0]["output_token_count"] == 30
+        assert model_report["results"][0]["effective_num_ctx"] == 8192
+        assert model_report["results"][0]["memory_usage"]["system_memory_available_bytes"] == 1000
         assert model_report["vote_intent_specificity_rate"] == 1.0
         assert model_report["question_answer_rate"] is None

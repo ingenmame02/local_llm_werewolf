@@ -4,6 +4,8 @@
       "name": "Player 1",
       "model": "werewolf-calm3-22b-8k",
       "num_ctx": 12288,
+      "max_num_ctx": 16384,
+      "recommended_num_ctx": 12288,
       "personality_profile": "analytical",
       "num_predict": 1024,
       "num_predict_by_action": {
