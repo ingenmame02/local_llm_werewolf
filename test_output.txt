@@ -1,0 +1,15 @@
+Testing normalize_question_hint_mode:
+  'none'     -> 'none'
+  'NONE'     -> 'none'
+  'Soft'     -> 'soft'
+  'STRICT'   -> 'strict'
+  None       -> 'soft'
+  ''         -> 'soft'
+  ' '        -> 'soft'
+
+Testing Phase.lower():
+  <Phase.NIGHT_SEER: 'night_seer'> -> 'night_seer'
+  <Phase.MORNING: 'morning'> -> 'morning'
+  <Phase.DAY_DISCUSSION: 'day_discussion'> -> 'day_discussion'
+
+All tests passed!

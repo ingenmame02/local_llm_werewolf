@@ -1,0 +1,12 @@
+llm_request_configuration -> ["type", "day", "phase", "phase_label", "player", "model", "action", "discussion_claim_mode", "private", "elapsed_seconds", "request_number", "request_reason", "tool_based", "request_options", "request_timeout_seconds", "num_ctx_source", "requested_num_ctx", "timeout_retries", "retry_budget_fit", "num_ctx_before_retry_fit", "dynamic_context_fit", "num_ctx_before_dynamic_fit", "num_ctx_setting_source", "context_needed_tokens", "system_prompt_char_count", "user_prompt_char_count", "raw_prompt_char_count", "num_predict", "num_predict_source", "action_budget_key", "thinking_enabled", "thinking_source", "max_retries", "context_diagnostics", "timestamp", "game_id", "sequence"]
+
+discussion_message -> ["type", "day", "phase", "phase_label", "speaker", "player", "action", "private", "content", "timestamp", "game_id", "sequence"]
+
+llm_action_completed -> ["type", "day", "phase", "phase_label", "player", "model", "action", "discussion_claim_mode", "private", "elapsed_seconds", "semantic_retries", "transport_retries", "total_retries", "fallback_used", "content_preserved", "recovered_content", "repair_applied", "fatal_safety_fallback", "validation_severity", "selected_target", "content", "error", "failure_reason", "failure_reasons", "failure_classes", "input_token_count", "output_token_count", "done_reason", "requested_num_ctx", "effective_num_ctx", "num_ctx_source", "response_metadata", "timestamp", "game_id", "sequence"]
+
+discussion_context_selected -> ["type", "day", "phase", "phase_label", "player", "model", "action", "discussion_claim_mode", "private", "elapsed_seconds", "context_strategy", "round_transcript", "transcript_sha256", "transcript_event_range", "transcript_event_count", "selected_event_indices", "selected_reasons", "excluded_event_ranges", "evidence_char_budget", "evidence_char_count", "evidence_dropped_indices", "reasoning_memory_enabled", "reasoning_memo_actor", "question_hint_mode", "day1_first_turn_hint", "timestamp", "game_id", "sequence"]
+
+seer_results -> ["type", "day", "results", "timestamp", "game_id", "sequence"]
+
+vote_completed -> ["type", "phase", "voting_phase_id", "day", "voter", "attempt", "target", "fallback_used", "timestamp", "game_id", "sequence"]
+

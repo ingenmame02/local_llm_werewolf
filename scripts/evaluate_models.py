@@ -57,6 +57,7 @@ from werewolf.discussion_format import (
     parse_discussion_output,
 )
 from werewolf.engine import extract_public_seer_result, is_public_seer_claim
+from werewolf.llm_actions import fit_dynamic_context
 
 
 @dataclass
@@ -92,45 +93,52 @@ GENERATION_ISSUE_REASONS: frozenset[str] = frozenset(
 
 # 失敗理由別の短い再要求文言（本番の再要求方針と同じ趣旨）
 RETRY_HINTS: dict[str, str] = {
-    "empty_content": "前回は最終回答が空でした。思考を出さず、短い最終回答だけ生成してください。",
-    "thinking_only_response": "前回は思考だけで最終回答がありませんでした。思考を出さず、最終回答だけ書いてください。",
-    "generation_truncated": "前回は生成上限で途切れました。結論だけを短く最後まで出力してください。",
-    "discussion_output_format": "前回は二層形式が不正でした。",
-    "seer_result_without_claim": (
-        "前回の応答に明示的な占い師COがありませんでした。"
-        "同じ発言内で明示的に占い師COしてください。"
-    ),
-    "invalid_target": "前回の対象は候補外でした。有効候補だけから選んでください。",
-    "invalid_action_response": "前回は対象を解析できませんでした。",
-    "empty_body": "前回の本文が空でした。内容のある発言をしてください。",
-}
-
-# 昼議論の再要求は文量を絞らず、4要素を満たす5～8文を要求する（TASK-024）。
-# 対象選択・CO補正の再要求はRETRY_HINTSの短文形式のままにする。
-DISCUSSION_RETRY_HINTS: dict[str, str] = {
     "empty_content": (
-        "前回は本文が空でした。思考を出さず、【本文】へ5～8文の発言を出力してください。"
+        "Your previous final answer was empty. Output no thinking; produce only a short final answer."
     ),
     "thinking_only_response": (
-        "前回は思考だけで本文がありませんでした。思考を出さず、"
-        "【本文】へ5～8文の発言を出力してください。"
+        "Your previous response was only thinking with no final answer. Output no thinking; write only the final answer."
     ),
     "generation_truncated": (
-        "前回は生成上限で途切れました。二層形式のまま、【本文】を5～8文で"
-        "途中で止めずに最後まで出力してください。"
+        "Your previous response was cut off by the generation limit. Output only the conclusion, short and complete."
     ),
-    "discussion_output_format": "前回は二層形式が不正でした。",
-    "empty_body": "前回の本文が空でした。5～8文の内容のある発言をしてください。",
+    "discussion_output_format": "Your previous format was invalid.",
+    "seer_result_without_claim": (
+        "Your previous response had no explicit Seer CO. Claim Seer CO explicitly in the same speech."
+    ),
+    "invalid_target": (
+        "Your previous target was outside the candidates. Choose only from eligible candidates."
+    ),
+    "invalid_action_response": "Your previous target could not be parsed.",
+    "empty_body": "Your previous body was empty. Make a substantive statement.",
+}
+
+# Discussion retries keep the volume and require 5-8 sentences covering 4 elements (TASK-024).
+# Target-selection and CO-correction retries stay in the short RETRY_HINTS form.
+DISCUSSION_RETRY_HINTS: dict[str, str] = {
+    "empty_content": (
+        "Your previous body was empty. Output no thinking; write 5-8 sentences in [BODY]."
+    ),
+    "thinking_only_response": (
+        "Your previous response had thinking but no body. Output no thinking; "
+        "write 5-8 sentences in [BODY]."
+    ),
+    "generation_truncated": (
+        "Your previous response was cut off by the generation limit. Keep the structured format and "
+        "write [BODY] in 5-8 sentences without stopping, to the end."
+    ),
+    "discussion_output_format": "Your previous format was invalid.",
+    "empty_body": "Your previous body was empty. Make a substantive statement in 5-8 sentences.",
 }
 
 
 def _retry_hint(scenario: PromptTestScenario, issue: str) -> str:
-    """対象選択・CO補正は短文、昼議論は5～8文の再要求文言を選ぶ。"""
+    """Short form for target selection / CO correction, 5-8 sentences for day discussion."""
     if scenario.expected_action_kind is None and scenario.action_type == "discussion":
         discussion_hint = DISCUSSION_RETRY_HINTS.get(issue)
         if discussion_hint is not None:
             return discussion_hint
-    return RETRY_HINTS.get(issue, "前回の応答を修正してください。")
+    return RETRY_HINTS.get(issue, "Please correct your previous response.")
 
 
 def escalate_num_predict(current: int | None, cap: int = 8192) -> int:
@@ -227,6 +235,24 @@ def _request_attempts(records: list[dict[str, Any]]) -> int:
     return total
 
 
+def _dynamic_context_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """動的コンテキストの調整回数と実際に送ったnum_ctxの分布（TASK-036）。"""
+    sent = [
+        rec["num_ctx_sent"]
+        for rec in records
+        if isinstance(rec.get("num_ctx_sent"), int)
+        and not isinstance(rec.get("num_ctx_sent"), bool)
+    ]
+    return {
+        "dynamic_context_fit_requests": sum(
+            1 for rec in records if rec.get("dynamic_context_fit")
+        ),
+        "avg_num_ctx_sent": round(sum(sent) / len(sent), 1) if sent else None,
+        "min_num_ctx_sent": min(sent) if sent else None,
+        "max_num_ctx_sent": max(sent) if sent else None,
+    }
+
+
 def evaluate_specificity(
     content: str,
     scenario: PromptTestScenario,
@@ -263,28 +289,82 @@ def extract_discussion_signals(
     }
     for line in body.splitlines():
         mentioned = {name for name in player_names if name in line}
-        if "?" in line or "？" in line or any(
-            cue in line for cue in ("質問", "聞きたい", "尋ね", "確認したい")
+        if (
+            "?" in line
+            or "？" in line
+            or any(
+                cue in line
+                for cue in ("質問", "聞きたい", "尋ね", "確認したい")
+            )
+            or any(
+                cue in line.lower()
+                for cue in ("ask", "question", "tell me", "check", "explain", "?")
+            )
         ):
             signals["question_targets"].update(mentioned)
-        suspicion_cues = ("疑", "怪しい", "人狼", "黒だ", "黒と思")
-        if any(cue in line for cue in suspicion_cues):
+        suspicion_cues = (
+            "疑",
+            "怪しい",
+            "人狼",
+            "黒だ",
+            "黒と思",
+            "suspect",
+            "suspicious",
+            "werewolf",
+            "wolf",
+        )
+        if any(cue in line.lower() for cue in suspicion_cues):
             signals["suspicion_targets"].update(mentioned)
             reason_categories = {
-                "inconsistent_statements": ("矛盾", "変わ", "一貫", "前と違"),
-                "voting_behavior": ("投票", "票"),
-                "role_claim_evidence": ("CO", "占い", "結果", "判定"),
-                "evasive_response": ("回答", "質問", "避け", "答え"),
-                "discussion_behavior": ("発言", "態度", "様子", "反応"),
+                "inconsistent_statements": (
+                    "矛盾",
+                    "変わ",
+                    "一貫",
+                    "前と違",
+                    "inconsisten",
+                    "contradict",
+                    "changed",
+                    "consistent",
+                ),
+                "voting_behavior": ("投票", "票", "vote", "ballot"),
+                "role_claim_evidence": (
+                    "CO",
+                    "占い",
+                    "結果",
+                    "判定",
+                    "seer",
+                    "divination",
+                    "result",
+                    "claim",
+                ),
+                "evasive_response": (
+                    "回答",
+                    "質問",
+                    "避け",
+                    "答え",
+                    "answer",
+                    "avoid",
+                    "reply",
+                ),
+                "discussion_behavior": (
+                    "発言",
+                    "態度",
+                    "様子",
+                    "反応",
+                    "speech",
+                    "reaction",
+                    "attitude",
+                    "statement",
+                ),
             }
             matched_reasons = {
                 reason
                 for reason, cues in reason_categories.items()
-                if any(cue in line for cue in cues)
+                if any(cue in line.lower() for cue in cues)
             }
             signals["suspicion_reasons"].update(matched_reasons or {"other"})
         if any(
-            cue in line
+            cue in line.lower()
             for cue in (
                 "投票を提案",
                 "投票する",
@@ -293,6 +373,13 @@ def extract_discussion_signals(
                 "投票先",
                 "処刑",
                 "吊る",
+                "vote for",
+                "propose voting",
+                "vote target",
+                "should vote",
+                "execute",
+                "exile",
+                "hang",
             )
         ):
             signals["vote_proposals"].update(mentioned)
@@ -379,19 +466,19 @@ def generate_scenarios(
         Message("system", "Day 1 begins."),
         Message(
             questioner,
-            f"{vote_target}への投票理由を根拠に、投票先を再検討したいです。",
+            f"Based on the reason for voting {vote_target}, I want to reconsider my vote target.",
         ),
         *tuple(
             Message(
                 all_player_names[index % len(all_player_names)],
-                f"Day 1の議論記録 {index}: 特に新しい情報はありません。",
+                f"Day 1 discussion record {index}: no new information in particular.",
             )
             for index in range(20)
         ),
         Message("system", "Day 2 begins."),
         Message(
             questioner,
-            f"{actor.name}さん、{vote_target}への昨日の投票理由をどう考えますか？",
+            f"{actor.name}, how do you think about your vote reason for {vote_target} yesterday?",
         ),
     )
     discussion_state = create_game(seed=42)
@@ -476,7 +563,7 @@ def generate_scenarios(
         actor=actor,
         alive_players=all_player_names,
         valid_candidates=vote_candidates,
-        today_summary="Player 1とPlayer 2の間で意見の食い違いがありました。",
+        today_summary="Player 1 and Player 2 disagreed about the target.",
         runoff=False,
     )
     scenarios.append(
@@ -609,50 +696,53 @@ def generate_scenarios(
 
 def _label_for_action(action: ActionKind) -> str:
     return {
-        ActionKind.ATTACK: "襲撃対象",
-        ActionKind.SEER: "占い対象",
-        ActionKind.VOTE: "投票",
+        ActionKind.ATTACK: "Attack target",
+        ActionKind.SEER: "Seer target",
+        ActionKind.VOTE: "Vote",
     }[action]
 
 
 def _compact_retry_prompt(scenario: PromptTestScenario, issue: str) -> str:
-    """長いプロンプトを再送せず、失敗理由と必須項目だけの短い再要求を作る（TASK-024）。"""
+    """Do not resend the long prompt; build a short retry with only the failure reason and required items (TASK-024)."""
     hint = _retry_hint(scenario, issue)
     lines = [
-        f"【再要求】{hint}",
-        f"- 行動：{scenario.action_type}",
-        f"- あなた：{scenario.actor_name}",
+        f"[Retry] {hint}",
+        f"- Action: {scenario.action_type}",
+        f"- You: {scenario.actor_name}",
     ]
     if scenario.expected_action_kind is not None:
-        lines.append(f"- 有効候補：{', '.join(scenario.candidates)}")
+        lines.append(f"- Eligible candidates: {', '.join(scenario.candidates)}")
         lines.append(
-            f"候補から1名だけ選び、"
-            f"「{_label_for_action(scenario.expected_action_kind)}：プレイヤー名」の1行だけを出力してください。"
+            "Choose exactly 1 candidate and output only one line in the format "
+            f"'{_label_for_action(scenario.expected_action_kind)}: Player Name'."
         )
     elif scenario.action_type == "discussion_seer_co":
         if scenario.expected_seer_result is not None:
             target, result = scenario.expected_seer_result
-            label = "人狼" if result == "wolf" else "人間"
-            lines.append(f"- あなたが実際に占った対象：{target}／判定：{label}")
+            label = "Werewolf" if result == "wolf" else "Human"
+            lines.append(f"- Your actual divination target: {target} / Result: {label}")
         lines.append(
-            "「【CO】占い師」の次に「【結果】対象=Player X 判定=人狼/人間」の2行だけ出力してください。"
+            "Output only 2 lines: '[CO] Seer' then "
+            "'[RESULT] Target=Player X Result=Werewolf/Human'."
         )
     else:
         lines.append(
-            "- 直前の発言への回答、確認できる事実、疑う対象と根拠、"
-            "次に確認したい点の4要素をすべて含めてください。"
+            "Include all 4 elements: the answer to the previous speech, verifiable facts, "
+            "the target you suspect with its basis, and the next point to check."
         )
         lines.append(
-            "「【CO】なし または CO内容」の次行に「【本文】議論本文」の2行構造で、"
-            "【本文】は5～8文で最後まで出力してください。"
+            "Use the 2-line structure: '[CO] None or CO content' then "
+            "'[BODY] discussion body'; write [BODY] in 5-8 sentences to the end."
         )
     if scenario.expected_action_kind is None and scenario.action_type == "discussion":
         lines.append(
-            "日本語で、思考や前置きを出さずに、質問への回答・事実・疑う根拠・"
-            "次の確認点を含む最終回答だけ出力してください。"
+            "Output strictly in English, with no thinking or preamble: only the final answer "
+            "containing the answer to the question, facts, suspicion basis, and next checks."
         )
     else:
-        lines.append("日本語の短文で、思考や前置きを出さずに最終回答だけ出力してください。")
+        lines.append(
+            "Output strictly in English, short, with no thinking or preamble; only the final answer."
+        )
     return "\n".join(lines)
 
 
@@ -678,6 +768,8 @@ def evaluate_scenario(
     options: dict[str, Any],
     thinking_supported: dict[str, bool] | None = None,
     thinking_budget_ok: dict[str, bool] | None = None,
+    dynamic_context: bool = True,
+    max_context_length: int | None = None,
 ) -> dict[str, Any]:
     system_prompt = scenario.prompt_ctx.system_prompt
     user_prompt = scenario.prompt_ctx.user_prompt
@@ -713,12 +805,26 @@ def evaluate_scenario(
     thinking_capability_fallback = False
     thinking_budget_adaptive = False
     thinking_budget_exhausted = False
+    # TASK-036: 動的コンテキスト（実測プロンプトサイズ＋生成上限からnum_ctxを合わせる）
+    num_ctx_sent: int | None = options.get("num_ctx")
+    context_needed_tokens: int | None = None
+    dynamic_context_fit = False
 
     for attempt_idx in range(2):
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": current_user_prompt},
         ]
+        if dynamic_context:
+            attempt_options, context_needed_tokens, fit_applied = fit_dynamic_context(
+                attempt_options, messages, ceiling=max_context_length
+            )
+            dynamic_context_fit = dynamic_context_fit or bool(fit_applied)
+        num_ctx_sent = (
+            attempt_options.get("num_ctx")
+            if isinstance(attempt_options.get("num_ctx"), int)
+            else num_ctx_sent
+        )
         content: str = ""
         attempts = 1
         metadata: dict[str, str | int | bool | None] = {}
@@ -977,6 +1083,10 @@ def evaluate_scenario(
         "prompt_eval_count": prompt_eval_count,
         "num_predict": num_predict,
         "num_predict_by_attempt": num_predict_by_attempt,
+        # TASK-036: 実際に送ったnum_ctxと、実測必要量からの動的調整が発生したか
+        "num_ctx_sent": num_ctx_sent,
+        "context_needed_tokens": context_needed_tokens,
+        "dynamic_context_fit": dynamic_context_fit,
         "generation_escalated": generation_escalated,
         "action_budget_key": budget_key,
         "budget_exhausted": budget_exhausted,
@@ -1088,6 +1198,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4096,
         help="Context window length (num_ctx) for Ollama",
+    )
+    parser.add_argument(
+        "--no-dynamic-context",
+        dest="dynamic_context",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable dynamic num_ctx. By default the measured prompt size plus the "
+            "generation budget decides num_ctx (shrinking over-allocations and "
+            "expanding up to --max-context-length when the prompt needs more)."
+        ),
+    )
+    parser.add_argument(
+        "--max-context-length",
+        type=int,
+        default=8192,
+        help="Upper bound for dynamic num_ctx expansion (used with dynamic context)",
     )
     parser.add_argument(
         "--num-predict",
@@ -1316,6 +1443,8 @@ def main() -> None:
                         scenario_options,
                         thinking_supported_by_model,
                         thinking_budget_ok_by_model,
+                        dynamic_context=bool(getattr(args, "dynamic_context", True)),
+                        max_context_length=args.max_context_length,
                     )
                     result["round"] = round_idx
                     result["action_budget_key"] = budget_key
@@ -1347,6 +1476,11 @@ def main() -> None:
                     status = "OK" if result["is_parse_valid"] else "FAILED"
                     if result["error"]:
                         status = f"ERROR: {result['error'].get('kind')}"
+                    dynamic_note = (
+                        f", 動的コンテキスト調整(必要量概算={result['context_needed_tokens']})"
+                        if result.get("dynamic_context_fit")
+                        else ""
+                    )
                     print(
                         f"  - {scenario.action_type.ljust(11)}: {status} "
                         f"(elapsed: {result['elapsed_seconds']}s, sends: {result['request_attempts']}, "
@@ -1361,6 +1495,7 @@ def main() -> None:
                         f"{', 思考予算不足→off' if result['thinking_budget_adaptive'] else ''}, "
                         f"eval_count: {result['eval_count']}, "
                         f"eval_ms: {result['eval_duration_ms']}, "
+                        f"num_ctx_sent: {result['num_ctx_sent']}{dynamic_note}, "
                         f"done_reason: {result['done_reason']}, "
                         f"thinking: {result['thinking_present']}, "
                         f"specific: {result['is_specific']}, "
@@ -1401,6 +1536,9 @@ def main() -> None:
                         "prompt_eval_count": None,
                         "num_predict": scenario_options.get("num_predict"),
                         "num_predict_by_attempt": [],
+                        "num_ctx_sent": scenario_options.get("num_ctx"),
+                        "context_needed_tokens": None,
+                        "dynamic_context_fit": False,
                         "generation_escalated": False,
                         "action_budget_key": ACTION_TYPE_TO_BUDGET_KEY[scenario.action_type],
                         "budget_exhausted": False,
@@ -1598,6 +1736,7 @@ def main() -> None:
             "budget_exhausted_count": budget_exhausted_count,
             "request_attempts": _request_attempts(records),
             **_metadata_counts(records),
+            **_dynamic_context_stats(records),
             "failure_reasons": _failure_reason_counts(records),
             "options": base_options,
             "cli_num_predict_by_action": cli_action_budgets,
@@ -1666,6 +1805,7 @@ def main() -> None:
         "budget_exhausted_count": sum(1 for r in all_records if r.get("budget_exhausted")),
         "request_attempts": _request_attempts(all_records),
         **_metadata_counts(all_records),
+        **_dynamic_context_stats(all_records),
         "failure_reasons": _failure_reason_counts(all_records),
         "cli_num_predict_by_action": cli_action_budgets,
         "default_action_num_predict": dict(DEFAULT_ACTION_NUM_PREDICT),
@@ -1699,6 +1839,8 @@ def main() -> None:
             model: ok for model, ok in sorted(thinking_budget_ok_by_model.items())
         },
         "thinking_affordable_num_predict": dict(THINKING_AFFORDABLE_NUM_PREDICT),
+        "dynamic_context": bool(getattr(args, "dynamic_context", True)),
+        "max_context_length": args.max_context_length,
         "options": base_options,
         "models": summary_by_model,
     }
@@ -1741,6 +1883,11 @@ def main() -> None:
             f"思考予算不足判定={stat.get('thinking_budget_exhausted_requests')} "
             f"thinking_supported={stat.get('thinking_supported')} "
             f"thinking_budget_ok={stat.get('thinking_budget_ok')}"
+        )
+        print(
+            f"    動的コンテキスト: 調整={stat.get('dynamic_context_fit_requests')} "
+            f"送信num_ctx 平均={stat.get('avg_num_ctx_sent')} "
+            f"最小={stat.get('min_num_ctx_sent')} 最大={stat.get('max_num_ctx_sent')}"
         )
         for action_name, act in stat["by_action"].items():
             print(

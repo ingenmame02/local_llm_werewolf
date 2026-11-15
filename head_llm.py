@@ -1,0 +1,3684 @@
+import random
+import re
+import time
+import json
+from dataclasses import dataclass, field, replace
+from difflib import SequenceMatcher
+from typing import Callable
+
+from .action_parser import ActionKind, ActionParser
+from .engine import (
+    ActionPolicy,
+    diagnose_discussion_body,
+    extract_public_role_claim,
+    extract_public_seer_result,
+    is_public_seer_claim,
+)
+from .config import (
+    ACTION_BUDGET_KEYS,
+    DEFAULT_ACTION_NUM_PREDICT,
+    DEFAULT_THINKING_BY_ACTION,
+    MINIMAL_ACTION_MAX_NUM_PREDICT,
+    MINIMAL_OUTPUT_ACTION_KEYS,
+    THINKING_AFFORDABLE_NUM_PREDICT,
+    THINKING_BUDGET_EXHAUSTED_REASON,
+    THINKING_BUDGET_SOURCE,
+    THINKING_CAPABILITY_SOURCE,
+    THINKING_NUM_PREDICT_SOURCE,
+)
+from .discussion_format import (
+    extract_discussion_body,
+    has_discussion_output_markers,
+    parse_discussion_claim,
+    parse_discussion_output,
+)
+from .models import GameState, Message, Player, PublicRoleClaim, PublicSeerClaim, Role
+from .ollama import CLAIM_ROLE_TOOL, ChatResponse, OllamaClient, OllamaError, ToolCall
+from .prompts import PromptBuilder, PromptContext, ROLE_NAMES_JA
+from .secret_leak_guard import LeakFinding, SecretLeakGuard
+
+_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+_UNCLOSED_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
+
+# 行動別生成上限の解決優先順位:
+# player行動別 > CLI行動別 > 全体設定（対象選択・CO補正は行動別キャップへ降ろす）
+# > player全体 > CLI全体 > 行動別既定値
+ACTION_BUDGET_RESOLUTION_PRIORITY: tuple[str, ...] = (
+    "player_by_action",
+    "cli_by_action",
+    "global_capped",
+    "player_global",
+    "cli_global",
+    "default_by_action",
+)
+
+# 軽い再要求で回復しない場合にモデル設定変更を検討させるための注記
+LIGHT_RETRY_EXHAUSTED_NOTE = (
+    "軽い要求でも回復しない場合は、num_predictまたはモデルの量子化設定を変更してください。"
+)
+
+# 生成起因の応答失敗（再試行で生成上限を倍へ増やす理由）
+GENERATION_ISSUE_REASONS: frozenset[str] = frozenset(
+    {"empty_content", "thinking_only_response", "generation_truncated"}
+)
+
+SOFT_DISCUSSION_ISSUES: frozenset[str] = frozenset(
+    {"discussion_output_format", "question_not_answered_first", "repeated_discussion_topic"}
+)
+
+LEDGER_REPAIR_ISSUES: frozenset[str] = frozenset(
+    {
+        "external_game_memory",
+        "unverified_past_vote_reference",
+        "unverified_dead_role",
+        "dead_player_question",
+        "dead_player_action_target",
+        "repeated_discussion_topic",
+    }
+)
+
+
+def classify_failure_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    if reason in {"communication_failure", "request_timeout", "http_error"}:
+        return "communication"
+    if reason in {"empty_content", "thinking_only_response"}:
+        return "empty_or_thinking_only"
+    if reason in {"generation_truncated", "thinking_budget_exhausted"}:
+        return "generation_limit"
+    if reason in {"invalid_target", "invalid_action_response"}:
+        return "invalid_target"
+    if reason in SOFT_DISCUSSION_ISSUES:
+        return "soft_discussion_quality"
+    if reason in {
+        "discussion_output_format",
+        "seer_result_without_claim",
+        "wolf_result_not_disclosed",
+        "inconsistent_seer_result",
+        "inconsistent_role_claim",
+    }:
+        return "required_format_or_claim"
+    if reason.startswith(("http_", "connection_", "timeout")):
+        return "communication"
+    return "semantic_integrity"
+
+
+# 行動キーの別名（設定ファイルで使いやすい名前を正規キーへ寄せる）
+ACTION_BUDGET_KEY_ALIASES: dict[str, str] = {
+    "wolf_consult": "wolf_discussion",
+    "target": "vote",
+    "discussion_seer_co": "co_correction",
+}
+
+
+def normalize_action_budget_key(budget_key: str, *, fallback: str = "discussion") -> str:
+    """行動別生成上限のキーを正規化し、未知のキーは fallback に寄せる。"""
+    normalized = budget_key.strip().lower()
+    if normalized in ACTION_BUDGET_KEYS:
+        return normalized
+    if normalized in ACTION_BUDGET_KEY_ALIASES:
+        return ACTION_BUDGET_KEY_ALIASES[normalized]
+    return fallback
+
+
+def _global_num_predict(
+    player: Player | None, cli_options: dict[str, object] | None
+) -> tuple[int | None, str | None]:
+    """player全体 > CLI全体 の順で全体生成上限を返す。"""
+    if player is not None and player.num_predict is not None:
+        return player.num_predict, "player_global"
+    if cli_options is not None:
+        cli_global = cli_options.get("num_predict")
+        if isinstance(cli_global, int) and not isinstance(cli_global, bool):
+            return cli_global, "cli_global"
+    return None, None
+
+
+def resolve_action_num_predict(
+    player: Player | None,
+    cli_options: dict[str, object] | None,
+    budget_key: str,
+) -> tuple[int | None, str]:
+    """行動別生成上限を優先順位で解決する。
+
+    player行動別 > CLI行動別 > 全体設定 > 行動別既定値。
+    対象選択・CO補正は全体設定が大きい場合、行動別キャップへ降ろす。
+    議論・人狼相談は根拠を説明できる文量を確保するため全体設定をそのまま使う。
+    """
+    key = normalize_action_budget_key(budget_key)
+    if player is not None:
+        by_action = (
+            player.num_predict_by_action.get(key)
+            if player.num_predict_by_action is not None
+            else None
+        )
+        if isinstance(by_action, int) and not isinstance(by_action, bool):
+            return by_action, "player_by_action"
+    if cli_options is not None:
+        cli_by_action = cli_options.get(f"num_predict_by_action:{key}")
+        if isinstance(cli_by_action, int) and not isinstance(cli_by_action, bool):
+            return cli_by_action, "cli_by_action"
+
+    global_value, global_source = _global_num_predict(player, cli_options)
+    default = DEFAULT_ACTION_NUM_PREDICT.get(key)
+
+    if key in MINIMAL_OUTPUT_ACTION_KEYS:
+        cap = MINIMAL_ACTION_MAX_NUM_PREDICT.get(key)
+        if global_value is not None:
+            if cap is not None and global_value > cap:
+                return cap, "global_capped"
+            return global_value, global_source or "default_by_action"
+        if default is not None:
+            return default, "default_by_action"
+        return None, "ollama_service_default"
+
+    if global_value is not None:
+        return global_value, global_source or "default_by_action"
+    if default is not None:
+        return default, "default_by_action"
+    return None, "ollama_service_default"
+def resolve_thinking(
+    player: Player | None,
+    cli_options: dict[str, object] | None,
+    budget_key: str,
+) -> tuple[bool | None, str]:
+    """行動別の思考生成（Ollamaの `think`）を優先順位で解決する。
+
+    優先順位: player行動別 > CLI行動別 > player全体 > CLI全体 > 行動別既定値
+    解決できない場合は (None, "ollama_service_default") でOllama側既定に委ねる。
+    """
+    key = normalize_action_budget_key(budget_key)
+    if player is not None and player.thinking_by_action is not None:
+        by_action = player.thinking_by_action.get(key)
+        if isinstance(by_action, bool):
+            return by_action, "player_by_action"
+    if cli_options is not None:
+        cli_by_action = cli_options.get(f"thinking_by_action:{key}")
+        if isinstance(cli_by_action, bool):
+            return cli_by_action, "cli_by_action"
+    if player is not None and isinstance(player.thinking, bool):
+        return player.thinking, "player_global"
+    if cli_options is not None and isinstance(cli_options.get("thinking"), bool):
+        return cli_options["thinking"], "cli_global"
+    default = DEFAULT_THINKING_BY_ACTION.get(key)
+    if default is not None:
+        return default, "default_by_action"
+    return None, "ollama_service_default"
+
+
+def apply_thinking_floor(
+    num_predict: int | None,
+    num_predict_source: str,
+    thinking_enabled: bool | None,
+    budget_key: str,
+) -> tuple[int | None, str]:
+    """思考onの行動で、設定未指定（行動別既定値）時のみ思考残余用の下限を適用する。
+
+    思考onでは思考トークンがnum_predictを消費するため、既定値の議論・人狼相談では
+    最終回答（5〜8文）が最後まで生成できる残余を下限として確保する（TASK-024）。
+    player・CLIの行動別/全体設定は優先順位上より高いため、下限で上書きしない。
+    """
+    if thinking_enabled is not True or num_predict_source != "default_by_action":
+        return num_predict, num_predict_source
+    floor = THINKING_AFFORDABLE_NUM_PREDICT.get(normalize_action_budget_key(budget_key))
+    if (
+        floor is None
+        or not isinstance(num_predict, int)
+        or isinstance(num_predict, bool)
+        or num_predict >= floor
+    ):
+        return num_predict, num_predict_source
+    return floor, THINKING_NUM_PREDICT_SOURCE
+
+
+@dataclass(frozen=True)
+class ActionTrace:
+    action: ActionKind | str
+    player: str
+    raw_responses: tuple[str, ...]
+    parsed_targets: tuple[str | None, ...]
+    selected_target: str | None
+    fallback_used: bool
+    error: dict[str, str | int | None] | None = None
+    failure_reasons: tuple[str, ...] = ()
+    response_metadata: tuple[dict[str, str | int | bool | None], ...] = ()
+    content_preserved: bool = False
+    # TASK-034: フォールバックとは別に、本文保持・修復・安全フォールバックの内訳を記録する。
+    recovered_content: bool = False
+    repair_applied: bool = False
+    fatal_safety_fallback: bool = False
+    validation_severity: str = "ok"
+
+
+@dataclass
+class ModelDiscussionMetrics:
+    """モデル別の議論本文品質メトリクス。形式弱モデルの判定と予算調整に使う。"""
+
+    model: str
+    calls: int = 0
+    extraction_success: int = 0
+    format_compliant: int = 0
+    failure_reasons: dict[str, int] = field(default_factory=dict)
+    input_token_counts: list[int] = field(default_factory=list)
+    output_token_counts: list[int] = field(default_factory=list)
+    post_retry_success: int = 0
+    fallbacks: int = 0
+    fatal_safety_fallbacks: int = 0
+
+    @property
+    def extraction_success_rate(self) -> float:
+        return self.extraction_success / max(1, self.calls)
+
+    @property
+    def format_compliance_rate(self) -> float:
+        return self.format_compliant / max(1, self.calls)
+
+    @property
+    def fallback_rate(self) -> float:
+        return self.fallbacks / max(1, self.calls)
+
+
+class OllamaActions(ActionPolicy):
+    def __init__(
+        self,
+        state: GameState,
+        client: OllamaClient,
+        seed: int | None = None,
+        options: dict[str, object] | None = None,
+        event_callback: Callable[[dict[str, object]], None] | None = None,
+        discussion_claim_mode: str = "legacy",
+        context_strategy: str = "hybrid_retrieval",
+    ) -> None:
+        if discussion_claim_mode not in {"legacy", "candidates", "all"}:
+            raise ValueError(
+                "discussion_claim_mode must be 'legacy', 'candidates', or 'all'."
+            )
+        if context_strategy not in {
+            "full_transcript",
+            "structured_ledger",
+            "hybrid_retrieval",
+            "round_transcript_memory",
+        }:
+            raise ValueError(
+                "context_strategy must be 'full_transcript', "
+                "'structured_ledger', 'hybrid_retrieval', or "
+                "'round_transcript_memory'."
+            )
+        self.state = state
+        self.client = client
+        self.options = options
+        self.event_callback = event_callback
+        self.discussion_claim_mode = discussion_claim_mode
+        self.context_strategy = context_strategy
+        self._rng = random.Random(state.seed if seed is None else seed)
+        self.traces: list[ActionTrace] = []
+        self._seer_info_used_day: dict[str, int] = {}
+        # TASK-034: モデル別の議論本文メトリクス・形式弱モデル判定。
+        self._discussion_metrics: dict[str, ModelDiscussionMetrics] = {}
+        self._discussion_format_weak_models: set[str] = set()
+
+    def wolf_discuss(
+        self, wolf: str, partner: str, history: tuple[Message, ...]
+    ) -> str:
+        started_at = self._start_action("wolf_discussion", self._player(wolf))
+        player = self._player(wolf)
+        prompt_ctx = PromptBuilder.build_wolf_discuss_prompt(
+            actor=player,
+            partner_name=partner,
+            alive_players=tuple(self.state.alive_players),
+            wolf_chat_history=history,
+            day=self.state.day,
+            state=self.state,
+        )
+        return self._free_text_with_context(
+            "wolf_discussion",
+            player,
+            prompt_ctx,
+            f"{wolf} は相談に応答できませんでした。",
+            started_at,
+            recent_messages=history,
+            budget_key="wolf_discussion",
+        )
+
+    def choose_attack(self, wolves: tuple[str, ...], candidates: tuple[str, ...]) -> str:
+        started_at = self._start_action("attack", self._player(wolves[0]))
+        actor = self._player(wolves[0])
+        valid_candidates = self._valid_candidates(
+            actor, candidates, forbidden=wolves
+        )
+        prompt_ctx = PromptBuilder.build_attack_prompt(
+            actor=actor,
+            wolves=wolves,
+            valid_candidates=valid_candidates,
+            day=self.state.day,
+            state=self.state,
+        )
+        return self._select_target(
+            ActionKind.ATTACK,
+            actor,
+            valid_candidates,
+            prompt_ctx,
+            started_at,
+            forbidden=wolves,
+            budget_key="attack",
+        )
+
+    def choose_seer_target(
+        self, seer: str, candidates: tuple[str, ...], results: tuple[tuple[str, str], ...]
+    ) -> str:
+        started_at = self._start_action("seer", self._player(seer))
+        actor = self._player(seer)
+        living_candidates = self._valid_candidates(
+            actor, candidates, forbid_self=True
+        )
+        unscanned_candidates = tuple(
+            candidate
+            for candidate in living_candidates
+            if candidate not in self.state.seer_results
+        )
+        eligible_candidates = unscanned_candidates
+        if not eligible_candidates:
+            raise ValueError(f"No valid unscanned seer targets for {seer}.")
+        prompt_ctx = PromptBuilder.build_seer_prompt(
+            actor=actor,
+            alive_players=tuple(self.state.alive_players),
+            seer_results=results,
+            day=self.state.day,
+            state=self.state,
+        )
+        return self._select_target(
+            ActionKind.SEER,
+            actor,
+            eligible_candidates,
+            prompt_ctx,
+            started_at,
+            budget_key="seer",
+        )
+
+    def discuss(
+        self, player: str, day: int, alive: tuple[str, ...], history: tuple[Message, ...]
+    ) -> str:
+        started_at = self._start_action("discussion", self._player(player))
+        actor = self._player(player)
+        if (
+            self.state.reasoning_memory_enabled
+            and actor.name not in self.state.reasoning_memos
+        ):
+            self.state.refresh_reasoning_memos()
+        context_strategy = actor.context_strategy or self.context_strategy
+        prompt_ctx = PromptBuilder.build_discussion_prompt(
+            actor=actor,
+            alive_players=alive,
+            conversation_history=history,
+            day=day,
+            state=self.state,
+            context_strategy=context_strategy,
+        )
+        return self._free_text_with_context(
+            "discussion",
+            actor,
+            prompt_ctx,
+            f"{player} は発言できませんでした。",
+            started_at,
+            recent_messages=history,
+            budget_key="discussion",
+            context_diagnostics=prompt_ctx.diagnostics,
+        )
+
+    def should_stage_discussion_claim(self, player: str) -> bool:
+        if self.discussion_claim_mode == "legacy":
+            return False
+        if self.discussion_claim_mode == "all":
+            checked_key = (self.state.day, player)
+            has_claim = player in self.state.claim_ledger.public_claims or any(
+                claim.claimant == player for claim in self.state.public_role_claims
+            )
+            has_unpublished_result = self._has_unpublished_seer_result(player)
+            if checked_key not in self.state.discussion_claim_checks:
+                self.state.discussion_claim_checks.add(checked_key)
+                return not has_claim or has_unpublished_result
+            if has_unpublished_result:
+                return True
+            return any(
+                message.speaker != player
+                and re.search(r"(?:CO|主張).*(?:訂正|更新|見直)", message.content)
+                for message in self.state.conversation_log[-4:]
+            )
+        actor = self._player(player)
+        return actor.role is Role.SEER or any(
+            claim.claimant == player for claim in self.state.public_role_claims
+        )
+
+    def _has_unpublished_seer_result(self, player: str) -> bool:
+        return any(
+            (player, target) not in self.state.claim_ledger.public_seer_results
+            and not self._has_published_seer_result(player, target, result)
+            for target, result in self.state.seer_results.items()
+        )
+
+    def choose_discussion_claim(
+        self,
+        player: str,
+        day: int,
+        alive: tuple[str, ...],
+        history: tuple[Message, ...],
+    ) -> str:
+        actor = self._player(player)
+        started_at = self._start_action("discussion_claim", actor)
+        prompt_ctx = PromptBuilder.build_discussion_claim_prompt(
+            actor=actor,
+            alive_players=alive,
+            day=day,
+            state=self.state,
+        )
+        response = self._free_text_with_context(
+            "discussion_claim",
+            actor,
+            prompt_ctx,
+            "【CO】なし",
+            started_at,
+            recent_messages=history,
+            budget_key="co_correction",
+        )
+        return response
+
+    def deterministic_discussion_claim(self, player: str) -> str:
+        return self._deterministic_discussion_claim(self._player(player)) or "【CO】なし"
+
+    def discuss_body(
+        self,
+        player: str,
+        day: int,
+        alive: tuple[str, ...],
+        history: tuple[Message, ...],
+    ) -> str:
+        actor = self._player(player)
+        started_at = self._start_action("discussion_body", actor)
+        round_transcript = tuple(self.state.current_round_transcript)
+        prompt_ctx = PromptBuilder.build_discussion_prompt(
+            actor=actor,
+            alive_players=alive,
+            conversation_history=history,
+            day=day,
+            state=self.state,
+            include_claim=False,
+            context_strategy=actor.context_strategy or self.context_strategy,
+            free_form_priority=actor.model in self._discussion_format_weak_models,
+        )
+        # ステージ1: 通常要求。_free_text_with_context 内で1回の意味的再試行まで行う。
+        body = self._free_text_with_context(
+            "discussion_body",
+            actor,
+            prompt_ctx,
+            "パス",
+            started_at,
+            recent_messages=history,
+            budget_key="discussion",
+            context_diagnostics=prompt_ctx.diagnostics,
+        )
+        # TASK-034: 本文抽出＋重大度診断＋段階的処理。
+        # 本文が存在する場合はパスへ置換せず情報を保持。空または致命的違反のみ安全フォールバック。
+        extracted = extract_discussion_body(body)
+        previous_message = round_transcript[-1] if round_transcript else None
+        diagnosis = diagnose_discussion_body(
+            extracted,
+            actor,
+            self.state,
+            previous_message=previous_message,
+            round_transcript=round_transcript,
+        )
+        repair_applied = self._last_free_text_retries >= 1
+        fatal_safety_fallback = False
+        recovered_content = False
+
+        if diagnosis.fatal or extracted is None:
+            fatal_safety_fallback = diagnosis.fatal
+            final_body = "パス"
+        elif diagnosis.repairable and extracted and extracted.strip():
+            # 修復可能だが有用な本文あり：本文を保持し、すでに再試行で回収済みとみなす。
+            recovered_content = True
+            final_body = body
+        else:
+            # 警告または問題なし：本文をそのまま採用。
+            recovered_content = bool(extracted and extracted.strip())
+            final_body = body
+
+        self._record_discussion_body_metrics(
+            actor.model,
+            extracted,
+            diagnosis,
+            repair_applied,
+            fatal_safety_fallback,
+            final_body,
+        )
+        return final_body
+
+    def retry_after_secret_leak(
+        self,
+        player: str,
+        day: int,
+        alive: tuple[str, ...],
+        history: tuple[Message, ...],
+        leak_categories: tuple[str, ...],
+    ) -> str | None:
+        actor = self._player(player)
+        started_at = self._start_action("discussion_safety_retry", actor)
+        prompt_ctx = PromptBuilder.build_discussion_prompt(
+            actor=actor,
+            alive_players=alive,
+            conversation_history=history,
+            day=day,
+            state=self.state,
+            context_strategy=actor.context_strategy or self.context_strategy,
+        )
+        messages = [
+            {"role": "system", "content": prompt_ctx.system_prompt},
+            {
+                "role": "user",
+                "content": prompt_ctx.user_prompt
+                + "\n【安全再要求】\n"
+                "前の生成内容は使用せず、最初から短く作り直してください。"
+                "内部役職・陣営・相方・非公開情報・モデルや設定を明かさず、"
+                "公開情報だけに基づくゲーム内発言を返してください。"
+                "通常の公開COを行う場合はゲーム内主張としてだけ述べてください。"
+                "理由説明やメタ発言を含めず、議論本文を出力してください。\n"
+                f"検出分類（本文は非開示）：{', '.join(leak_categories)}",
+            },
+        ]
+        try:
+            response = self._chat(
+                actor,
+                messages,
+                action="discussion_safety_retry",
+                started_at=started_at,
+                request_number=1,
+                request_reason="secret_leak_safety_retry",
+                budget_key="discussion",
+                disable_thinking=True,
+            )
+        except OllamaError as error:
+            self._complete_action(
+                "discussion_safety_retry",
+                actor,
+                started_at,
+                semantic_retries=0,
+                transport_attempts=error.attempts,
+                fallback_used=True,
+                error=error,
+                failure_reason="secret_leak_retry_failed",
+                failure_reasons=("secret_leak_retry_failed",),
+            )
+            return None
+        metadata = response.to_metadata()
+        self._complete_action(
+            "discussion_safety_retry",
+            actor,
+            started_at,
+            semantic_retries=0,
+            transport_attempts=response.attempts,
+            fallback_used=False,
+            content=response.content,
+            response_metadata=metadata,
+            content_preserved=bool(response.content.strip()),
+        )
+        return response.content
+
+    def vote(
+        self, voter: str, candidates: tuple[str, ...], day: int, runoff: bool
+    ) -> str:
+        started_at = self._start_action("vote", self._player(voter))
+        actor = self._player(voter)
+        valid_candidates = self._valid_candidates(
+            actor, candidates, forbid_self=True
+        )
+        recent_speech = [
+            f"{message.speaker}: {message.content}"
+            for message in self.state.conversation_log
+            if message.speaker != "system"
+        ][-8:]
+        prompt_ctx = PromptBuilder.build_vote_prompt(
+            actor=actor,
+            alive_players=tuple(self.state.alive_players),
+            valid_candidates=valid_candidates,
+            today_summary="\n".join(recent_speech),
+            runoff=runoff,
+            day=day,
+            state=self.state,
+        )
+        return self._select_target(
+            ActionKind.VOTE,
+            actor,
+            candidates,
+            prompt_ctx,
+            started_at,
+            forbid_self=True,
+            budget_key="vote",
+        )
+
+    def _select_target(
+        self,
+        action: ActionKind,
+        actor: Player,
+        candidates: tuple[str, ...],
+        prompt_ctx: PromptContext,
+        started_at: float,
+        forbid_self: bool = False,
+        forbidden: tuple[str, ...] = (),
+        budget_key: str = "vote",
+    ) -> str:
+        valid_candidates = self._valid_candidates(
+            actor, candidates, forbid_self=forbid_self, forbidden=forbidden
+        )
+        if not valid_candidates:
+            raise ValueError(f"No valid candidates for {action.value} by {actor.name}.")
+
+        def _with_budget(
+            prompt: str,
+            *,
+            escalated: bool = False,
+            thinking_off: bool = False,
+        ) -> str:
+            return prompt + self._attempt_generation_guidance(
+                actor,
+                budget_key,
+                escalated=escalated,
+                thinking_off=thinking_off,
+            )
+
+        user_prompts = [_with_budget(prompt_ctx.user_prompt)]
+        raw_responses: list[str] = []
+        parsed_targets: list[str | None] = []
+        last_error: OllamaError | None = None
+        transport_attempts = 0
+        semantic_retries = 0
+        last_response_issue: str | None = None
+        failure_reasons: list[str] = []
+        response_metadata_history: list[dict[str, str | int | bool | None]] = []
+
+        for request_number in range(2):
+            messages = [
+                {"role": "system", "content": prompt_ctx.system_prompt},
+                {"role": "user", "content": user_prompts[-1]},
+            ]
+            try:
+                chat_response = self._chat(
+                    actor,
+                    messages,
+                    increase_generation=(
+                        request_number == 1
+                        and last_response_issue in GENERATION_ISSUE_REASONS
+                    ),
+                    action=action,
+                    started_at=started_at,
+                    request_number=request_number + 1,
+                    request_reason=(
+                        "初回"
+                        if request_number == 0
+                        else "意味的再要求"
+                    ),
+                    tool_based=False,
+                    budget_key=budget_key,
+                    # 再要求は1行形式だけを求めるため、思考をoffにして
+                    # 思考トークンが num_predict を消費しないようにする。
+                    disable_thinking=request_number == 1,
+                )
+            except OllamaError as error:
+                last_error = error
+                context_overflow = (
+                    error.kind != "timeout" and self._is_context_overflow(error)
+                )
+                failure_reason = (
+                    "context_overflow_compacted"
+                    if context_overflow
+                    else self._transport_failure_reason(error)
+                )
+                failure_reasons.append(failure_reason)
+                transport_attempts += error.attempts
+                if (
+                    request_number == 0
+                    and context_overflow
+                ):
+                    self._emit(
+                        "llm_action_parse_failed",
+                        action,
+                        actor,
+                        started_at,
+                        reason="context_overflow_compacted",
+                        will_retry=True,
+                    )
+                    user_prompts.append(
+                        _with_budget(
+                            self._target_retry_prompt(
+                                action,
+                                actor,
+                                valid_candidates,
+                                "context_overflow_compacted",
+                            ),
+                            thinking_off=True,
+                        )
+                    )
+                    semantic_retries += 1
+                    continue
+                self._emit(
+                    "llm_action_parse_failed",
+                    action,
+                    actor,
+                    started_at,
+                    reason=failure_reason,
+                    will_retry=False,
+                )
+                break
+
+            transport_attempts += chat_response.attempts
+            response_metadata = chat_response.to_metadata()
+            response_metadata_history.append(response_metadata)
+            raw_responses.append(chat_response.content)
+            final_response = self._final_response(chat_response.content)
+            if response_metadata.get("done_reason") == "length":
+                response_issue = "generation_truncated"
+            elif not final_response:
+                response_issue = (
+                    "thinking_only_response"
+                    if response_metadata.get("thinking_present")
+                    or self._has_thinking(chat_response.content)
+                    else "empty_content"
+                )
+            else:
+                response_issue = None
+            last_response_issue = response_issue
+            target = (
+                None
+                if response_issue is not None
+                else ActionParser.parse(final_response, action)
+            )
+            parsed_targets.append(target)
+            if ActionParser.validate_target(
+                target, valid_candidates, actor.name if forbid_self else None
+            ):
+                trace = ActionTrace(
+                    action, actor.name, tuple(raw_responses),
+                    tuple(parsed_targets), target, False,
+                    failure_reasons=tuple(failure_reasons),
+                    response_metadata=tuple(response_metadata_history),
+                )
+                self.traces.append(trace)
+                self._complete_action(
+                    action,
+                    actor,
+                    started_at,
+                    semantic_retries,
+                    transport_attempts,
+                    False,
+                    selected_target=target,
+                    failure_reasons=tuple(failure_reasons),
+                    response_metadata=response_metadata,
+                )
+                return target
+
+            if response_issue is not None:
+                failure_reason = response_issue
+                self._emit(
+                    "llm_action_parse_failed",
+                    action,
+                    actor,
+                    started_at,
+                    transport_retries=max(0, transport_attempts - len(raw_responses)),
+                    parsed_target=None,
+                    reason=failure_reason,
+                    response_metadata=response_metadata,
+                    will_retry=request_number == 0,
+                )
+                failure_reasons.append(failure_reason)
+                if request_number == 0:
+                    semantic_retries += 1
+                    user_prompts.append(
+                        _with_budget(
+                            self._target_retry_prompt(
+                                action,
+                                actor,
+                                valid_candidates,
+                                failure_reason,
+                            ),
+                            escalated=failure_reason in GENERATION_ISSUE_REASONS,
+                            thinking_off=True,
+                        )
+                    )
+                continue
+
+            self._emit(
+                "llm_action_parse_failed",
+                action,
+                actor,
+                started_at,
+                transport_retries=max(0, transport_attempts - len(raw_responses)),
+                parsed_target=target,
+                reason=(
+                    "invalid_target"
+                    if target is not None
+                    else "invalid_action_response"
+                ),
+                response_metadata=response_metadata,
+                will_retry=request_number == 0,
+            )
+            failure_reasons.append(
+                "invalid_target" if target is not None else "invalid_action_response"
+            )
+            if request_number == 0:
+                semantic_retries += 1
+                user_prompts.append(
+                    _with_budget(
+                        self._target_retry_prompt(
+                            action,
+                            actor,
+                            valid_candidates,
+                            "invalid_target" if target is not None else "invalid_action_response",
+                        ),
+                        thinking_off=True,
+                    )
+                )
+
+        fallback = self._rng.choice(valid_candidates)
+        self.traces.append(
+            ActionTrace(
+                action,
+                actor.name,
+                tuple(raw_responses),
+                tuple(parsed_targets),
+                fallback,
+                True,
+                last_error.to_dict() if last_error is not None else None,
+                tuple(failure_reasons),
+                tuple(response_metadata_history),
+            )
+        )
+        self._complete_action(
+            action,
+            actor,
+            started_at,
+            semantic_retries,
+            transport_attempts,
+            True,
+            selected_target=fallback,
+            error=last_error,
+            failure_reasons=tuple(failure_reasons),
+            failure_reason=(
+                failure_reasons[-1] if failure_reasons else "invalid_action_response"
+            ),
+            response_metadata=(
+                response_metadata_history[-1]
+                if response_metadata_history
+                else None
+            ),
+        )
+        return fallback
+
+    def _valid_candidates(
+        self,
+        actor: Player,
+        candidates: tuple[str, ...],
+        forbid_self: bool = False,
+        forbidden: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
+        alive = set(self.state.alive_players)
+        return tuple(
+            candidate
+            for candidate in candidates
+            if candidate in alive
+            and candidate not in forbidden
+            and (not forbid_self or candidate != actor.name)
+        )
+
+    def _target_retry_prompt(
+        self,
+        action: ActionKind,
+        actor: Player,
+        valid_candidates: tuple[str, ...],
+        failure_reason: str,
+    ) -> str:
+        corrections = {
+            "empty_content": "前回は空でした。",
+            "thinking_only_response": "前回は思考だけでした。回答だけを出してください。",
+            "generation_truncated": "前回は生成上限で途切れました。説明せず形式だけを出してください。",
+            "invalid_target": "前回の対象は候補外でした。有効候補だけから選んでください。",
+            "invalid_action_response": "前回は対象を解析できませんでした。",
+            "context_overflow_compacted": "前回は入力が長すぎました。候補だけを見て簡潔に選んでください。",
+        }
+        return (
+            f"【再回答】{corrections.get(failure_reason, '前回の回答を修正してください。')}\n"
+            f"- 行動：{self._label(action)}\n"
+            f"- あなた：{actor.name}\n"
+            f"- 有効候補：{', '.join(valid_candidates)}\n"
+            f"候補から1名だけ選び、「{self._label(action)}：名前」の1行だけを返してください。"
+        )
+
+    def _public_response_leak_findings(
+        self, action: str, actor: Player, content: str
+    ) -> tuple[LeakFinding, ...]:
+        if action not in {"discussion", "discussion_body", "discussion_claim"}:
+            return ()
+        structured = parse_discussion_output(content)
+        claim_text = ""
+        result_text = ""
+        if structured is not None:
+            claim_text = structured.claim
+            result_text = structured.result
+        elif action == "discussion_claim":
+            decision = parse_discussion_claim(content)
+            if decision is not None:
+                claim_text = decision.claim
+                result_text = decision.result
+        else:
+            claim_text = content
+            result_text = content
+        allowed_claim = extract_public_role_claim(claim_text) is not None
+        allowed_results: frozenset[tuple[str, str]] = frozenset()
+        if (
+            actor.role is Role.SEER
+            and extract_public_role_claim(claim_text) == Role.SEER.value
+        ):
+            result = extract_public_seer_result(
+                f"{claim_text}\n{result_text}",
+                tuple(player.name for player in self.state.players),
+            )
+            if (
+                result is not None
+                and self.state.seer_results.get(result[0]) == result[1]
+            ):
+                allowed_results = frozenset({result})
+        return SecretLeakGuard.inspect(
+            content,
+            actor,
+            self.state,
+            allowed_public_claim=(
+                allowed_claim
+                or SecretLeakGuard.allows_public_claim(content, actor)
+            ),
+            allowed_public_results=allowed_results,
+        )
+
+    def _free_text_with_context(
+        self,
+        action: str,
+        actor: Player,
+        prompt_ctx: PromptContext,
+        fallback: str,
+        started_at: float,
+        recent_messages: tuple[Message, ...] | None = None,
+        budget_key: str = "discussion",
+        context_diagnostics: dict[str, object] | None = None,
+    ) -> str:
+        if context_diagnostics is not None:
+            self._emit(
+                "discussion_context_selected",
+                action,
+                actor,
+                started_at,
+                **context_diagnostics,
+            )
+        raw_responses: list[str] = []
+        last_error: OllamaError | None = None
+        transport_attempts = 0
+        last_response_issue: str | None = None
+        failure_reasons: list[str] = []
+        # TASK-034: 直近の_free_text_with_context で意味的再試行が行われたかを呼び出し側で参照する。
+        self._last_free_text_retries = 0
+        response_metadata_history: list[dict[str, str | int | bool | None]] = []
+        last_spoken_result: tuple[str, str] | None = None
+        last_soft_discussion: tuple[str, str, dict[str, str | int | bool | None]] | None = None
+        for attempt in range(2):
+            # TASK-034: 再要求が行われたかをdiscussion_bodyの後処理で参照する。
+            self._last_free_text_retries = attempt
+            is_co_correction = (
+                attempt
+                and action == "discussion"
+                and last_response_issue == "seer_result_without_claim"
+            )
+            is_light_retry = bool(attempt) and not is_co_correction
+            keeps_round_context = (
+                self.context_strategy == "round_transcript_memory"
+                or actor.context_strategy == "round_transcript_memory"
+            )
+            user_prompt = (
+                self._seer_co_correction_prompt(actor, last_spoken_result)
+                if is_co_correction
+                else (
+                    prompt_ctx.user_prompt
+                    + self._discussion_retry_instruction(
+                        action, actor, last_response_issue
+                    )
+                    + "\n現在ラウンドの全文と継続メモを維持したまま、問題箇所だけ修正してください。"
+                    if keeps_round_context
+                    else self._short_discussion_retry_prompt(
+                    actor,
+                    last_response_issue,
+                    recent_messages,
+                    body_only=action == "discussion_body",
+                    )
+                )
+                if is_light_retry and action in {"discussion", "discussion_body"}
+                else self._wolf_consult_light_retry_prompt(
+                    actor,
+                    recent_messages,
+                )
+                if is_light_retry and action == "wolf_discussion"
+                else prompt_ctx.user_prompt
+                + (
+                    self._discussion_retry_instruction(
+                        action, actor, last_response_issue
+                    )
+                    if attempt
+                    else ""
+                )
+            )
+            attempt_budget_key = "co_correction" if is_co_correction else budget_key
+            generation_escalation = (
+                attempt == 1 and last_response_issue in GENERATION_ISSUE_REASONS
+            )
+            user_prompt += self._attempt_generation_guidance(
+                actor,
+                attempt_budget_key,
+                escalated=generation_escalation,
+                thinking_off=attempt == 1
+                and last_response_issue in GENERATION_ISSUE_REASONS,
+            )
+            messages = [
+                {"role": "system", "content": prompt_ctx.system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            try:
+                chat_response = self._chat_with_claim_tools(
+                    actor,
+                    messages,
+                    action,
+                    increase_generation=generation_escalation,
+                    started_at=started_at,
+                    request_number=attempt + 1,
+                    request_reason=(
+                        "初回"
+                        if attempt == 0
+                        else (
+                            "CO補正"
+                            if is_co_correction
+                            else "軽い再要求"
+                            if is_light_retry and action == "discussion"
+                            else "意味的再要求"
+                        )
+                    ),
+                    tool_based=(action == "discussion"),
+                    budget_key=attempt_budget_key,
+                    # TASK-034: 思考オフは生成上限（generation limit等）に限定し、
+                    # 意味検証失敗では思考を維持する。
+                    disable_thinking=(
+                        attempt == 1
+                        and last_response_issue in GENERATION_ISSUE_REASONS
+                    ),
+                )
+            except OllamaError as error:
+                last_error = error
+                context_overflow = (
+                    error.kind != "timeout" and self._is_context_overflow(error)
+                )
+                last_response_issue = (
+                    "context_overflow_compacted"
+                    if context_overflow
+                    else self._transport_failure_reason(error)
+                )
+                failure_reasons.append(last_response_issue)
+                transport_attempts += error.attempts
+                if (
+                    attempt == 0
+                    and context_overflow
+                ):
+                    self._emit(
+                        "llm_action_parse_failed",
+                        action,
+                        actor,
+                        started_at,
+                        reason="context_overflow_compacted",
+                        will_retry=True,
+                    )
+                    continue
+                if (
+                    attempt == 0
+                    and error.kind == "timeout"
+                    and action
+                    in {
+                        "discussion",
+                        "discussion_body",
+                        "discussion_claim",
+                        "wolf_discussion",
+                    }
+                ):
+                    self._emit(
+                        "llm_action_parse_failed",
+                        action,
+                        actor,
+                        started_at,
+                        failure_class=classify_failure_reason(last_response_issue),
+                        reason=last_response_issue,
+                        will_retry=True,
+                        retry_strategy="short_prompt_thinking_off",
+                    )
+                    continue
+                self._emit(
+                    "llm_action_parse_failed",
+                    action,
+                    actor,
+                    started_at,
+                    failure_class=classify_failure_reason(last_response_issue),
+                    reason=last_response_issue,
+                    will_retry=False,
+                )
+                break
+
+            transport_attempts += chat_response.attempts
+            metadata = chat_response.to_metadata()
+            response_metadata_history.append(metadata)
+            raw_responses.append(chat_response.content)
+            response_text = self._final_response(chat_response.content).strip()
+            is_pass = self._is_pass(response_text)
+            leak_findings = self._public_response_leak_findings(
+                action, actor, response_text
+            )
+            leak_findings = tuple(
+                finding
+                for finding in leak_findings
+                if finding.category != "hidden_result_leak"
+            )
+            if leak_findings:
+                self.traces.append(
+                    ActionTrace(
+                        action,
+                        actor.name,
+                        tuple(raw_responses),
+                        (),
+                        None,
+                        False,
+                        failure_reasons=tuple(failure_reasons),
+                        response_metadata=tuple(response_metadata_history),
+                        content_preserved=True,
+                    )
+                )
+                self._complete_action(
+                    action,
+                    actor,
+                    started_at,
+                    attempt,
+                    transport_attempts,
+                    False,
+                    content=response_text,
+                    failure_reasons=tuple(failure_reasons),
+                    content_preserved=True,
+                    recovered_content=False,
+                    repair_applied=self._last_free_text_retries >= 1,
+                    fatal_safety_fallback=False,
+                    validation_severity="ok",
+                )
+                return response_text
+            must_use_seer_info = self._must_use_seer_info(action, actor)
+            uses_seer_info = self._references_seer_result(actor, response_text)
+            holds_human_seer_result = self._holds_human_seer_result(
+                action, actor, response_text
+            )
+            response_issue = (
+                self._discussion_claim_response_issue(actor, response_text)
+                if action == "discussion_claim" and response_text
+                else self._discussion_response_issue(
+                    actor, response_text, recent_messages
+                )
+                if action in {"discussion", "discussion_body"}
+                and response_text
+                and (
+                    not is_pass or has_discussion_output_markers(response_text)
+                )
+                else None
+            )
+            claim_decision = (
+                parse_discussion_claim(response_text)
+                if action == "discussion_claim" and response_text
+                else None
+            )
+            if claim_decision is not None and claim_decision.ignored_trailing_text:
+                self._emit(
+                    "discussion_claim_extra_text_discarded",
+                    action,
+                    actor,
+                    started_at,
+                    reason="structured_claim_recovered",
+                )
+            if metadata.get("done_reason") == "length" and attempt == 0:
+                response_issue = "generation_truncated"
+            elif not response_text and response_issue is None:
+                response_issue = (
+                    "thinking_only_response"
+                    if metadata.get("thinking_present")
+                    or self._has_thinking(chat_response.content)
+                    else "empty_content"
+                )
+            if (
+                metadata.get("done_reason") == "length"
+                and metadata.get("thinking_present")
+                and not response_text
+            ):
+                # 思考生成が生成上限をすべて消費し、本文が生成されなかった。
+                # 同じ失敗を毎ターン繰り返さないため、このモデルの思考行動をoffへ落とす。
+                self._record_thinking_budget_exhausted(
+                    actor, action, started_at, metadata
+                )
+            if (
+                attempt == 0
+                and action in {"discussion", "discussion_body"}
+                and response_issue in LEDGER_REPAIR_ISSUES
+            ):
+                original_issue = response_issue
+                repaired = self._repair_discussion_response(
+                    actor, response_text, original_issue, recent_messages
+                )
+                if repaired is not None:
+                    repaired_issue = self._discussion_response_issue(
+                        actor, repaired, recent_messages
+                    )
+                    if repaired_issue is None:
+                        response_text = repaired
+                        response_issue = None
+                        uses_seer_info = self._references_seer_result(
+                            actor, response_text
+                        )
+                        holds_human_seer_result = self._holds_human_seer_result(
+                            action, actor, response_text
+                        )
+                        self._emit(
+                            "ledger_repair",
+                            action,
+                            actor,
+                            started_at,
+                            reason=original_issue,
+                            body_preserved=bool(response_text),
+                            regeneration_avoided=True,
+                        )
+            if (
+                attempt == 1
+                and action in {"discussion", "discussion_body"}
+                and response_issue in LEDGER_REPAIR_ISSUES
+            ):
+                original_issue = response_issue
+                repaired = self._repair_discussion_response(
+                    actor, response_text, original_issue, recent_messages
+                )
+                if repaired is not None:
+                    repaired_issue = self._discussion_response_issue(
+                        actor, repaired, recent_messages
+                    )
+                    if repaired_issue is None:
+                        response_text = repaired
+                        response_issue = None
+                        uses_seer_info = self._references_seer_result(
+                            actor, response_text
+                        )
+                        holds_human_seer_result = self._holds_human_seer_result(
+                            action, actor, response_text
+                        )
+                        self._emit(
+                            "discussion_integrity_repaired",
+                            action,
+                            actor,
+                            started_at,
+                            reason=original_issue,
+                        )
+                        self._emit(
+                            "ledger_repair",
+                            action,
+                            actor,
+                            started_at,
+                            reason=original_issue,
+                            body_preserved=response_text == repaired,
+                            regeneration_avoided=False,
+                        )
+            if (
+                action in {"discussion", "discussion_body"}
+                and response_text
+                and response_issue in SOFT_DISCUSSION_ISSUES
+            ):
+                last_soft_discussion = (
+                    response_text,
+                    response_issue,
+                    metadata,
+                )
+            last_response_issue = response_issue
+            if response_issue == "seer_result_without_claim":
+                last_spoken_result = extract_public_seer_result(
+                    response_text,
+                    tuple(player.name for player in self.state.players),
+                )
+                self._emit(
+                    "seer_result_claim_missing",
+                    action,
+                    actor,
+                    started_at,
+                    reason=response_issue,
+                    will_retry=attempt == 0,
+                )
+            if response_text and response_issue is None and (
+                not must_use_seer_info
+                or (
+                    not is_pass
+                    and (uses_seer_info or holds_human_seer_result)
+                )
+            ):
+                if is_pass:
+                    response_text = "パス"
+                elif must_use_seer_info and (
+                    uses_seer_info or holds_human_seer_result
+                ):
+                    self._seer_info_used_day[actor.name] = self.state.day
+                elif action == "discussion_claim" and claim_decision is not None:
+                    if claim_decision.claim in {"なし", "保留"}:
+                        response_text = f"【CO】{claim_decision.claim}"
+                    else:
+                        claimed_role = extract_public_role_claim(
+                            claim_decision.claim
+                        )
+                        role_labels = {
+                            Role.SEER.value: "占い師CO",
+                            Role.WOLF.value: "人狼CO",
+                            Role.MADMAN.value: "狂人CO",
+                            Role.VILLAGER.value: "村人CO",
+                        }
+                        role_label = role_labels.get(claimed_role or "")
+                        if role_label is not None:
+                            response_text = f"【CO】{role_label}"
+                            if claim_decision.result:
+                                result = extract_public_seer_result(
+                                    claim_decision.result,
+                                    tuple(
+                                        player.name for player in self.state.players
+                                    ),
+                                )
+                                if result is not None:
+                                    target, result_kind = result
+                                    result_label = (
+                                        "人狼" if result_kind == "wolf" else "人間"
+                                    )
+                                    response_text += (
+                                        f"\n【結果】対象={target} 判定={result_label}"
+                                    )
+                self.traces.append(
+                    ActionTrace(
+                        action,
+                        actor.name,
+                        tuple(raw_responses),
+                        (),
+                        None,
+                        False,
+                        failure_reasons=tuple(failure_reasons),
+                        response_metadata=tuple(response_metadata_history),
+                        content_preserved=True,
+                    )
+                )
+                self._complete_action(
+                    action,
+                    actor,
+                    started_at,
+                    attempt,
+                    transport_attempts,
+                    False,
+                    content=response_text,
+                    failure_reasons=tuple(failure_reasons),
+                    content_preserved=True,
+                    response_metadata=metadata,
+                )
+                return response_text
+
+            reason = (
+                response_issue
+                if response_issue is not None
+                else "seer_result_required"
+                if must_use_seer_info
+                else "invalid_discussion_response"
+            )
+            failure_reasons.append(reason)
+            self._emit(
+                "llm_action_parse_failed",
+                action,
+                actor,
+                started_at,
+                transport_retries=max(0, transport_attempts - len(raw_responses)),
+                failure_class=classify_failure_reason(reason),
+                reason=reason,
+                response_metadata=metadata,
+                will_retry=attempt == 0,
+            )
+
+        if (
+            action == "discussion"
+            and "seer_result_without_claim" in failure_reasons
+            and last_spoken_result is not None
+        ):
+            target, result = last_spoken_result
+            if (
+                actor.role is Role.SEER
+                and self.state.seer_results.get(target) == result
+                and not self._has_published_seer_result(actor.name, target, result)
+            ):
+                raw_content = raw_responses[-1] if raw_responses else ""
+                structured = parse_discussion_output(raw_content)
+                body = structured.body if structured is not None else re.sub(
+                    r"(?m)^\s*【(?:CO|結果|本文)】\s*", "", raw_content
+                ).strip()
+                fallback_body = (
+                    f"{target}への投票を提案します。"
+                    if result == "wolf"
+                    else f"{target}への疑いは弱め、別の可能性を慎重に考えたいです。"
+                )
+                if result == "wolf":
+                    repaired = (
+                        "【CO】"
+                        f"占い師CO：対象={target}、判定=人狼、"
+                        f"理由=実際の占い結果です、投票提案={target}に投票します。\n"
+                        f"【本文】{body or fallback_body}"
+                    )
+                else:
+                    repaired = (
+                        "【CO】"
+                        f"占い師CO：対象={target}、判定=人間、"
+                        "理由=実際の占い結果です、投票提案=別の可能性を慎重に考えます。\n"
+                        f"【本文】{body or fallback_body}"
+                    )
+                self._emit(
+                    "seer_result_claim_fallback",
+                    action,
+                    actor,
+                    started_at,
+                    reason="seer_result_without_claim",
+                    target=target,
+                    result=result,
+                )
+                self._emit(
+                    "discussion_claim_deterministically_repaired",
+                    action,
+                    actor,
+                    started_at,
+                    reason="seer_result_without_claim",
+                    target=target,
+                    result=result,
+                )
+                self._seer_info_used_day[actor.name] = self.state.day
+                self.traces.append(
+                    ActionTrace(
+                        action,
+                        actor.name,
+                        tuple(raw_responses),
+                        (),
+                        None,
+                        True,
+                        failure_reasons=tuple(failure_reasons),
+                        response_metadata=tuple(response_metadata_history),
+                        content_preserved=bool(body),
+                    )
+                )
+                self._complete_action(
+                    action,
+                    actor,
+                    started_at,
+                    max(0, len(raw_responses) - 1),
+                    transport_attempts,
+                    True,
+                    content=repaired,
+                    failure_reasons=tuple(failure_reasons),
+                    content_preserved=bool(body),
+                    response_metadata=(
+                        response_metadata_history[-1]
+                        if response_metadata_history
+                        else None
+                    ),
+                )
+                return repaired
+
+        if last_soft_discussion is not None:
+            response_text, soft_issue, metadata = last_soft_discussion
+            if soft_issue == "discussion_output_format":
+                body_match = re.search(
+                    r"【本文】\s*(.*)", response_text, re.DOTALL
+                )
+                if response_text.count("【本文】") > 1:
+                    body_match = None
+                response_text = (
+                    body_match.group(1).strip()
+                    if body_match is not None
+                    else re.sub(
+                        r"(?m)^\s*【(?:CO|結果|本文)】\s*",
+                        "",
+                        response_text,
+                    ).strip()
+                )
+            elif soft_issue == "repeated_discussion_topic":
+                repaired = self._repair_discussion_response(
+                    actor,
+                    response_text,
+                    soft_issue,
+                    recent_messages,
+                )
+                if repaired is not None:
+                    response_text = repaired
+            if (
+                soft_issue == "discussion_output_format"
+                and body_match is None
+                and has_discussion_output_markers(
+                    last_soft_discussion[0]
+                )
+            ):
+                response_text = ""
+            if response_text and self._discussion_response_issue(
+                actor, response_text, recent_messages
+            ) not in {
+                "external_game_memory",
+                "unverified_past_vote_reference",
+                "unverified_dead_role",
+                "dead_player_question",
+                "dead_player_action_target",
+                "out_of_phase_action_claim",
+                "unknown_attacker_claim",
+                "unverified_game_event",
+                "unverified_attributed_speech",
+            }:
+                self._emit(
+                    "llm_discussion_soft_issue_kept",
+                    action,
+                    actor,
+                    started_at,
+                    reason=soft_issue,
+                    failure_class=classify_failure_reason(soft_issue),
+                    body_preserved=True,
+                )
+                self.traces.append(
+                    ActionTrace(
+                        action,
+                        actor.name,
+                        tuple(raw_responses),
+                        (),
+                        None,
+                        False,
+                        last_error.to_dict() if last_error is not None else None,
+                        tuple(failure_reasons),
+                        tuple(response_metadata_history),
+                    )
+                )
+                self._complete_action(
+                    action,
+                    actor,
+                    started_at,
+                    max(0, len(raw_responses) - 1),
+                    transport_attempts,
+                    False,
+                    content=response_text,
+                    error=last_error,
+                    failure_reasons=tuple(failure_reasons),
+                    content_preserved=True,
+                    response_metadata=metadata,
+                )
+                return response_text
+
+        forced_seer_message = (
+            self._seer_info_fallback(actor)
+            if self._must_use_seer_info(action, actor)
+            or (
+                action == "discussion"
+                and "seer_result_without_claim" in failure_reasons
+            )
+            else None
+        )
+        if forced_seer_message is not None:
+            self._seer_info_used_day[actor.name] = self.state.day
+            if "seer_result_without_claim" in failure_reasons:
+                self._emit(
+                    "seer_result_claim_fallback",
+                    action,
+                    actor,
+                    started_at,
+                    reason="seer_result_without_claim",
+                )
+        fallback_response = forced_seer_message or (
+            self._deterministic_discussion_claim(actor)
+            if action == "discussion_claim"
+            else None
+        ) or ("【CO】なし" if action == "discussion_claim" else "パス")
+        self.traces.append(
+            ActionTrace(
+                action,
+                actor.name,
+                tuple(raw_responses),
+                (),
+                None,
+                True,
+                last_error.to_dict() if last_error is not None else None,
+                tuple(failure_reasons),
+                tuple(response_metadata_history),
+            )
+        )
+        self._complete_action(
+            action,
+            actor,
+            started_at,
+            max(0, len(raw_responses) - 1),
+            transport_attempts,
+            True,
+            content=fallback_response,
+            error=last_error,
+            failure_reasons=tuple(failure_reasons),
+            failure_reason=(
+                failure_reasons[-1] if failure_reasons else "unavailable_response"
+            ),
+            response_metadata=(
+                response_metadata_history[-1]
+                if response_metadata_history
+                else None
+            ),
+        )
+        return fallback_response
+
+    @staticmethod
+    def _final_response(response: str) -> str:
+        final = _THINK_BLOCK.sub("", response)
+        final = _UNCLOSED_THINK_BLOCK.sub("", final)
+        return final.replace("</think>", "").strip()
+
+    @staticmethod
+    def _is_pass(response: str) -> bool:
+        normalized = response.strip().strip("。.!！?？「」『』\"' ")
+        return normalized.casefold() in {"パス", "pass"}
+
+    def _must_use_seer_info(self, action: str, actor: Player) -> bool:
+        return (
+            action == "discussion"
+            and actor.role.value == "seer"
+            and bool(self.state.seer_results)
+            and self._seer_info_used_day.get(actor.name) != self.state.day
+        )
+
+    def _holds_human_seer_result(
+        self, action: str, actor: Player, response: str
+    ) -> bool:
+        structured = parse_discussion_output(response)
+        return (
+            action == "discussion"
+            and actor.role is Role.SEER
+            and structured is not None
+            and structured.claim == "保留"
+            and bool(self.state.seer_results)
+            and all(result == "human" for result in self.state.seer_results.values())
+        )
+
+    def _references_seer_result(self, actor: Player, response: str) -> bool:
+        if (
+            actor.role.value != "seer"
+            or not response
+            or not self.state.seer_results
+        ):
+            return False
+        latest_target, _ = self._latest_seer_result()
+        if any(
+            claim.claimant == actor.name
+            and claim.claimed_role == Role.SEER.value
+            and claim.target == latest_target
+            for claim in self.state.public_role_claims
+        ):
+            return True
+        mentions_result_target = latest_target in response
+        usage_terms = (
+            "占い",
+            "結果",
+            "情報",
+            "疑い",
+            "警戒",
+            "信頼",
+            "擁護",
+            "推理",
+            "seer",
+            "result",
+            "information",
+            "suspect",
+        )
+        return mentions_result_target and any(
+            term.casefold() in response.casefold() for term in usage_terms
+        )
+
+    def _seer_info_fallback(self, actor: Player) -> str | None:
+        if actor.role.value != "seer" or not self.state.seer_results:
+            return None
+        target, result = self._latest_seer_result()
+        if result == "wolf":
+            return (
+                "【CO】"
+                f"占い師CO：対象={target}、判定=人狼、"
+                f"理由=実際の占い結果です、投票提案={target}に投票します。\n"
+                f"【本文】{target}への投票を提案します。"
+            )
+        return (
+            "【CO】"
+            f"占い師CO：対象={target}、判定=人間、"
+            f"理由=実際の占い結果を踏まえ、その人への疑いを弱めます、"
+            "投票提案=別の可能性を慎重に考えます。\n"
+            f"【本文】{target}への疑いは弱め、別の可能性を慎重に考えたいです。"
+        )
+
+    def _discussion_retry_instruction(
+        self, action: str, actor: Player, response_issue: str | None = None
+    ) -> str:
+        retry_guidance = {
+            "empty_content": (
+                "前回は本文が空でした。思考・前置きを出さず、"
+                "【本文】へ3～5文の最終回答だけを出力してください。"
+            ),
+            "thinking_only_response": (
+                "前回は思考だけで最終回答がありませんでした。思考を出さず、"
+                "【本文】へ3～5文の最終回答だけを出力してください。"
+            ),
+            "generation_truncated": (
+                "前回は生成上限で途切れました。二層形式のまま、【本文】を3～5文で"
+                "途中で止めずに最後まで出力してください。思考・前置き・説明は出さず、"
+                "質問への回答、新しい根拠または反証、現時点の疑いと投票意向を順に含めてください。"
+            ),
+            "discussion_output_format": "前回は二層形式が不正でした。必ず「【CO】なし または CO内容」の次行に「【本文】議論本文」を出力してください。CO保留は「【CO】保留」とし、本文は空にしないでください。",
+            "discussion_claim_format": (
+                "COだけを再回答してください。1行目は「【CO】なし」「【CO】保留」"
+                "「【CO】占い師CO」「【CO】人狼CO」「【CO】狂人CO」「【CO】村人CO」"
+                "のいずれか1つです。占い師COで結果も公開するときだけ、2行目に"
+                "「【結果】対象=Player X 判定=人狼/人間」を付けてください。"
+                "それ以外の行・理由・本文は出力しないでください。"
+            ),
+            "wrong_response_language": "指定された応答言語で短く発言してください。",
+            "third_person_self_reference": "自分自身を第三者のように名前で説明せず、一人称で発言してください。",
+            "unknown_player_reference": "実在しないプレイヤー名を使わず、現在のプレイヤーだけに言及してください。",
+            "unverified_game_event": "ゲーム台帳にない襲撃・処刑・死亡を事実として述べないでください。",
+            "unknown_attacker_claim": "襲撃者は公開されていません。推測を確定した事実として断言しないでください。",
+            "unverified_dead_role": "死亡者の真役職は非公開です。役職を確定事項として扱わないでください。",
+            "dead_player_action_target": "死亡者へ現在の投票・処刑・能力行動を要求できません。死亡者への言及は残して構いませんが、要求を生存者への質問か検討へ置き換えてください。",
+            "dead_player_question": "死亡者は回答できません。死亡者の過去の言動への言及は残して構いませんが、質問を取り下げ、生存者へ同じ確認をしてください。",
+            "external_game_memory": "過去ゲーム・以前の役職・学習時の記憶は使えません。該当部分を「記録にないため判断できない」とし、現在ゲームの記録にある内容は残してください。",
+            "unverified_past_vote_reference": "過去の投票は現在ゲームの投票台帳にある記録だけを使ってください。記録がなければ「記録にないため判断できない」としてください。",
+            "repeated_discussion_topic": "当日の議論ですでに出た質問・結論を繰り返さず、その論点は省いて新しい確認事項を述べてください。",
+            "out_of_phase_action_claim": "昼議論中に夜の能力行動を実行済み・実行予定として断言しないでください。",
+            "unverified_attributed_speech": "履歴にない発言を他人の発言として引用しないでください。",
+            "repeated_speech": "過去の自分の発言を繰り返さず、新しい根拠か提案を加えてください。",
+            "question_not_answered_first": "最初の一文で直前の発言者へ直接回答してください。",
+            "wolf_result_not_disclosed": "真占い師として占い師COを行い、未公開の人狼判定を対象・判定・理由・投票提案とともに公開してください。",
+            "seer_result_without_claim": "占い結果の対象や判定を発言したため、同じ発言内で明示的に占い師COしてください。定型文「占い師CO：対象=対象名、判定=人狼/人間、理由=理由、投票提案=提案」を使ってください。結果を公開しない場合は対象名と判定を述べず、結果を伏せた発言にしてください。",
+            "inconsistent_seer_result": "あなた自身が以前に主張した占い対象の判定を変更せず、過去の主張と一貫させてください。",
+            "inconsistent_role_claim": "以前の役職主張を別の役職へ変更せず、一貫させてください。",
+            "vague_wait_and_see": "「様子見」や「情報不足」だけの繰り返しは避け、具体的な対象・根拠・判断を述べてください。",
+        }
+        if response_issue in retry_guidance:
+            return f"\n前回の応答を採用できませんでした。{retry_guidance[response_issue]}"
+        if self._must_use_seer_info(action, actor):
+            target, _ = self._latest_seer_result()
+            return (
+                "\n前回の応答は空、パス、または占い結果を活用していませんでした。"
+                f"今回は必ず{target}の占い結果を踏まえた判断を具体的に話してください。"
+                "結果を公開せずに活用しても構いません。"
+            )
+        return "\n前回の応答は空または空白のみでした。内容のある発言をしてください。"
+
+    def _short_discussion_retry_prompt(
+        self,
+        actor: Player,
+        response_issue: str | None,
+        recent_messages: tuple[Message, ...] | None = None,
+        *,
+        body_only: bool = False,
+    ) -> str:
+        public_claims = list(self.state.public_role_claims)
+        recorded_seer_claims = {
+            (claim.day, claim.claimant, claim.target, claim.result)
+            for claim in public_claims
+            if claim.claimed_role == Role.SEER.value
+        }
+        for claim in self.state.seer_claims:
+            key = (claim.day, claim.claimant, claim.target, claim.result)
+            if key not in recorded_seer_claims:
+                public_claims.append(
+                    PublicRoleClaim(
+                        day=claim.day,
+                        claimant=claim.claimant,
+                        claimed_role=Role.SEER.value,
+                        target=claim.target,
+                        result=claim.result,
+                    )
+                )
+        public_claims = [
+            f"{claim.claimant}は"
+            f"{ROLE_NAMES_JA.get(Role(claim.claimed_role), claim.claimed_role)}を主張"
+            + (
+                f"（{claim.target}={'人狼' if claim.result == 'wolf' else '人間'}）"
+                if claim.target is not None and claim.result is not None
+                else ""
+            )
+            for claim in public_claims[-4:]
+        ]
+        death_events = sorted(
+            [
+                (day, "襲撃", name)
+                for day, name in self.state.attack_deaths
+            ]
+            + [(day, "処刑", name) for day, name in self.state.executions]
+        )[-3:]
+        death_summary = "、".join(
+            f"{day}日目{name}死亡（{cause}）" for day, cause, name in death_events
+        ) or "なし"
+        dead_players = tuple(
+            player.name for player in self.state.players if not player.is_alive
+        )
+        latest_vote = (
+            "、".join(
+                f"{voter}→{target}"
+                for voter, target in self.state.vote_history[-1][2].items()
+            )
+            if self.state.vote_history
+            else "なし"
+        )
+        vote_ledger = (
+            "、".join(
+                f"{vote_day}日目{'決選' if runoff else '通常'}: "
+                + " / ".join(
+                    f"{voter}→{target}" for voter, target in votes.items()
+                )
+                for vote_day, runoff, votes in self.state.vote_history
+            )
+            or "なし"
+        )
+        conversation = (
+            recent_messages
+            if recent_messages is not None
+            else tuple(self.state.conversation_log)
+        )
+        current_day_history = PromptBuilder.current_day_messages(conversation)
+        recent_speech = [
+            f"{message.speaker}: {message.content[:240]}"
+            for message in current_day_history[-3:]
+        ]
+        private_seer_results = (
+            [
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for _, target, result in self.state.seer_result_history[-3:]
+            ]
+            if actor.role is Role.SEER
+            else []
+        )
+        if (
+            actor.role is Role.SEER
+            and not private_seer_results
+            and self.state.seer_results
+        ):
+            private_seer_results = [
+                f"{target}: {'人狼' if result == 'wolf' else '人間'}"
+                for target, result in list(self.state.seer_results.items())[-3:]
+            ]
+        guidance = self._discussion_retry_instruction(
+            "discussion", actor, response_issue
+        ).strip()
+        previous_message = next(
+            reversed(current_day_history),
+            None,
+        )
+        if PromptBuilder._is_directed_to_player(
+            actor,
+            previous_message,
+            current_day_history,
+        ):
+            guidance += (
+                f" 最初の一文で{previous_message.speaker}への回答をしてください。"
+            )
+        return (
+            "短い再回答です。省略された古い会話は参照せず、次の事実と直近発言だけを使ってください。\n"
+            "【ゲームシステムが確定した事実】\n"
+            f"- あなたのプレイヤー名：{actor.name}\n"
+            f"- あなたの役職：{ROLE_NAMES_JA[actor.role]}\n"
+            f"- 現在の日数：{self.state.day}日目\n"
+            "- 現在のフェーズ：昼議論\n"
+            f"- 昼議論ターン：{self.state.discussion_turn}/3\n"
+            f"- 現在の生存者：{', '.join(self.state.alive_players)}\n"
+            f"- 既知の死亡者：{', '.join(dead_players) or 'なし'}\n"
+            f"- 確定した死亡履歴（直近3件）：{death_summary}\n"
+            f"- 最新の投票結果：{latest_vote}\n"
+            f"- このゲームの投票台帳：{vote_ledger}\n"
+            f"- 応答言語：{actor.response_language}\n"
+            "【セオリー（推論・確定事実ではない）】未公開の人狼判定は早期CO・公開を優先。"
+            "人間判定だけならCO・結果の保留も可。単独COは1巡後も対抗なしなら真寄りだが真確定ではない。"
+            "人狼・狂人の騙りや対抗COは選択肢であり必須ではない。\n"
+            f"【公開CO・結果】{'; '.join(public_claims) or 'なし'}。\n"
+            f"【直近の公開発言（未確認）】{'; '.join(recent_speech) or 'なし'}。\n"
+            "【情報区分】公開発言・CO主張は未確認情報で、確定事実として扱わないでください。\n"
+            "過去ゲーム・以前の役職・学習時の記憶・実在の人物情報を使わず、このゲームの記録だけを根拠にしてください。"
+            "台帳にない内容は「記録にないため判断できない」と答えてください。死亡者には質問せず、生存者に質問してください。\n"
+            + (
+                f"【占い師本人だけの非公開情報】{'; '.join(private_seer_results)}。\n"
+                if private_seer_results
+                else ""
+            )
+            + f"【修正指示】{guidance}\n"
+            + (
+                "CO判定は完了しています。マーカーやCOを付けず、本文だけを3～5文で出力してください。"
+                if body_only
+                else "回答は必ず「【CO】なし/保留/CO内容」の次行に「【本文】本文」の2行構造にしてください。"
+                "占い結果を公開する場合のみ「【CO】占い師」＋「【結果】対象=Player X 判定=人狼/人間」の行を追加できます。"
+            )
+            + "本文は3～5文を目安に、質問への回答、新しい根拠または反証、"
+            "現時点の疑いと投票意向の順に簡潔に述べ、最後まで出力してください。"
+        )
+
+    @staticmethod
+    def _escalated_num_predict(limit: int) -> int:
+        """生成起因の再試行で送信する生成上限（倍、最大8192）。"""
+        return max(limit, min(limit * 2, 8192))
+
+    def _attempt_generation_guidance(
+        self,
+        actor: Player,
+        budget_key: str,
+        *,
+        escalated: bool = False,
+        thinking_off: bool = False,
+    ) -> str:
+        """実際に送信する予定の上限・思考設定をプロンプトへ反映する。
+
+        再要求では `_chat`側で思考offと生成上限の倍化が行われるため、
+        プロンプトの指示が実際のリクエストとずれないようにする。
+        """
+        limit, _source = resolve_action_num_predict(
+            player=actor,
+            cli_options=self.options,
+            budget_key=budget_key,
+        )
+        if not thinking_off:
+            thinking_enabled_for_floor, _ = resolve_thinking(actor, self.options, budget_key)
+            limit, _source = apply_thinking_floor(
+                limit, _source, thinking_enabled_for_floor, budget_key
+            )
+        effective_limit = limit
+        if escalated:
+            base = limit if isinstance(limit, int) and not isinstance(limit, bool) else 512
+            effective_limit = self._escalated_num_predict(base)
+        return self._generation_budget_guidance(
+            actor,
+            budget_key,
+            thinking_enabled=False if thinking_off else None,
+            num_predict=effective_limit,
+        )
+
+    def _generation_budget_guidance(
+        self,
+        actor: Player,
+        budget_key: str,
+        *,
+        thinking_enabled: bool | None = None,
+        num_predict: int | None = None,
+    ) -> str:
+        """行動別生成上限に対する最終回答用の残余トークンを指示する。
+
+        再要求では実際に送信する値（思考off・増加後の上限）を受け取り、
+        プロンプトの指示と実際のリクエストを一致させる。
+        """
+        if num_predict is None:
+            num_predict, _ = resolve_action_num_predict(
+                player=actor,
+                cli_options=self.options,
+                budget_key=budget_key,
+            )
+        if thinking_enabled is None:
+            thinking_enabled, _ = resolve_thinking(actor, self.options, budget_key)
+        notes = ""
+        if thinking_enabled is False:
+            notes = (
+                "\nこのリクエストでは思考生成（think）はオフです。"
+                "思考・前置きを書かず、要求形式の最終回答だけを出力してください。"
+            )
+        if num_predict is None:
+            return notes
+        output_share = max(1, round(num_predict * 3 // 10))
+        key = normalize_action_budget_key(budget_key)
+        if key in {"discussion", "wolf_discussion"}:
+            # 議論・人狼相談は根拠を説明する文量が必要なので、残余トークンを
+            # 「短文」ではなく具体的な文量として指示する（TASK-024の文量緩和）。
+            body_share = max(1, round(num_predict * 6 // 10))
+            return (
+                f"\n【生成上限】num_predict={num_predict}トークン。"
+                f"末尾{body_share}トークン程度を【本文】の最終回答へ使い、"
+                "5〜8文で質問への回答・確認できる事実・疑う対象と根拠・"
+                "次に確認したい点を書き、途中で止めずに最後まで出力してください。"
+                f"{notes}"
+            )
+        return (
+            f"\n【生成上限】num_predict={num_predict}トークン。"
+            f"末尾{output_share}トークン程度を最終回答に残し、"
+            "結論・根拠・未確認情報を短文で区切ってください。"
+            f"{notes}"
+        )
+
+    def _wolf_consult_light_retry_prompt(
+        self,
+        actor: Player,
+        recent_messages: tuple[Message, ...] | None = None,
+    ) -> str:
+        """人狼相談の軽い再要求。前の長い相談文を繰り返さない。"""
+        partner = actor.partner
+        wolf_chat = recent_messages if recent_messages is not None else ()
+        recent_consult = [
+            f"{message.speaker}: {message.content[:160]}"
+            for message in wolf_chat[-2:]
+            if message.speaker != "system"
+        ]
+        alive = tuple(
+            name
+            for name in self.state.alive_players
+            if name != actor.name and name != partner
+        )
+        return (
+            "人狼相談の軽い再要求です。前の長い相談文は参照しません。\n"
+            "【確定した事実】\n"
+            f"- あなたのプレイヤー名：{actor.name}\n"
+            f"- あなたの役職：{ROLE_NAMES_JA[actor.role]}\n"
+            f"- 人狼の相手：{partner}\n"
+            f"- 現在の日数：{self.state.day}日目\n"
+            f"- 襲撃候補の生存者：{', '.join(alive) or 'なし'}\n"
+            f"- 直近の相談（未確認）：{'; '.join(recent_consult) or 'なし'}\n"
+            "【要求】次の2項目だけを日本語の短文で書いてください。\n"
+            "1. 襲撃対象の候補1名\n"
+            "2. 襲撃しない候補と理由\n"
+            "自分自身を第三者として言及せず、一人称で書いてください。"
+        )
+
+    @staticmethod
+    def _result_label(result: str) -> str:
+        return "人狼" if result == "wolf" else "人間"
+
+    def _seer_co_correction_prompt(
+        self, actor: Player, spoken_result: tuple[str, str] | None
+    ) -> str:
+        """CO欠落を補正する、COと結果だけの短い再要求プロンプト。"""
+        lines = [
+            "【CO補正】占い結果を述べる発言に占い師COがありません。"
+            "同じ発言内で明示的に占い師COしてください。",
+            f"- あなた：{actor.name}",
+        ]
+        if actor.role is Role.SEER and self.state.seer_results:
+            target, result = self._latest_seer_result()
+            lines.append(
+                f"- あなたの占い結果：対象={target}、判定={self._result_label(result)}"
+            )
+            lines.append("この結果を占い師COとセットで公開してください。")
+        elif spoken_result is not None:
+            lines.append(
+                f"- 前回述べた結果：対象={spoken_result[0]}、"
+                f"判定={self._result_label(spoken_result[1])}"
+            )
+            lines.append("この結果を占い師COとセットで出力してください。")
+        lines.extend(
+            [
+                "COと結果だけを次の2行で出力してください。他の内容は不要です。",
+                "【CO】占い師",
+                "【結果】対象=Player X 判定=人狼/人間",
+                "理由・投票提案は任意で、付ける場合は3行目に【本文】を付けてください。",
+            ]
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _discussion_sentences(text: str) -> tuple[str, ...]:
+        return tuple(
+            sentence.strip()
+            for sentence in re.split(r"(?<=[。！？!?])|[\r\n]+", text)
+            if sentence.strip()
+        )
+
+    @staticmethod
+    def _references_external_game_memory(text: str) -> bool:
+        external_memory_patterns = (
+            r"(?:過去|以前|前回|昔|別の)(?:の)?(?:人狼)?(?:ゲーム|試合|対戦|村)",
+            r"(?:過去|以前|前回|昔)(?:に|の)?[^。！？\n]{0,24}"
+            r"(?:人狼|狂人|占い師|村人)(?:だった|でした|経験)",
+            r"(?:過去|以前|前回|昔)の役職",
+            r"(?:学習|訓練)(?:時|データ|内容|の記憶)",
+            r"実在(?:する|の)?(?:人物|プレイヤー)|現実(?:の|では)",
+        )
+        return any(
+            re.search(pattern, text, re.IGNORECASE)
+            for pattern in external_memory_patterns
+        )
+
+    def _dead_player_question_targets(self, text: str) -> tuple[str, ...]:
+        request_cues = (
+            r"質問(?:したい|します|してください|させて)",
+            r"聞(?:きたい|きます|いてください|いてみたい)",
+            r"尋ね(?:たい|ます|てください)",
+            r"教えて(?:ください|ほしい|もらいたい)?",
+            r"説明して(?:ください|ほしい|もらいたい)?",
+            r"答えて(?:ください|ほしい|もらいたい)?",
+            r"回答して(?:ください|ほしい|もらいたい)?",
+            r"話して(?:ください|ほしい|もらいたい)?",
+        )
+        request_pattern = re.compile("|".join(request_cues))
+        dead_players = tuple(
+            player.name for player in self.state.players if not player.is_alive
+        )
+        targets: set[str] = set()
+        for sentence in self._discussion_sentences(text):
+            for dead_name in dead_players:
+                escaped_name = re.escape(dead_name)
+                addressed = re.search(
+                    rf"{escaped_name}(?:さん)?(?:に|へ)"
+                    rf"[^。！？!?]{{0,48}}(?:{request_pattern.pattern})",
+                    sentence,
+                )
+                direct_address = re.search(
+                    rf"{escaped_name}さん[,、]"
+                    rf"[^。！？!?]{{0,48}}(?:{request_pattern.pattern})",
+                    sentence,
+                )
+                if addressed or direct_address:
+                    targets.add(dead_name)
+        return tuple(sorted(targets))
+
+    def _has_unverified_past_vote_reference(self, text: str) -> bool:
+        vote_history = self.state.vote_history
+        player_names = tuple(player.name for player in self.state.players)
+        for sentence in self._discussion_sentences(text):
+            if any(
+                marker in sentence
+                for marker in (
+                    "記録にない",
+                    "台帳に記録がない",
+                    "記録を確認できない",
+                    "判断できない",
+                )
+            ):
+                continue
+            previous_vote = re.search(
+                r"(?:昨日|前日|前回|前の(?:ターン|日|ラウンド)?|過去の)"
+                r"(?:の)?(?:投票|票)",
+                sentence,
+            )
+            if previous_vote is None:
+                continue
+            cue = previous_vote.group(0)
+            if "昨日" in cue or "前日" in cue:
+                expected_day = self.state.day - 1
+                relevant_history = [
+                    votes
+                    for day, _, votes in vote_history
+                    if day == expected_day
+                ]
+                if not relevant_history:
+                    return True
+            else:
+                relevant_history = [
+                    votes for _, _, votes in vote_history
+                ]
+            if not relevant_history:
+                return True
+            recorded_votes = {
+                (voter, target)
+                for votes in relevant_history
+                for voter, target in votes.items()
+            }
+            for voter in player_names:
+                for target in player_names:
+                    if voter == target:
+                        continue
+                    relation = re.search(
+                        rf"{re.escape(voter)}(?:さん)?(?:は|が)"
+                        rf"[^。！？!?]{{0,20}}{re.escape(target)}(?:さん)?"
+                        rf"(?:に|へ)(?:投票|入れ)",
+                        sentence,
+                    )
+                    if relation and (voter, target) not in recorded_votes:
+                        return True
+        return False
+
+    def _discussion_topic_repeated(
+        self, text: str, conversation_history: tuple[Message, ...] | None = None
+    ) -> bool:
+        history = (
+            conversation_history
+            if conversation_history is not None
+            else tuple(self.state.conversation_log)
+        )
+        prior_messages = PromptBuilder.current_day_messages(
+            history
+        )
+        prior_sentences = [
+            sentence
+            for message in prior_messages
+            for sentence in self._discussion_sentences(message.content)
+        ]
+        question_cues = (
+            "?",
+            "？",
+            "ですか",
+            "ますか",
+            "でしょうか",
+            "聞きたい",
+            "教えて",
+            "説明して",
+            "確認したい",
+            "なぜ",
+            "どうして",
+        )
+        conclusion_cues = (
+            "怪しい",
+            "人狼",
+            "疑",
+            "投票",
+            "信頼",
+            "可能性",
+            "と考え",
+            "と思い",
+        )
+
+        def category(sentence: str) -> str | None:
+            if any(cue in sentence for cue in question_cues):
+                return "question"
+            if any(cue in sentence for cue in conclusion_cues):
+                return "conclusion"
+            return None
+
+        def normalized(sentence: str) -> str:
+            return re.sub(r"[\W_]+", "", sentence, flags=re.UNICODE)
+
+        seen: list[tuple[str, str, str]] = [
+            (kind, normalized(sentence), sentence)
+            for sentence in prior_sentences
+            if (kind := category(sentence)) is not None
+        ]
+        for sentence in self._discussion_sentences(text):
+            if re.search(r"(?:占い師)?CO|判定\s*=", sentence, re.IGNORECASE):
+                continue
+            kind = category(sentence)
+            normalized_sentence = normalized(sentence)
+            if kind is None or len(normalized_sentence) < 10:
+                continue
+            if any(
+                prior_kind == kind
+                and len(prior_text) >= 10
+                and SequenceMatcher(None, normalized_sentence, prior_text).ratio()
+                >= 0.82
+                and not self._adds_new_discussion_signal(sentence, prior_sentence)
+                for prior_kind, prior_text, prior_sentence in seen
+            ):
+                return True
+            seen.append((kind, normalized_sentence, sentence))
+        return False
+
+    @staticmethod
+    def _adds_new_discussion_signal(current: str, previous: str) -> bool:
+        def signals(sentence: str) -> set[tuple[str, str]]:
+            found: set[tuple[str, str]] = set()
+            vote_target = re.search(
+                r"(?:投票先(?:は|を)?\s*|)"
+                r"(Player\s+\d+|P\d+)(?:さん)?(?:へ|に)(?:投票|票)",
+                sentence,
+            )
+            if vote_target is not None:
+                found.add(("vote_target", vote_target.group(1)))
+            for kind, cue in (
+                ("evidence", r"(?:根拠|理由|具体的には|記録では|発言では)"),
+                ("refutation", r"(?:反証|矛盾|ただし|しかし|一方で|訂正)"),
+            ):
+                match = re.search(cue + r"([^。！？!?]{1,36})", sentence)
+                if match is not None:
+                    value = re.sub(r"[\W_]+", "", match.group(1), flags=re.UNICODE)
+                    if value:
+                        found.add((kind, value))
+            return found
+
+        return bool(signals(current) - signals(previous))
+
+    def _repair_discussion_response(
+        self,
+        actor: Player,
+        response: str,
+        issue: str,
+        conversation_history: tuple[Message, ...] | None = None,
+    ) -> str | None:
+        structured = parse_discussion_output(response)
+        body = structured.body if structured is not None else response
+        replacement: str | None = None
+        if issue == "external_game_memory":
+            replacement = "その情報は現在のゲーム記録にないため、記録にないため判断できません。"
+        elif issue == "unverified_past_vote_reference":
+            replacement = "その過去の投票は現在のゲーム台帳に記録がないため、記録にないため判断できません。"
+        elif issue == "unverified_dead_role":
+            replacement = "真の役職は確認されていないため、その人物の役職は推測として扱います。"
+        elif issue == "dead_player_question":
+            target = next(
+                (
+                    name
+                    for name in self._dead_player_question_targets(body)
+                    if name
+                ),
+                None,
+            )
+            question_set = self.state.action_candidate_sets.get(
+                f"question:{actor.name}"
+            )
+            alternative = (
+                question_set.fallback
+                if question_set is not None
+                else next(
+                    (
+                        name
+                        for name in self.state.alive_players
+                        if name != actor.name
+                    ),
+                    None,
+                )
+            )
+            if target is not None:
+                replacement = (
+                    f"{target}さんは死亡しており回答できないため、"
+                    f"{alternative}さんに記録から分かる経緯を確認します。"
+                    if alternative is not None
+                    else f"{target}さんは死亡しており回答できないため、記録にない点は判断できません。"
+                )
+        elif issue == "dead_player_action_target":
+            question_set = self.state.action_candidate_sets.get(
+                f"question:{actor.name}"
+            )
+            alternative = (
+                question_set.fallback
+                if question_set is not None
+                else next(
+                    (
+                        name
+                        for name in self.state.alive_players
+                        if name != actor.name
+                    ),
+                    None,
+                )
+            )
+            replacement = (
+                f"現在の判断は生存者の{alternative}さんについて検討します。"
+                if alternative is not None
+                else "死亡者へ現在の行動を求めず、記録にある内容だけを確認します。"
+            )
+        elif issue == "repeated_discussion_topic":
+            replacement = "その論点の繰り返しを避け、新しい根拠や別の確認事項を述べます。"
+
+        if replacement is None:
+            return None
+        changed = False
+        repaired_sentences: list[str] = []
+        for sentence in self._discussion_sentences(body):
+            should_replace = (
+                issue == "external_game_memory"
+                and self._references_external_game_memory(sentence)
+                or issue == "unverified_past_vote_reference"
+                and self._has_unverified_past_vote_reference(sentence)
+                or issue == "dead_player_question"
+                and bool(self._dead_player_question_targets(sentence))
+                or issue == "repeated_discussion_topic"
+                and self._discussion_topic_repeated(
+                    sentence, conversation_history
+                )
+            )
+            if issue == "unverified_dead_role":
+                should_replace = any(
+                    not any(
+                        hedge in sentence
+                        for hedge in (
+                            "かもしれない",
+                            "かもしれません",
+                            "可能性",
+                            "推測",
+                            "と思う",
+                            "と考える",
+                            "とは限らない",
+                            "未確認",
+                        )
+                    )
+                    and re.search(
+                        rf"{re.escape(dead_name)}(?:さん)?(?:は|が)?[^。！？!?]{{0,16}}"
+                        rf"(?:人狼|狂人|占い師|村人)(?:だった|でした|です|だ|と判明|と確定)",
+                        sentence,
+                    )
+                    for dead_name in (
+                        player.name
+                        for player in self.state.players
+                        if not player.is_alive
+                    )
+                )
+            if issue == "dead_player_action_target":
+                should_replace = any(
+                    re.search(
+                        rf"{re.escape(dead_name)}(?:さん)?(?:に|へ)"
+                        rf"[^。！？!?]{{0,16}}(?:投票|処刑|吊|襲撃|占い|回答|説明)",
+                        sentence,
+                    )
+                    for dead_name in (
+                        player.name
+                        for player in self.state.players
+                        if not player.is_alive
+                    )
+                )
+            if should_replace:
+                repaired_sentences.append(replacement)
+                changed = True
+            else:
+                repaired_sentences.append(sentence)
+        if not changed:
+            return None
+        repaired_body = " ".join(repaired_sentences)
+        if structured is None:
+            return repaired_body
+        blocks = [f"【CO】{structured.claim}"]
+        if structured.result:
+            blocks.append(f"【結果】{structured.result}")
+        if repaired_body:
+            blocks.append(f"【本文】{repaired_body}")
+        return "\n".join(blocks)
+
+    def _discussion_response_issue(
+        self,
+        actor: Player,
+        response: str,
+        conversation_history: tuple[Message, ...] | None = None,
+    ) -> str | None:
+        structured_output = parse_discussion_output(response)
+        if has_discussion_output_markers(response) and structured_output is None:
+            return "discussion_output_format"
+        body = structured_output.body if structured_output is not None else response
+        claim_content = (
+            structured_output.claim
+            if structured_output is not None
+            and structured_output.claim not in {"なし", "保留"}
+            else ""
+            if structured_output is not None
+            else response
+        )
+        result_block = (
+            structured_output.result if structured_output is not None else ""
+        )
+        result_content = (
+            "\n".join(part for part in (claim_content, result_block, body) if part)
+            if structured_output is not None
+            else response
+        )
+        known_players = {player.name for player in self.state.players}
+        explicit_seer_co = is_public_seer_claim(claim_content)
+        public_result = extract_public_seer_result(result_content, tuple(known_players))
+
+        # 占い結果を公開する応答は、本文の内容を検証する前に明示的な占い師COを要求する。
+        if result_block and not explicit_seer_co:
+            return "seer_result_without_claim"
+        if public_result is not None and not explicit_seer_co:
+            target, result = public_result
+            if (
+                actor.role is Role.SEER
+                and self.state.seer_results.get(target) == result
+                and not self._has_published_seer_result(actor.name, target, result)
+            ):
+                return "seer_result_without_claim"
+
+        if body and actor.response_language == "日本語" and not re.search(
+            r"[\u3040-\u30ff\u3400-\u9fff]", body
+        ):
+            return "wrong_response_language"
+
+        history = (
+            conversation_history
+            if conversation_history is not None
+            else tuple(self.state.conversation_log)
+        )
+        current_day_history = PromptBuilder.current_day_messages(history)
+        previous_message = current_day_history[-1] if current_day_history else None
+        if body and PromptBuilder._is_directed_to_player(
+            actor, previous_message, current_day_history
+        ):
+            first_sentence = re.split(r"[。！？\n]", body, maxsplit=1)[0]
+            if previous_message is not None and previous_message.speaker not in first_sentence:
+                return "question_not_answered_first"
+
+        own_name = re.escape(actor.name)
+        if re.search(
+            rf"(?m)^\s*{own_name}(?:さん)?(?:は|が|も)(?=.{{0,32}}(?:人狼|村人|占い師|狂人|発言|意見|怪しい|投票))",
+            body,
+        ):
+            return "third_person_self_reference"
+
+        mentioned_players = re.findall(r"Player\s+\d+", response)
+        if any(name not in known_players for name in mentioned_players):
+            return "unknown_player_reference"
+        if self._references_external_game_memory(body):
+            return "external_game_memory"
+        if self._has_unverified_past_vote_reference(body):
+            return "unverified_past_vote_reference"
+        claimed_role = extract_public_role_claim(claim_content)
+        public_claims = [
+            claim
+            for claim in self.state.public_role_claims
+            if claim.claimant == actor.name
+        ]
+        if claimed_role is not None and any(
+            claim.claimed_role != claimed_role for claim in public_claims
+        ):
+            return "inconsistent_role_claim"
+        if public_result is not None:
+            target, result = public_result
+            if any(
+                claim.claimant == actor.name
+                and claim.target == target
+                and claim.result is not None
+                and claim.result != result
+                for claim in self.state.seer_claims
+            ) or any(
+                claim.claimant == actor.name
+                and claim.claimed_role == Role.SEER.value
+                and claim.target == target
+                and claim.result is not None
+                and claim.result != result
+                for claim in self.state.public_role_claims
+            ):
+                return "inconsistent_seer_result"
+        if actor.role is Role.SEER:
+            unpublished_wolf_results = [
+                target
+                for target, result in self.state.seer_results.items()
+                if result == "wolf"
+                and not any(
+                    claim.claimant == actor.name
+                    and claim.target == target
+                    and claim.result == "wolf"
+                    for claim in self.state.seer_claims
+                )
+            ]
+            if unpublished_wolf_results and (
+                not is_public_seer_claim(claim_content)
+                or public_result
+                not in {(target, "wolf") for target in unpublished_wolf_results}
+            ):
+                return "wolf_result_not_disclosed"
+        dead_players = {
+            player.name for player in self.state.players if not player.is_alive
+        }
+        if self._dead_player_question_targets(body):
+            return "dead_player_question"
+        for dead_name in dead_players:
+            if re.search(
+                rf"{re.escape(dead_name)}(?:さん)?(?:に|へ)"
+                rf"[^。！？!?]{{0,24}}(?:襲撃|占い|投票|処刑|返答|回答|説明)"
+                rf"[^。！？!?]{{0,12}}(?:してほしい|してください|してもらいたい|"
+                rf"するよう求め|すべき|選んでほしい)",
+                body,
+            ):
+                return "dead_player_action_target"
+        for dead_name in dead_players:
+            name = re.escape(dead_name)
+            for sentence in self._discussion_sentences(body):
+                if re.search(
+                    rf"{name}(?:さん)?(?:は|が)?[^。！？!?]{{0,16}}"
+                    rf"(?:人狼|狂人|占い師|村人)(?:だった|でした|です|だ|と判明|と確定)",
+                    sentence,
+                ) and not any(
+                    hedge in sentence
+                    for hedge in (
+                        "かもしれない",
+                        "かもしれません",
+                        "可能性",
+                        "推測",
+                        "と思う",
+                        "と考える",
+                        "とは限らない",
+                        "未確認",
+                    )
+                ):
+                    return "unverified_dead_role"
+            if re.search(
+                rf"{name}(?:さん)?(?:に|へ)(?:は)?"
+                rf"(?:投票(?:する|したい|すべき|しよう)?|"
+                rf"票を入れる(?:べき|べきです|べきだ|たい)?|"
+                rf"処刑(?:する|したい|すべき)?|吊(?:る|りたい|るべき))",
+                body,
+            ) or re.search(
+                rf"(?:投票先|処刑対象)(?:は|として|に)\s*{name}(?:さん)?",
+                body,
+            ):
+                return "dead_player_action_target"
+
+        if re.search(
+            r"(?:今夜|夜に)(?:は)?(?:私は|僕は|私が|僕が)?"
+            r"(?:占う|占います|襲撃する|襲撃します)",
+            body,
+        ):
+            return "out_of_phase_action_claim"
+
+        for player in self.state.players:
+            name = re.escape(player.name)
+            if actor.role is not Role.WOLF and (
+                re.search(
+                    rf"{name}(?:さん)?(?:が|は)[^。！？\n]{{0,20}}(?:襲撃した|襲撃しました|襲った|襲いました|襲撃者(?:です|だ))",
+                    body,
+                )
+                or re.search(
+                    rf"襲撃者は{name}(?:さん)?(?:です|だ)",
+                    body,
+                )
+            ):
+                return "unknown_attacker_claim"
+            if re.search(
+                rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}襲撃され(?:た|ました)",
+                body,
+            ) and not any(victim == player.name for _, victim in self.state.attack_deaths):
+                return "unverified_game_event"
+            if re.search(
+                rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}処刑され(?:た|ました)",
+                body,
+            ) and not any(executed == player.name for _, executed in self.state.executions):
+                return "unverified_game_event"
+            if re.search(
+                rf"{name}(?:さん)?(?:は|が)?[^。！？\n]{{0,20}}死亡し(?:た|ました)",
+                body,
+            ) and player.is_alive:
+                return "unverified_game_event"
+
+        known_speech = tuple(
+            message for message in history if message.speaker != "system"
+        )
+        for player in self.state.players:
+            attributed_quote = re.compile(
+                rf"{re.escape(player.name)}(?:さん)?(?:は|が)[^。！？\n]{{0,24}}[「『\"]([^」』\"]+)[」』\"]"
+            )
+            for match in attributed_quote.finditer(body):
+                quote = match.group(1).strip()
+                if quote and not any(
+                    message.speaker == player.name and quote in message.content
+                    for message in known_speech
+                ):
+                    return "unverified_attributed_speech"
+
+        previous_speeches = [
+            message.content
+            for message in known_speech
+            if message.speaker == actor.name
+        ]
+        normalized = re.sub(r"[\W_]+", "", body, flags=re.UNICODE)
+        for previous in previous_speeches:
+            prior_normalized = re.sub(r"[\W_]+", "", previous, flags=re.UNICODE)
+            if len(normalized) >= 20 and normalized == prior_normalized:
+                return "repeated_speech"
+            if min(len(normalized), len(prior_normalized)) >= 40 and (
+                SequenceMatcher(None, normalized, prior_normalized).ratio() >= 0.92
+            ):
+                return "repeated_speech"
+        if self._discussion_topic_repeated(body, history):
+            return "repeated_discussion_topic"
+        # 様子見・情報不足のみの反復を検出（パスは除外）
+        if not self._is_pass(response):
+            vague_patterns = [
+                r"様子見",
+                r"様子を",
+                r"情報不足",
+                r"まだわからない",
+                r"判断できない",
+                r"何とも言えない",
+                r"様子を伺",
+            ]
+            import re as _re
+            if any(_re.search(p, body, _re.IGNORECASE) for p in vague_patterns):
+                # 単に様子見と言っているだけで新しい情報がない場合
+                if len(body.strip()) < 60:
+                    return "vague_wait_and_see"
+        return None
+
+    def _discussion_claim_response_issue(
+        self, actor: Player, response: str
+    ) -> str | None:
+        decision = parse_discussion_claim(response)
+        if decision is None:
+                    return "discussion_claim_format"
+        if decision.claim in {"なし", "保留"}:
+                    if decision.result:
+                        return "discussion_claim_format"
+                    if actor.role is Role.SEER and any(
+                        result == "wolf"
+                        and not self._has_published_seer_result(actor.name, target, result)
+                        for target, result in self.state.seer_results.items()
+                    ):
+                        return "wolf_result_not_disclosed"
+                    return None
+        claimed_role = extract_public_role_claim(decision.claim)
+        if claimed_role is None:
+                    return "discussion_claim_format"
+        if decision.result:
+                    if claimed_role != Role.SEER.value:
+                        return "discussion_claim_format"
+                    result = extract_public_seer_result(
+                        decision.result,
+                        tuple(player.name for player in self.state.players),
+                    )
+                    if result is None:
+                        return "discussion_claim_format"
+                    target, result_kind = result
+                    if actor.role is Role.SEER and self.state.seer_results.get(target) != result_kind:
+                        return "unverified_seer_result_claim"
+                    if any(
+                        claim.claimant == actor.name
+                        and claim.target == target
+                        and claim.result not in {None, result_kind}
+                        for claim in self.state.seer_claims
+                    ):
+                        return "inconsistent_seer_result"
+        elif actor.role is Role.SEER and any(
+                    result == "wolf"
+                    and not self._has_published_seer_result(actor.name, target, result)
+                    for target, result in self.state.seer_results.items()
+        ):
+                    return "wolf_result_not_disclosed"
+        if any(
+                    claim.claimant == actor.name and claim.claimed_role != claimed_role
+                    for claim in self.state.public_role_claims
+        ):
+                    return "inconsistent_role_claim"
+        return None
+
+    def _deterministic_discussion_claim(self, actor: Player) -> str | None:
+        if actor.role is not Role.SEER:
+                    return None
+        target = next(
+                    (
+                        target
+                        for target, result in self.state.seer_results.items()
+                        if result == "wolf"
+                        and not self._has_published_seer_result(
+                            actor.name, target, result
+                        )
+                    ),
+                    None,
+        )
+        if target is None:
+                    return None
+        return (
+                    "【CO】占い師CO\n"
+                    f"【結果】対象={target} 判定=人狼"
+        )
+
+    def _latest_seer_result(self) -> tuple[str, str]:
+        if self.state.seer_result_history:
+            _, target, result = self.state.seer_result_history[-1]
+            return target, result
+        return next(reversed(self.state.seer_results.items()))
+
+    def _has_published_seer_result(
+        self, claimant: str, target: str, result: str
+    ) -> bool:
+        return self.state.claim_ledger.public_seer_results.get(
+            (claimant, target)
+        ) == result or any(
+            claim.claimant == claimant
+            and claim.target == target
+            and claim.result == result
+            for claim in self.state.seer_claims
+        ) or any(
+            claim.claimant == claimant
+            and claim.claimed_role == Role.SEER.value
+            and claim.target == target
+            and claim.result == result
+            for claim in self.state.public_role_claims
+        )
+
+    def _options_for(
+        self,
+        actor: Player,
+        budget_key: str = "discussion",
+        *,
+        disable_thinking: bool = False,
+    ) -> tuple[dict[str, object] | None, str, bool | None, str]:
+        """行動別生成上限と思考生成を優先順位で解決して options を組み立てる。
+
+        num_predict優先順位: player行動別 > CLI行動別 > 全体設定（対象選択・CO補正はキャップ適用）
+        > 行動別既定値
+        思考優先順位: player行動別 > CLI行動別 > player全体 > CLI全体 > 行動別既定値
+        再要求（disable_thinking=True）では思考を強制的にoffにする。
+        """
+        key = normalize_action_budget_key(budget_key)
+        num_predict, num_predict_source = resolve_action_num_predict(
+            player=actor,
+            cli_options=self.options,
+            budget_key=key,
+        )
+        options = (
+            {
+                option_key: value
+                for option_key, value in self.options.items()
+                if value is not None
+                and not option_key.startswith("num_predict_by_action:")
+                and not option_key.startswith("thinking_by_action:")
+                and option_key != "override_player_num_ctx"
+            }
+            if self.options is not None
+            else {}
+        )
+        override_player_num_ctx = bool(
+            self.options and self.options.get("override_player_num_ctx")
+        )
+        if actor.num_ctx is not None and not override_player_num_ctx:
+            options["num_ctx"] = actor.num_ctx
+        elif (
+            "num_ctx" not in options
+            and (
+                actor.recommended_num_ctx is not None
+                or actor.max_num_ctx is not None
+            )
+        ):
+            options["num_ctx"] = (
+                actor.recommended_num_ctx
+                if actor.recommended_num_ctx is not None
+                else actor.max_num_ctx
+            )
+        if (
+            actor.max_num_ctx is not None
+            and isinstance(options.get("num_ctx"), int)
+            and not isinstance(options.get("num_ctx"), bool)
+        ):
+            options["num_ctx"] = min(
+                int(options["num_ctx"]), actor.max_num_ctx
+            )
+        if num_predict is not None:
+            options["num_predict"] = num_predict
+        thinking_enabled, thinking_source = resolve_thinking(actor, self.options, key)
+        capabilities = self.state.model_capabilities.get(actor.model, {})
+        if capabilities.get("thinking") is False and thinking_enabled is True:
+            # そのモデルは思考生成非対応と判明しているため、設定指定より先にoffへ落とす。
+            # 同一要求の400再試行（実送信3回）を防ぐ。
+            thinking_enabled = False
+            thinking_source = THINKING_CAPABILITY_SOURCE
+        elif capabilities.get("thinking_budget") is False and thinking_enabled is True:
+            # 思考onでは思考トークンが生成上限をすべて消費して最終回答が空になったため、
+            # このモデルの思考行動はoffへ落とす（offなら同じ上限で本文が生成できる）。
+            thinking_enabled = False
+            thinking_source = THINKING_BUDGET_SOURCE
+        if disable_thinking:
+            thinking_enabled = False
+            thinking_source = "retry_thinking_off"
+        num_predict, num_predict_source = apply_thinking_floor(
+            num_predict, num_predict_source, thinking_enabled, key
+        )
+        if num_predict is not None:
+            # 思考下限で変更した値も実際に送信するoptionsへ反映しないと、
+            # 優先元だけ表示され送信値は変わらない。
+            options["num_predict"] = num_predict
+        if thinking_enabled is not None:
+            options["thinking"] = thinking_enabled
+        return options or None, num_predict_source, thinking_enabled, thinking_source
+
+    def _chat_with_claim_tools(
+        self,
+        actor: Player,
+        messages: list[dict[str, object]],
+        action: str,
+        *,
+        increase_generation: bool,
+        started_at: float,
+        request_number: int = 1,
+        request_reason: str = "初回",
+        tool_based: bool = False,
+        budget_key: str = "discussion",
+        disable_thinking: bool = False,
+    ) -> ChatResponse:
+        # ツール非対応と判明したモデルは、以後ツールを送らず文章CO経路だけを使う。
+        capabilities = self.state.model_capabilities.get(actor.model, {})
+        tools = (
+            [CLAIM_ROLE_TOOL]
+            if action == "discussion"
+            and capabilities.get("claim_role_tool", True)
+            and callable(getattr(self.client, "chat_with_metadata", None))
+            else None
+        )
+        try:
+            response = self._chat(
+                actor,
+                messages,
+                increase_generation=increase_generation,
+                tools=tools,
+                action=action,
+                started_at=started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                tool_based=tool_based,
+                budget_key=budget_key,
+                disable_thinking=disable_thinking,
+            )
+        except OllamaError as error:
+            if tools is None or not self._is_tool_call_unsupported(error):
+                raise
+            self._record_tool_unsupported(actor, action, started_at)
+            tools = None
+            response = self._chat(
+                actor,
+                messages,
+                increase_generation=increase_generation,
+                action=action,
+                started_at=started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                tool_based=False,
+                budget_key=budget_key,
+                disable_thinking=disable_thinking,
+            )
+        for _ in range(2):
+            if not response.tool_calls:
+                return response
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content,
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                        }
+                        for call in response.tool_calls
+                    ],
+                }
+            )
+            for call in response.tool_calls:
+                result = self._handle_public_tool_call(
+                    actor, call, action, started_at
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_name": call.name,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    }
+                )
+            response = self._chat(
+                actor,
+                messages,
+                tools=tools,
+                action=action,
+                started_at=started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                tool_based=tool_based,
+                budget_key=budget_key,
+                disable_thinking=disable_thinking,
+            )
+        if response.tool_calls:
+            return ChatResponse(
+                content="",
+                attempts=response.attempts,
+                done_reason=response.done_reason,
+                content_length=0,
+                thinking_present=response.thinking_present,
+                eval_count=response.eval_count,
+                eval_duration_ms=response.eval_duration_ms,
+            )
+        return response
+
+    @staticmethod
+    def _is_tool_call_unsupported(error: OllamaError) -> bool:
+        message = error.message.casefold()
+        return any(
+            marker in message
+            for marker in (
+                "does not support tools",
+                "doesn't support tools",
+                "tool calling is not supported",
+                "tool calls are not supported",
+                "tools are not supported",
+                "ツールに対応していません",
+                "ツール呼び出しに対応していません",
+            )
+        )
+
+    @staticmethod
+    def _is_thinking_unsupported(error: OllamaError) -> bool:
+        """Ollamaが思考生成（think）非対応を理由に400を返したかどうか。"""
+        message = error.message.casefold()
+        return any(
+            marker in message
+            for marker in (
+                "does not support thinking",
+                "doesn't support thinking",
+                "thinking is not supported",
+                "thinking not supported",
+                "does not support reasoning",
+                "thinkingモード",
+                "思考生成に対応していません",
+                "思考に対応していません",
+            )
+        )
+
+    def _record_thinking_unsupported(
+        self,
+        actor: Player,
+        action: str | None,
+        started_at: float | None,
+    ) -> None:
+        """思考生成非対応を能力情報へ記録し、以後の行動ではthink=falseだけを送る。"""
+        capabilities = self.state.model_capabilities.setdefault(actor.model, {})
+        first_detection = capabilities.get("thinking") is not False
+        capabilities["thinking"] = False
+        if first_detection and action is not None and started_at is not None:
+            self._emit(
+                "thinking_unavailable",
+                action,
+                actor,
+                started_at,
+                reason="model_does_not_support_thinking",
+            )
+
+    def _record_thinking_budget_exhausted(
+        self,
+        actor: Player,
+        action: str,
+        started_at: float,
+        metadata: dict[str, str | int | bool | None],
+    ) -> None:
+        """思考onの応答が思考トークンだけで生成上限を消費したモデルを記録する。
+
+        実機ログでは議論の思考が num_predict をすべて消費し、本文が空のまま
+        done_reason=length になった。同じ上限で再試行しても同じ結果になるため、
+        以後の同一モデルの思考行動（議論・人狼相談）はoffへ自動で切り替える。
+        offでは同じ num_predict のほとんどが本文に使えるため、文量はむしろ増える。
+        """
+        capabilities = self.state.model_capabilities.setdefault(actor.model, {})
+        first_detection = capabilities.get("thinking_budget") is not False
+        capabilities["thinking_budget"] = False
+        if first_detection:
+            self._emit(
+                "thinking_budget_exhausted",
+                action,
+                actor,
+                started_at,
+                reason=THINKING_BUDGET_EXHAUSTED_REASON,
+                eval_count=metadata.get("eval_count"),
+                num_predict=metadata.get("num_predict"),
+                content_length=metadata.get("content_length"),
+            )
+
+    def _record_tool_unsupported(
+        self, actor: Player, action: str, started_at: float
+    ) -> None:
+        capabilities = self.state.model_capabilities.setdefault(actor.model, {})
+        first_detection = capabilities.get("claim_role_tool") is not False
+        capabilities["claim_role_tool"] = False
+        if first_detection:
+            self._emit(
+                "claim_tool_unavailable",
+                action,
+                actor,
+                started_at,
+                reason="model_does_not_support_tools",
+            )
+
+    def _handle_public_tool_call(
+        self,
+        actor: Player,
+        call: ToolCall,
+        action: str,
+        started_at: float,
+    ) -> dict[str, str]:
+        if call.name != "claim_role":
+            return {
+                "status": "rejected",
+                "message": "この公開ツールは利用できません。",
+            }
+        if action != "discussion" or not actor.is_alive:
+            self._emit(
+                "claim_role_rejected",
+                action,
+                actor,
+                started_at,
+                rejection_reason=(
+                    "dead_player" if not actor.is_alive else "invalid_phase"
+                ),
+            )
+            return {
+                "status": "rejected",
+                "message": "現在のフェーズでは主張を公開できません。",
+            }
+
+        def reject(message: str, reason: str) -> dict[str, str]:
+            self._emit(
+                "claim_role_rejected",
+                action,
+                actor,
+                started_at,
+                rejection_reason=reason,
+            )
+            return {"status": "rejected", "message": message}
+
+        args = call.arguments
+        role = args.get("role")
+        if not isinstance(role, str) or role not in {item.value for item in Role}:
+            return reject("roleの指定が不正です。", "invalid_role")
+        target = args.get("target")
+        result = args.get("result")
+        reason = args.get("reason")
+        vote_proposal = args.get("vote_proposal")
+        for field_name, value, max_length in (
+            ("target", target, 128),
+            ("reason", reason, 500),
+            ("vote_proposal", vote_proposal, 300),
+        ):
+            if value is not None and (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > max_length
+            ):
+                return reject(
+                    f"{field_name}の指定が不正です。",
+                    f"invalid_{field_name}",
+                )
+        if result is not None and (
+            not isinstance(result, str) or result not in {"wolf", "human"}
+        ):
+            return reject("resultの指定が不正です。", "invalid_result")
+        if role == Role.SEER.value:
+            if (target is None) != (result is None):
+                return reject(
+                    "占い結果にはtargetとresultの両方が必要です。",
+                    "incomplete_seer_result",
+                )
+            if target is not None and target not in {
+                player.name for player in self.state.players
+            }:
+                return reject(
+                    "対象プレイヤーが存在しません。",
+                    "unknown_target",
+                )
+        elif target is not None or result is not None:
+            return reject(
+                "占い結果は占い師主張でのみ公開できます。",
+                "non_seer_result",
+            )
+
+        existing_claims = [
+            claim
+            for claim in self.state.public_role_claims
+            if claim.claimant == actor.name
+        ]
+        previous_seer_claims = [
+            claim
+            for claim in self.state.seer_claims
+            if claim.claimant == actor.name
+        ]
+        prior_role = next(
+            (
+                claim.claimed_role
+                for claim in existing_claims
+            ),
+            Role.SEER.value if previous_seer_claims else None,
+        )
+        if prior_role is not None and prior_role != role:
+            return reject(
+                "以前の役職主張と矛盾しています。",
+                "inconsistent_role_claim",
+            )
+        previous_result = next(
+            (
+                claim.result
+                for claim in [*existing_claims, *previous_seer_claims]
+                if role == Role.SEER.value
+                and claim.target == target
+                and claim.result is not None
+            ),
+            None,
+        )
+        if previous_result is not None and previous_result != result:
+            return reject(
+                "以前の占い結果主張と矛盾しています。",
+                "inconsistent_seer_result",
+            )
+        duplicate = next(
+            (
+                claim
+                for claim in existing_claims
+                if claim.claimed_role == role
+                and claim.target == target
+                and claim.result == result
+            ),
+            None,
+        )
+        if duplicate is not None or (
+            role == Role.SEER.value
+            and target is not None
+            and any(
+                claim.target == target and claim.result == result
+                for claim in previous_seer_claims
+            )
+        ):
+            self._emit(
+                "claim_role_rejected",
+                action,
+                actor,
+                started_at,
+                rejection_reason="duplicate_claim",
+            )
+            return {
+                "status": "already_published",
+                "message": "同一の公開主張はすでに記録されています。",
+            }
+
+        self.state.public_role_claims.append(
+            PublicRoleClaim(
+                day=self.state.day,
+                claimant=actor.name,
+                claimed_role=role,
+                target=target,
+                result=result,
+                reason=reason.strip() if isinstance(reason, str) else None,
+                vote_proposal=(
+                    vote_proposal.strip()
+                    if isinstance(vote_proposal, str)
+                    else None
+                ),
+            )
+        )
+        if role == Role.SEER.value:
+            if not previous_seer_claims:
+                self.state.seer_claims.append(
+                    PublicSeerClaim(day=self.state.day, claimant=actor.name)
+                )
+            if target is not None and result is not None:
+                self.state.seer_claims.append(
+                    PublicSeerClaim(
+                        day=self.state.day,
+                        claimant=actor.name,
+                        target=target,
+                        result=result,
+                    )
+                )
+        self._emit(
+            "claim_role_published",
+            action,
+            actor,
+            started_at,
+            claimed_role=role,
+            target=target,
+            claimed_result=result,
+            reason=reason,
+            vote_proposal=vote_proposal,
+            source="tool",
+        )
+        return {
+            "status": "published",
+            "message": "公開主張を記録しました。",
+        }
+
+    def _chat(
+        self,
+        actor: Player,
+        messages: list[dict[str, object]],
+        increase_generation: bool = False,
+        tools: list[dict[str, object]] | None = None,
+        action: str | None = None,
+        started_at: float | None = None,
+        request_number: int = 1,
+        request_reason: str = "初回",
+        tool_based: bool = False,
+        budget_key: str = "discussion",
+        disable_thinking: bool = False,
+    ) -> ChatResponse:
+        options, num_predict_source, thinking_enabled, thinking_source = self._options_for(
+            actor, budget_key, disable_thinking=disable_thinking
+        )
+        if increase_generation:
+            current_limit = options.get("num_predict", 512) if options else 512
+            if isinstance(current_limit, int) and not isinstance(current_limit, bool):
+                options = dict(options or {})
+                options["num_predict"] = max(current_limit, min(current_limit * 2, 8192))
+                num_predict_source = "retry_generation_boost"
+        original_timeout = getattr(self.client, "timeout", None)
+        effective_timeout = (
+            actor.timeout
+            if actor.timeout is not None
+            else original_timeout
+        )
+        if original_timeout is not None and actor.timeout is not None:
+            self.client.timeout = actor.timeout
+        max_retries = getattr(self.client, "max_retries", 2)
+        context_diagnostics: dict[str, object] = {}
+        if callable(getattr(self.client, "context_diagnostics", None)):
+            context_diagnostics = self.client.context_diagnostics(actor.model)
+        requested_num_ctx = options.get("num_ctx") if options else None
+        override_player_num_ctx = bool(
+            self.options and self.options.get("override_player_num_ctx")
+        )
+        if actor.num_ctx is not None and not override_player_num_ctx:
+            num_ctx_source = (
+                "player_setting_capped"
+                if actor.max_num_ctx is not None
+                and actor.num_ctx > actor.max_num_ctx
+                else "player_setting"
+            )
+        elif (
+            actor.recommended_num_ctx is not None
+            and (self.options is None or self.options.get("num_ctx") is None)
+        ):
+            num_ctx_source = "player_recommended_setting"
+        elif (
+            actor.max_num_ctx is not None
+            and actor.num_ctx is None
+            and (self.options is None or self.options.get("num_ctx") is None)
+        ):
+            num_ctx_source = "player_maximum_setting"
+        elif self.options is not None and self.options.get("num_ctx") is not None:
+            num_ctx_source = (
+                "cli_setting_capped"
+                if actor.max_num_ctx is not None
+                and isinstance(self.options.get("num_ctx"), int)
+                and self.options["num_ctx"] > actor.max_num_ctx
+                else "cli_setting"
+            )
+        elif requested_num_ctx is not None:
+            num_ctx_source = "api_request"
+        else:
+            num_ctx_source = "ollama_service_default_or_environment"
+
+        def emit_request_configuration(
+            request_options: dict[str, object],
+            thinking_value: bool | None,
+            thinking_label: str,
+            reason: str,
+        ) -> None:
+            """実際に送信するリクエスト設定をログ・CLIへ反映する。"""
+            if action is None or started_at is None:
+                return
+            self._emit(
+                "llm_request_configuration",
+                action,
+                actor,
+                started_at,
+                request_number=request_number,
+                request_reason=reason,
+                tool_based=tool_based,
+                request_options=request_options,
+                request_timeout_seconds=effective_timeout,
+                num_ctx_source=num_ctx_source,
+                requested_num_ctx=request_options.get("num_ctx"),
+                system_prompt_char_count=sum(
+                    len(str(message.get("content", "")))
+                    for message in messages
+                    if message.get("role") == "system"
+                ),
+                user_prompt_char_count=sum(
+                    len(str(message.get("content", "")))
+                    for message in messages
+                    if message.get("role") == "user"
+                ),
+                raw_prompt_char_count=sum(
+                    len(str(message.get("content", ""))) for message in messages
+                ),
+                num_predict=request_options.get("num_predict"),
+                num_predict_source=num_predict_source,
+                action_budget_key=normalize_action_budget_key(budget_key),
+                thinking_enabled=thinking_value,
+                thinking_source=thinking_label,
+                max_retries=max_retries,
+                context_diagnostics=context_diagnostics,
+            )
+
+        emit_request_configuration(
+            options or {}, thinking_enabled, thinking_source, request_reason
+        )
+
+        def send(request_options: dict[str, object] | None) -> ChatResponse:
+            if hasattr(self.client, "_last_chat_response"):
+                delattr(self.client, "_last_chat_response")
+            if tools is not None and callable(
+                getattr(self.client, "chat_with_metadata", None)
+            ):
+                response = self.client.chat_with_metadata(
+                    actor.model,
+                    messages,
+                    options=request_options,
+                    tools=tools,
+                )
+            elif request_options is not None:
+                content = self.client.chat(actor.model, messages, options=request_options)
+                metadata = getattr(self.client, "_last_chat_response", None)
+                if isinstance(metadata, ChatResponse):
+                    response = metadata
+                else:
+                    response = ChatResponse(
+                        content=content,
+                        attempts=max(1, getattr(self.client, "_last_attempts", 1)),
+                        content_length=len(content),
+                        thinking_present=self._has_thinking(content),
+                    )
+            else:
+                content = self.client.chat(actor.model, messages)
+                metadata = getattr(self.client, "_last_chat_response", None)
+                if isinstance(metadata, ChatResponse):
+                    response = metadata
+                else:
+                    response = ChatResponse(
+                        content=content,
+                        attempts=max(1, getattr(self.client, "_last_attempts", 1)),
+                        content_length=len(content),
+                        thinking_present=self._has_thinking(content),
+                    )
+            after_diagnostics: dict[str, object] = {}
+            if callable(getattr(self.client, "context_diagnostics", None)):
+                after_diagnostics = self.client.context_diagnostics(actor.model)
+            effective_context = after_diagnostics.get("ollama_ps_context")
+            return replace(
+                response,
+                requested_num_ctx=(
+                    request_options.get("num_ctx")
+                    if request_options
+                    and isinstance(request_options.get("num_ctx"), int)
+                    and not isinstance(request_options.get("num_ctx"), bool)
+                    else None
+                ),
+                effective_num_ctx=(
+                    effective_context
+                    if isinstance(effective_context, int)
+                    and not isinstance(effective_context, bool)
+                    else None
+                ),
+                num_ctx_source=num_ctx_source,
+            )
+
+        try:
+            try:
+                return send(options)
+            except OllamaError as error:
+                # 思考生成非対応のモデルでは400が返る。同じ要求を再送せず、
+                # think=offで1回だけ再送し、能力情報を記録して以後の行動もoffにする。
+                if not self._is_thinking_unsupported(error) or not (
+                    options and options.get("thinking") is True
+                ):
+                    raise
+                self._record_thinking_unsupported(actor, action, started_at)
+                fallback_options = dict(options or {})
+                fallback_options["thinking"] = False
+                emit_request_configuration(
+                    fallback_options,
+                    False,
+                    THINKING_CAPABILITY_SOURCE,
+                    f"{request_reason}（思考非対応のためthink=off再送）",
+                )
+                return send(fallback_options)
+        finally:
+            if original_timeout is not None:
+                self.client.timeout = original_timeout
+
+    @staticmethod
+    def _has_thinking(response: str) -> bool:
+        return bool(_THINK_BLOCK.search(response) or _UNCLOSED_THINK_BLOCK.search(response))
+
+    @staticmethod
+    def _is_context_overflow(error: OllamaError) -> bool:
+        message = error.message.casefold()
+        return any(
+            marker in message
+            for marker in (
+                "context length",
+                "context window",
+                "maximum context",
+                "prompt is too long",
+                "input length",
+                "num_ctx",
+                "コンテキスト長",
+                "コンテキストが長",
+            )
+        )
+
+    @staticmethod
+    def _transport_failure_reason(error: OllamaError) -> str:
+        return {
+            "timeout": "timeout",
+            "connection": "communication_failure",
+            "http": "communication_failure",
+            "invalid_response": "invalid_ollama_response",
+        }.get(error.kind, "communication_failure")
+
+    def _start_action(self, action: str, actor: Player) -> float:
+        started_at = time.perf_counter()
+        self._emit(
+            "llm_action_started",
+            action,
+            actor,
+            started_at,
+        )
+        return started_at
+
+    def _complete_action(
+        self,
+        action: ActionKind | str,
+        actor: Player,
+        started_at: float,
+        semantic_retries: int,
+        transport_attempts: int,
+        fallback_used: bool,
+        selected_target: str | None = None,
+        content: str | None = None,
+        error: OllamaError | None = None,
+        failure_reason: str | None = None,
+        failure_reasons: tuple[str, ...] = (),
+        response_metadata: dict[str, str | int | bool | None] | None = None,
+        content_preserved: bool = False,
+        recovered_content: bool = False,
+        repair_applied: bool = False,
+        fatal_safety_fallback: bool = False,
+        validation_severity: str = "ok",
+    ) -> None:
+        self._emit(
+            "llm_action_completed",
+            action,
+            actor,
+            started_at,
+            elapsed_seconds=round(time.perf_counter() - started_at, 3),
+            semantic_retries=semantic_retries,
+            transport_retries=max(0, transport_attempts - (semantic_retries + 1)),
+            total_retries=semantic_retries
+            + max(0, transport_attempts - (semantic_retries + 1)),
+            fallback_used=fallback_used,
+            content_preserved=content_preserved,
+            recovered_content=recovered_content,
+            repair_applied=repair_applied,
+            fatal_safety_fallback=fatal_safety_fallback,
+            validation_severity=validation_severity,
+            selected_target=selected_target,
+            content=content,
+            error=error.to_dict() if error is not None else None,
+            failure_reason=failure_reason,
+            failure_reasons=failure_reasons,
+            failure_classes=tuple(
+                dict.fromkeys(
+                    failure_class
+                    for failure_reason in failure_reasons
+                    if (failure_class := classify_failure_reason(failure_reason))
+                    is not None
+                )
+            ),
+            input_token_count=(
+                response_metadata.get("prompt_eval_count")
+                if response_metadata is not None
+                else None
+            ),
+            output_token_count=(
+                response_metadata.get("eval_count")
+                if response_metadata is not None
+                else None
+            ),
+            done_reason=(
+                response_metadata.get("done_reason")
+                if response_metadata is not None
+                else None
+            ),
+            requested_num_ctx=(
+                response_metadata.get("requested_num_ctx")
+                if response_metadata is not None
+                else None
+            ),
+            effective_num_ctx=(
+                response_metadata.get("effective_num_ctx")
+                if response_metadata is not None
+                else None
+            ),
+            num_ctx_source=(
+                response_metadata.get("num_ctx_source")
+                if response_metadata is not None
+                else None
+            ),
+            response_metadata=response_metadata,
+        )
+
+    def _emit(
+        self,
+        event_type: str,
+        action: ActionKind | str,
+        actor: Player,
+        started_at: float,
+        **details: object,
+    ) -> None:
+        if self.event_callback is None:
+            return
+        action_name = action.value if isinstance(action, ActionKind) else action
+        if event_type == "llm_action_parse_failed" and "failure_class" not in details:
+            reason = details.get("reason")
+            details["failure_class"] = (
+                classify_failure_reason(reason)
+                if isinstance(reason, str)
+                else None
+            )
+        phase_labels = {
+            "night_wolf": "夜・人狼相談",
+            "night_seer": "夜・占い",
+            "day_discussion": "昼・議論",
+            "voting": "投票",
+        }
+        self.event_callback(
+            {
+                "type": event_type,
+                "day": self.state.day,
+                "phase": self.state.phase.value,
+                "phase_label": phase_labels.get(
+                    self.state.phase.value, self.state.phase.value
+                ),
+                "player": actor.name,
+                "model": actor.model,
+                "action": action_name,
+                "discussion_claim_mode": self.discussion_claim_mode,
+                "private": action_name
+                in {"wolf_discussion", ActionKind.ATTACK.value, ActionKind.SEER.value},
+                "elapsed_seconds": round(time.perf_counter() - started_at, 3),
+                **details,
+            }
+        )
+
+    @staticmethod
+    def _label(action: ActionKind) -> str:
+        return {
+            ActionKind.ATTACK: "襲撃対象",
+            ActionKind.SEER: "占い対象",
+            ActionKind.VOTE: "投票",
+        }[action]
+
+    def _player(self, name: str) -> Player:
+        return next(player for player in self.state.players if player.name == name)

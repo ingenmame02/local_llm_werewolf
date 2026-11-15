@@ -21,6 +21,8 @@ $env:OLLAMA_NUM_PARALLEL="1"
 $env:OLLAMA_KEEP_ALIVE = "5m"
 ollama serve
 
+python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 1001 --timeout 180 --temperature 0.7 --question-hint-mode none --show-private --language Japanese 
+
 `--num-ctx`は省略時、Ollama APIリクエストには含まれず、サーバー／モデル側の既定値が使われます。現在の`config/players.json`では全プレイヤーの`num_ctx`を12288に設定しているため、プレイヤーごとのAPI要求へ明示されます。プレイヤー別`num_ctx`はCLIの`--num-ctx`より優先されます。
 
 --show-privateで管理者用ログを生成し、端末にも表示
@@ -109,14 +111,14 @@ python src/werewolf/cli.py --mode ollama --models-file config/players.json --see
 
 ゲーム結果JSONLには公開FactLedgerと比較用の`ledger_metrics`（CO呼び出し、実送信・再試行、重複CO、台帳修復、本文保持、質問未回答、処理時間）が含まれます。占い師本人だけの結果、候補集合、生成前後の台帳スナップショットは管理者用の`--private-log`にのみ記録されます。同一シードでモードを比較する場合は、各モードを同じ`--seed`で実行し、JSONLの`discussion_claim_mode`と`ledger_metrics`を比較してください。
 
-CO専用応答では、構造化されたCO／結果行だけを採用し、余分な説明文は議論本文へ混入しないよう破棄します。COなし・保留に誤った結果行が付いた場合も、結果を公開せずCOなし・保留として扱います。COプロンプトは会話履歴を重ねず、既に記録された公開COと占い師本人の結果だけを渡します。
+CO専用応答では、構造化されたCO／結果行だけを採用し、余分な説明文は議論本文へ混入しないよう破棄します。COなし・保留に誤った結果行が付いた場合も、結果を公開せずCOなし・保留として扱います。`[RESULT] None`・空・`なし`・`未公開`のような「判定を公開しない」表記は結果なしへ正規化し、形式失敗や再試行の原因にしません。占い結果の抽出は`プレイヤー5`や`P5`のような`Player 5`の別称も同じプレイヤーとして認識します。COプロンプトは会話履歴を重ねず、既に記録された公開COと占い師本人の結果だけを渡します。
 
 ```text
 【CO】なし または 占い師CO：対象=Player 2、判定=人間、理由=占い結果、投票提案=Player 3へ投票
 【本文】Player 2への疑いは弱めます。Player 3の発言も確認したいです。
 ```
 
-昼議論プロンプトには、確定ルール・ゲーム台帳とは分けて「人狼セオリーカード」を含めます。単独占い師COは1巡目後も対抗がいない場合に限って真寄りと評価し、真確定にはしません。未公開の人狼判定は早期公開を促し、人間判定だけの場合はCO・結果を保留する選択肢も示します。
+昼議論プロンプトには、確定ルール・ゲーム台帳とは分けて「人狼セオリーカード」を含めます。単独占い師COは1巡目後も対抗がいない場合に限って真寄りと評価し、真確定にはしません。未公開の人狼判定は早期公開を促し、人間判定だけの場合はCO・結果を保留する選択肢も示します。狂人を占っても人間が出るため、人間判定は村人の確定ではないことをルールカード・役職説明・セオリーカード・主張台帳の解釈行に共通認識として明記します。真占い師が未公開の判定を口にした応答はCO行を決定的に補完して受理し（`discussion_claim_deterministically_repaired`）、再試行とフォールバックを避け、フォールバックや修復文は応答言語で書いて本文を保持します。
 
 `config/players.json`ではプレイヤーごとに弱い議論スタイル（分析、質問、慎重、合意形成、直感、主張など）を指定します。個性は昼の議論本文だけに適用し、CO判定や対象選択には適用しません。議論の質・事実整合性・質問回答・形式指示より優先度を下げ、追加の説明や質問を強制しない設定です。
 
@@ -141,6 +143,14 @@ python src/werewolf/cli.py --mode ollama --num-predict-by-action discussion=1024
 ```
 
 player設定では`players.json`の`num_predict_by_action`に行動キーで書けます。キーは`discussion`、`wolf_discussion`（別名`wolf_consult`）、`attack`、`seer`、`vote`（別名`target`）、`co_correction`です。既定値は議論(1536)、人狼相談(768)、襲撃(256)、占い(256)、投票(256)、CO補正(256)です。襲撃・占い・投票・CO補正は最終回答が1行（またはCO最小3行）で済む行動なので、全体`num_predict`が大きい思考系モデルでは上限キャップ（襲撃/占い/投票=768、CO補正=384）へ降ろし、ムダな思考生成による長時間応答を抑制します。議論・人狼相談は根拠を説明できる文量を確保するため全体設定をそのまま使います（昼議論の文量目安は5〜8文）。生成起因の再試行（空応答・思考のみ・`done_reason=length`）では`num_predict`を倍へ増やして再送します。各行動の要求は`llm_request_configuration`へ`action_budget_key`と`num_predict_source`（`player_by_action`、`cli_by_action`、`global_capped`、`player_global`、`cli_global`、`default_by_action`）を記録し、CLI表示にも「行動」「優先元」を出します。
+
+## プレイヤー別の生成サンプリング（temperature等）
+
+幻覚や案内文の模倣を起こすモデルは、`players.json`の`temperature` / `top_p` / `top_k` / `repeat_penalty`でそのプレイヤーだけを安定させます。未指定ならCLI（`--temperature`等）またはモデル既定値が使われ、プレイヤー設定は全体設定より優先されます。許容範囲は`temperature` 0〜2、`top_p` 0〜1、`top_k` 0〜400（整数）、`repeat_penalty` 0〜2です。`game_e2991441d6f0`で幻覚（`プレイヤーX`の占い結果CO）を起こしたPlayer 3（mistral-small）は`temperature 0.25` / `top_p 0.9` / `top_k 20`へ下げました。
+
+## 幻覚・プレースホルダとフォール基準
+
+案内文の例（`Player X` / `人狼/人間`の二者選択表記）はプロンプトから削除し、対象は`Target=<あなたが実際に占ったプレイヤー名>`のような名前slotで示します。応答が案内文をそのまま模倣した場合（`template_placeholder_echo`）は致命的扱いではなく台帳修復で該当文・該当行だけ除去し、本文と正当なCOは保持します（幻覚の対象を含む結果行・CO行は公開せず`hallucinated_template_line_dropped`として記録）。投票・占い・襲撃の対象行がない応答も、別称（`プレイヤー3` / `P3`）や最初の行の単一候補名から解決し、再要求は3回目まで許すためランダムフォールバックを減ります。議論の3回目再要求は生成起因の失敗（空・思考のみ・切り詰め）だけに限定し、意味検証の失敗は従来の2回までの挙動を維持します。
 
 ## 思考生成（think）の行動別設定
 

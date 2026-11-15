@@ -3,16 +3,16 @@
     {
       "name": "Player 1",
       "model": "werewolf-calm3-22b-32k",
-      "num_ctx": 32768,
+      "num_ctx": 65536,
       "personality_profile": "analytical",
-      "num_predict": 1024,
+      "num_predict": 3072,
       "num_predict_by_action": {
-        "discussion": 1536,
-        "wolf_discussion": 768,
-        "attack": 256,
-        "seer": 256,
-        "vote": 256,
-        "co_correction": 256
+        "discussion": 4608,
+        "wolf_discussion": 2304,
+        "attack": 768,
+        "seer": 768,
+        "vote": 768,
+        "co_correction": 768
       },
       "thinking_by_action": {
         "discussion": false,
@@ -22,31 +22,31 @@
     {
       "name": "Player 2",
       "model": "werewolf-muse-glimmer-8k",
-      "num_ctx": 12288,
+      "num_ctx": 65536,
       "personality_profile": "questioning",
-      "num_predict": 4096,
+      "num_predict": 12288,
       "num_predict_by_action": {
-        "discussion": 3072,
-        "wolf_discussion": 1024,
-        "attack": 768,
-        "seer": 768,
-        "vote": 768,
-        "co_correction": 512
+        "discussion": 9216,
+        "wolf_discussion": 3072,
+        "attack": 2304,
+        "seer": 2304,
+        "vote": 2304,
+        "co_correction": 1536
       }
     },
     {
       "name": "Player 3",
       "model": "werewolf-mistral-small-8k",
-      "num_ctx": 12288,
+      "num_ctx": 65536,
       "personality_profile": "cautious",
-      "num_predict": 512,
+      "num_predict": 1536,
       "num_predict_by_action": {
-        "discussion": 1280,
-        "wolf_discussion": 640,
-        "attack": 256,
-        "seer": 256,
-        "vote": 256,
-        "co_correction": 256
+        "discussion": 3840,
+        "wolf_discussion": 1920,
+        "attack": 768,
+        "seer": 768,
+        "vote": 768,
+        "co_correction": 768
       },
       "thinking_by_action": {
         "discussion": false,
@@ -56,76 +56,76 @@
     {
       "name": "Player 4",
       "model": "werewolf-glm-4.7-flash-8k",
-      "num_ctx": 12288,
+      "num_ctx": 65536,
       "personality_profile": "consensus",
-      "num_predict": 768,
+      "num_predict": 2304,
       "num_predict_by_action": {
-        "discussion": 2048,
-        "wolf_discussion": 1024,
-        "attack": 1024,
-        "seer": 1024,
-        "vote": 1024,
-        "co_correction": 512
+        "discussion": 6144,
+        "wolf_discussion": 3072,
+        "attack": 3072,
+        "seer": 3072,
+        "vote": 3072,
+        "co_correction": 1536
       }
     },
     {
       "name": "Player 5",
       "model": "werewolf-qwen3.8-8k",
-      "num_ctx": 12288,
+      "num_ctx": 65536,
       "personality_profile": "analytical",
-      "num_predict": 768,
+      "num_predict": 2304,
       "num_predict_by_action": {
-        "discussion": 1536,
-        "wolf_discussion": 768,
-        "attack": 512,
-        "seer": 512,
-        "vote": 512,
-        "co_correction": 256
+        "discussion": 4608,
+        "wolf_discussion": 2304,
+        "attack": 1536,
+        "seer": 1536,
+        "vote": 1536,
+        "co_correction": 768
       }
     },
     {
       "name": "Player 6",
       "model": "werewolf-deepseek-r1-8k",
-      "num_ctx": 12288,
+      "num_ctx": 65536,
       "personality_profile": "intuitive",
-      "num_predict": 1536,
+      "num_predict": 4608,
       "num_predict_by_action": {
-        "discussion": 3072,
-        "wolf_discussion": 1024,
-        "attack": 1024,
-        "seer": 1024,
-        "vote": 1024,
-        "co_correction": 512
+        "discussion": 9216,
+        "wolf_discussion": 3072,
+        "attack": 3072,
+        "seer": 3072,
+        "vote": 3072,
+        "co_correction": 1536
       }
     },
     {
       "name": "Player 7",
       "model": "werewolf-gpt-oss-20b-8k",
-      "num_ctx": 12288,
+      "num_ctx": 65536,
       "personality_profile": "assertive",
-      "num_predict": 1024,
+      "num_predict": 3072,
       "num_predict_by_action": {
-        "discussion": 1536,
-        "wolf_discussion": 768,
-        "attack": 512,
-        "seer": 512,
-        "vote": 512,
-        "co_correction": 1024
+        "discussion": 4608,
+        "wolf_discussion": 2304,
+        "attack": 1536,
+        "seer": 1536,
+        "vote": 1536,
+        "co_correction": 3072
       }
     },
     {
       "name": "Player 8",
       "model": "werewolf-gemma4-8k",
-      "num_ctx": 12288,
+      "num_ctx": 65536,
       "personality_profile": "balanced",
-      "num_predict": 4096,
+      "num_predict": 12288,
       "num_predict_by_action": {
-        "discussion": 3072,
-        "wolf_discussion": 1024,
-        "attack": 768,
-        "seer": 768,
-        "vote": 768,
-        "co_correction": 512
+        "discussion": 9216,
+        "wolf_discussion": 3072,
+        "attack": 2304,
+        "seer": 2304,
+        "vote": 2304,
+        "co_correction": 1536
       }
     }
   ]

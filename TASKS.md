@@ -36,6 +36,79 @@ TASK-033で議論の継続性と本文表示は改善した。一方、対象試
 - 同一seedのモック試合で発話数、ClaimLedger、FactLedger、IntegrityAlertの整合性を確認する。
 - 実機3ゲーム以上で、最終パス置換率3%未満、致命的漏洩0件、本文欠落0件を確認する。再試行で有用本文を回収できた場合、単なる再試行回数だけを失敗扱いしない。
 
+## TASK-035 — 自己行動履歴・判断理由の一貫性台帳
+
+状態: 実装済み（実機検証待ち）
+対象ログ: `evaluation-results/task034-trial-1/game_40c7f1412f1b.jsonl`
+関連: TASK-029, TASK-031, TASK-033, TASK-034
+
+### 背景
+
+TASK034の実機試合では、議論本文・異常発言の指摘・公開台帳の参照は改善した。一方で、モデルは自分の過去の投票や発言を正確に思い出し、その理由を現在の判断と接続することが苦手だった。例えば、過去の投票先変更について質問されても「記録にない」「パス」となり、台帳上の出来事を現在の議論へ再掲するだけで、自己の意思決定の因果関係を説明できない場面が発生した。
+
+また、発言中に死亡済みプレイヤーを現在の生存者として扱う、過去の発言と矛盾する事実認識を繰り返すなど、公開事実台帳と自己履歴の接続にも課題がある。
+
+### 目的
+
+各プレイヤーが、自分の過去の発言・質問・投票・役職行動・判断理由・当時の確信度を構造化して保持し、次の発言で以下を説明できるようにする。
+
+- なぜその投票先を選んだか
+- なぜ前回から投票先を変えたか
+- 過去に誰を疑い、現在も疑っているか
+- 過去の発言と現在の発言が異なる場合、その変更理由は何か
+- 自分が答えられなかった質問、パスした理由、保留した根拠は何か
+
+### 仕様
+
+1. `PlayerActionMemory`を追加し、プレイヤーごとに以下を保存する。
+   - `action_id`, `day`, `phase`, `action_type`
+   - `selected_target`または`vote_target`
+   - `public_statement_summary`
+   - `suspicion_targets`
+   - `reasoning_summary`
+   - `confidence`
+   - `unanswered_questions`
+   - `evidence_ids`
+   - `previous_position`と`position_change_reason`
+
+2. エンジンが、投票・占い・襲撃・公開CO・議論本文・パス・質問への回答を確定時に行動台帳へ登録する。LLMの自己申告だけでなく、実際に採用された投票先・公開本文・ゲームイベントを正とする。
+
+3. 次のプロンプトには、現在のプレイヤー本人について以下を短く渡す。
+   - 直近の自分の行動一覧
+   - 各行動の当時の理由
+   - 前回の疑い順位と現在の疑い順位
+   - 未回答質問
+   - 前回から変更された判断
+
+4. 議論中に「過去の自分の行動理由」を問われた場合、通常の自由発話より優先して自己行動台帳を参照する専用タスク指示を出す。台帳に理由がない場合は、理由を捏造せず「当時の理由は記録されていない」と明示し、現在の推測と区別する。
+
+5. `SelfConsistencyGuard`を追加し、公開前に以下を検査する。
+   - 自分の過去の投票先・役職行動との矛盾
+   - 死亡済みプレイヤーを現在の行動対象として扱っていないか
+   - 自分が過去に述べた疑い・CO・結果との矛盾
+   - 「記録がない」と述べたが、公開FactLedgerに存在する事実ではないか
+   - 質問された過去行動に回答せず一般論だけを述べていないか
+
+6. 検査違反は重大度を分ける。事実誤認は修復要求、理由の欠落は警告または短い自己履歴再提示、秘匿情報漏洩は従来通り安全フォールバックとする。正当な方針変更は違反とせず、変更理由の説明を要求する。
+
+### 実装箇所
+
+- `src/werewolf/models.py`: `PlayerActionMemory`、行動理由、判断変更、証拠IDの型。
+- `src/werewolf/engine.py`: 実行済み行動の確定登録、自己整合性検査、修復イベント。
+- `src/werewolf/prompts.py`: 本人の行動履歴・前回判断・未回答質問の専用セクション。
+- `src/werewolf/llm_actions.py`: 過去行動質問の検出、自己履歴優先の修復要求。
+- `src/werewolf/cli.py`: 行動台帳、矛盾、修復結果のJSONL記録。
+
+### テストと完了条件
+
+- 同一プレイヤーのDay1投票、Day2投票変更、Day3の理由質問に対して、各理由と変更理由が引き継がれる。
+- 台帳に理由がない場合、LLMが理由を捏造せず不明として回答する。
+- 過去に投票した対象と現在の投票対象が異なる場合、正当な変更理由を要求できる。
+- 死亡済みプレイヤーへの質問・投票を生成しない。
+- 自分の過去発言と矛盾する本文を検出し、公開前に修復できる。
+- `FactLedger`上の事実を「記録がない」と誤認する発言を検出できる。
+- 実機3ゲームで、過去行動理由質問への回答率90%以上、自己履歴由来の事実矛盾50%削減、秘匿情報漏洩0件を目標とする。
+
 ## TASK-001 — Python基盤とデータモデル
 
 状態：完了
@@ -1490,3 +1563,271 @@ GameState
 - A方式と比較して、C方式で質問回答率・根拠の新規性・異常発言指摘率が改善し、秘匿性とCO形式成功率を維持する。
 - メモ更新失敗、LLMタイムアウト、再生成失敗が起きても、直前の有効メモと確定台帳でゲームを継続できる。
 - 固定テスト、比較評価、実戦3試合、コンパイル、`git diff --check`が成功する。
+
+## TASK-035 追加修正 — 人狼の陣営視点漏洩の検出と再要求の応答時間
+
+実機ログ `evaluation-results/task035-trial-1/game_d8127182c9f7.jsonl` の中断試合から、2つの問題を実装修正した。
+
+### 1. Player 1（人狼）の公開発言の漏洩
+- 初日の「我々人狼としてどう行動すべきか」は単数一人称規則（`_SELF`）に複数列一人称がなく無検出で公開された。再要求後の「人狼としての行動戦略を示すため」も再検出されずそのまま公開された。
+- 複数列一人称（我々・私たち・僕ら・we/our等）を `_TEAM_SELF` として分離し、陣営視点の行動語（行動・戦略・方針・立ち回・相談・投票・狙・排除）と組み合わせて `secret_team_leak` / `wolf_team_action_view` で検出する。一人称なしの「人狼としての行動」も人狼・狂人の発言では検出する。英語の "As wolves we should vote…" も検出する。
+- 村人が漏洩発言を引用した文、人狼の村側視点の発言（「人狼の投票先を警戒」等）、正当なCOは誤検出しない。複数列一人称を `_SELF` に混ぜると村人の引用まで `secret_role_leak` 化するため、単数一人称規則は変更しない。
+- プロンプト側でも人狼・狂人の役職説明と議論指示に陣営視点表現の禁止例（禁止語リスト）を明記する。セーフティ再要求は短縮プロンプト＋禁止例の再提示を行い、再要求後も漏洩が残る場合は文単位の redact で安全定型文へ補正する。
+
+### 2. Player 6（deepseek-r1）の推論offでも長い応答時間
+- タイムアウト時に `OllamaClient` が同一要求を `max_retries=2` まで再送し、180秒×3回の待避（ログ seq 98 の 540秒）が発生した。`timeout_retries`（既定1）を導入し、タイムアウトの再送は1回までとする。http・通信失敗の再送は従来どおり `max_retries`。
+- 秘密漏洩のセーフティ再要求は全文プロンプト（約1万字・`num_predict=9216`・`num_ctx=65536`）を再送していた（seq 47 の 160秒）。公開事実・公開CO・直近発言だけの短縮プロンプトへ変更し、思考offに加えて `num_predict=768`（`retry_generation_cap`）と `num_ctx` のプロンプトサイズに見合う縮小（`retry_context_fit`、下限2048）を適用する。
+- タイムアウト後の再要求（`short_prompt_thinking_off`）でも同じ上限・コンテキスト縮小を適用し、プロンプトの指示値と実際のリクエスト値を一致させる。`--override-player-num-ctx` の明示指定では縮小しない。
+- `llm_request_configuration` へ `timeout_retries`・`retry_budget_fit`・`num_ctx_before_retry_fit` を記録し、CLI表示に再送上限と縮小情報を追加する。
+
+### 完了条件
+- 陣営視点漏洩が公開ログ・次プレイヤーのプロンプト・公開台帳に入らないこと、引用・村側視点の誤検出がないことを `tests/test_task035_leak_and_retry.py` で確認する。
+- セーフティ再要求とタイムアウト再要求の送信オプション（短縮プロンプト、`num_predict`上限、`num_ctx`縮小、`thinking=false`）と、タイムアウト再送が1回までであることを同テストで確認する。
+- 既存の秘匿性・CO・推理メモ・合法行動・リトライテストを維持する。実機での再試合はローカルLLMの負荷回避のため本タスク実行時には行わない。
+
+## TASK-036 動的コンテキスト・メタ発話の連呼・自己同一性の根本改善
+
+実機ログ `evaluation-results/task035-trial-1/game_f108a80bc802.jsonl` の中断試合（Player 6が初回要求で360秒タイムアウト→再要求40秒、Player 3がメタ定型文を同一ターン内で2回連呼、Player 1が初日で「昨日の発言」を誤引用）を踏まえて改善した。
+
+### 1. 動的コンテキスト（速度と精度の両立）
+- 送信プロンプトの実測文字数（概算0.8トークン/字）＋行動別生成上限（思考onの残余含む）＋余白512を必要量とし、`num_ctx`を必要量へ合わせる。過大割り当て（設定値が必要量の2倍以上）のみ縮小、必要量不足は `max_num_ctx` まで拡張。下限2048。`num_ctx_source=dynamic_context_fit`・`num_ctx_before_dynamic_fit`・`num_ctx_setting_source`・`context_needed_tokens` を記録。
+- 発言履歴は割り当てコンテキストから逆算した文字数予算（600〜12000字）で絞り、予算超過時のみ低優先度の発言から除去する。確定扱い（現在の質問文脈・直近発言・公開CO台帳・ラウンド全文）は予算外、`claim_or_seer_result` は最後に除去する候補として保持し、精度を落とさない。
+- `--no-dynamic-context` で無効化（比較実験用）、`--override-player-num-ctx` の上書きでは指定値をそのまま送る。
+
+### 2. 思考・生成の動的ダウングレード
+- タイムアウト観測モデルを `model_capabilities` に記録し、以後の議論・人狼相談は `thinking=false`・`num_predict<=1536`（`model_timeout_fit`）・発言予算0.6倍で送る（`model_timeout_downgrade` イベント、CLI表示）。
+
+### 3. メタ文連呼の根本修正
+- `repeated_discussion_topic` の修復でメタ定型文を本文に挿さない（重複文のみ除去、本文が空なら内容のある代替文へ決定的補正）。
+- 本文に混入したメタ発話（修復定型文・生成設定・台帳修復の言及）を `meta_instruction_echo` として検出し、公開前に文単位で除去する。プロンプトでは【本文】にメタ発話・修復定型文の引用を書かないことを明記。
+- 定型文を公開しないため、他のモデルが同じ文を引用・連呼する経路を絶つ。
+
+### 4. 自己同一性・過去情報
+- 議論プロンプトに `SELF_ACTION_MEMORY`（自分の投票先・変更理由・記録がない場合は「記録にないため判断できない」）と【本日あなたのこれまでの発言】を追加。自分の発言は本日分のみ（古い全文の毎日再送はプロンプト量と誤引用を増やす）とし、過去日の自分の行動は構造化した確定記録として渡す。
+
+### 完了条件
+- `tests/test_task036_dynamic_context.py`: 過大割り当ての縮小、CLI上書き・無効化、`max_num_ctx` への拡張、発言履歴の予算除去（確定扱いの保持）、メタ発話の除去（再生成なし・1回の送信）、重複修復でメタ定型文を公開しない、タイムアウト観測後のthinking off・上限1536、自己同一性欄の存在を確認する。
+- 既存テスト（秘匿性・CO・リトライ・台帳）をすべて維持する（`python -m pytest -q` 312件green）。実機での再試合はローカルLLM負荷回避のため本タスク実行時には行わない。
+
+## TASK-037 追加修正 — ターミナルでCO付き本文が表示されない問題
+
+構造化CO（二層形式）では公開会話へ`【本文】`だけを残すため、CO・占い結果は台帳イベントとしてのみ発行され、ターミナルには本文のみ表示されていた（ログには発言が残るのに画面ではCOが消える）。表示側のみ修正した。
+
+- `cli.py`へ`PUBLIC_CLAIM_DISPLAY_TYPES`・`public_claim_display_line()`・`claim_covered_by_speech()`を追加し、台帳のCO・占い結果主張を `  [Player 4] 公開CO: 占い師を主張（未確認）` / `  [Player 4] 占い結果の主張: Player 1 = 人狼` として本文の直前に出力する。
+- 台帳イベントは`pending_claims`に積んでおき、同一発言者の`discussion_message`が出る時点でflushする。本文に既に主張が書かれている場合は重複表示しない（`claim_covered_by_speech`）。
+- 別プレイヤーの発言・投票・勝敗判定など次のイベントが来た場合、ゲーム終了時、Ctrl+C・シグナル中断時にも未表示の主張をflushする。
+- 表示だけの変更で、ログ・台帳・公開会話の内容は変わらない。`tests/test_cli.py::test_cli_display_public_claim_lines_before_structured_body`でCO行→結果行→本文の順序、重複表示なし、台帳イベントの記録を確認する（役職抽選に依存しないよう、抽選結果から真占い師・人狼を記録してCOを応答させる）。
+
+## TASK-038 追加修正 — 「質問に答えてください」のお節介をモード化し、回答率を測る
+
+ハイブリッド検索のプロンプトが「Player〇〇の質問に答えてください」系の指示を硬性ルール化しており、形式合わせの再生成（`question_not_answered_first`）で応答時間と精度を削っていた（実測ログ `game_d8127182c9f7` で 112.8s の無駄再生成→224.5s、`game_f108a80bc802` で semantic_retries 11）。硬性検証とメタ語の強制を主な害として、回答の強制度をモード化した。
+
+### 1. 質問ヒントモード（`--question-hint-mode strict|soft|none`、既定 `soft`）
+- `discussion_format.py`に `QUESTION_HINT_*`・`normalize_question_hint_mode`（不明値はsoft）を追加。`GameState.question_hint_mode`（既定soft）、`options["question_hint_mode"]`、CLI引数・game_init記録・開始バナーへ反映。
+- `prompts.py`: `soft`は【現在の質問】（質問者・引用発言・"あなたへの質問・反応の可能性"）を観測として出し、命令形の【直前の質問への回答】欄と「最初の一文で回答」指示は出さない。`strict`のみ旧来の強制欄・1文目指示・回答順序案内。`none`は質問欄・回答指示を一切出さない（完全中立の証拠のみ）。
+- `llm_actions.py._discussion_response_issue`: 1文目ルール（`question_not_answered_first`）を `strict` のときだけ返す。soft/noneでは再生成しない。
+- `engine.diagnose_discussion_body(..., question_hint_mode=...)`: softは同一理由を **warningのみ**（`repairable=False`・公開可）、strictはrepairable、noneは判定しない。CLIは `state.question_hint_mode` を設定してengine側診断も同じ強制度を使う。
+- `answers_previous_question`（共通実装）を「1文目に名前」ではなく **本文のどこかに回答内容が含まれるか**（プレイヤー名言及、または句読点・助詞で分割した語彙の重複）で判定するよう緩和。
+
+### 2. 回答率のメトリクス拡張（観測は残す）
+- `llm_actions._question_answer_check` が `discussion_question_check` イベントを発行（`question_hint_mode` / `question_directed` / `question_answered` / `question_answer_forced` / `question_retry_allowed`）。`none`では発行しない。
+- `GameLogger` の `ledger_metrics` に `question_checks` / `question_directed` / `question_answered` / `question_answer_forced` と `question_answer_rate` / `question_unanswered_rate` を追加（旧 `question_not_answered` / `question_not_answered_rate` はstrict再生成失敗のカウントとして維持）。
+
+### 完了条件
+- `tests/test_task038_question_hint.py`: モード正規化、soft=warningのみ／strict=repairable／none=判定なし、1文目位置を無視した回答検出、loggerの回答率集計を確認。
+- `tests/test_ollama.py`: strictで1文目ルールの再生成、softで再生成0（本文保持・`discussion_question_check`の観測）、noneで質問欄と観測が消えること、soft issue（本文保持）経路はstrictで維持。
+- `tests/test_confidentiality.py`: soft/strict/noneのプロンプト差分（観測欄の有無・命令文の有無）を確認。
+- `tests/test_cli.py`: `--question-hint-mode` の既定soft・選択、mock実行でのバナー表示と `game_init`・`ledger_metrics` の記録を確認。
+- `python -m pytest -q` 322件 green。実機試合はローカルLLM負荷回避のため本タスク実行時には行わない。
+## TASK-039 追加修正 — プレイヤー1の自己同一性・占い師CO成立の改善
+
+実機ログ `logs/game_20da533bc4a6.jsonl` で Player 1（CALM3・真占い師）が
+「Player 2は人間と占われました」と未公開の判定をCOなしで公開し、秘匿性ガードが
+それを漏洩として安全再生成した結果、本文が消えて「Player 1が疑われている…」という
+三人称の自己参照だけの発言が公開された（`secret_leak_detected` ×4、`self_consistency_alert_count` 2、
+`seer_claims` 0件）。自己同一性の混同とCO不回復を原因として、次の修正を入れた。
+
+### 1. CO認識の文単位化・自分のプレイヤー名形式の受理
+- `engine.extract_public_role_claim(content, self_name)` / `is_public_seer_claim(content, self_name)`
+  を文単位で評価し、`私・僕・俺・自分`のprefixに加えて**自分のプレイヤー名**
+  （`Player 1は占い師CO：…`）も正当な公開主張として受理する。役職名の直後に
+  `[:：、,，／/。]`・`CO`・`対象/判定/結果/理由/投票`が続く場合だけ主張とし、
+  「Player 2の占い師COを確認した」のような**他者COの言及**は自分の主張にしない。
+- `SecretLeakGuard.allows_public_claim(content, actor)`・`llm_actions`のCO受理・
+  `claim_tool`・CO訂正経路をすべて`actor.name`付き認識へ統一した。
+
+### 2. 三人称の自己参照（自分の名前＋役職・メタ）の漏洩検出
+- `SecretLeakGuard.inspect`に `third_person_self_role_assertion`（「Player 1は占い師です」型）と
+  `third_person_self_role_meta`（「Player 1が偽の占い師か」「設定上」「騙っている」型）を追加。
+  引用・他人の名前は対象外。正当なCO形式（`allows_public_claim`）は引き続き許容。
+- `llm_actions._third_person_self_sentences`は旧来の行頭限定ではなく**文中の自己参照**も
+  拾う（`は|が|も`＋20字以内に役職・疑い・投票・CO等の語）。引用内は除外。
+- `_discussion_response_issue`の末尾（他の整合チェックの後）で`third_person_self_reference`を
+  返し、`ledger_repairable_discussion_issues`へ追加して**決定的修復**する。
+
+### 3. 決定的修復：再生成せず一人称へ書き換える（議論の自由度を維持）
+- `_first_person_substitution`で自分のプレイヤー名を`私`へ置換するだけ（助詞・内容量は維持）。
+  役職語を含む文は置換対象から除外し（再要求で一人称のCO文へ書き直させる）、
+  役職語のない文のみ決定的に修復する（`ledger_repair` reason=`third_person_self_reference`、
+  `regeneration_avoided=true`・HTTPリクエスト0）。
+
+### 4. 真占い師の未公開結果言及は安全再生成ではなくCO補完
+- `engine._complete_seer_claim_for_publish`：真占い師の発言が台帳の**実際の占い結果**
+  （`extract_public_seer_result`で解析）に言及し、まだ未公開なら、先頭に
+  `私は占い師CO：対象=Player X、判定=人狼/人間、理由=初夜の占い結果です、投票提案=…`
+  を決定的に補完して**元の本文を保持したまま公開**する（イベント
+  `seer_claim_deterministically_completed`）。判定が台帳と不一致・メタ/陣営漏洩は補完しない。
+- `llm_actions`の議論漏洩経路で `seer_claim_repairable`（真占い師＋役職/結果漏洩のみ＋
+  未公開結果あり）を安全再生成から除外し、上記のCO補完へ委ねる。
+- `SecretLeakGuard._HIDDEN_RESULT`に `占わ|占っ` を追加し、「P1は人間と占われました」型の
+  自然文の判定言及も未公開結果として検出する。
+
+### 5. プロンプトの自己同一性・CO案内（自由度は変えない）
+- システムプロンプトに `あなたは「Player 1」です。自分のことは一人称（私・僕）で述べ、
+  自分のプレイヤー名を他人のように三人称で論じたり別のプレイヤーとして扱わないでください`
+  を明記。占い師には「伏せる場合は対象名・判定語・占い語を書かず『今は公開しません』とだけ述べる」
+  ＝**保留選択は自由**のまま、伏せる時の書き方だけを案内。
+- 議論プロンプトに「自分の名前「Player X」はあなた自身を指します」を全プレイヤー共通で追加。
+- 漏洩安全再要求プロンプトに【自己同一性】欄と**分類別の修復案内**を追加し、
+  占い師には「占い師CO・結果の公開は漏洩ではなく村側の正当な主張」とCO形式を明示
+  （旧来は「内部役職を明かさず」Onlyで正当なCOを出せなかった）。
+- 短縮再回答プロンプトの事実欄に「自分の呼称」行を追加。
+
+### 6. プレイヤー1限定のCOコーチング（`claim_coaching`）
+- `PlayerConfig.claim_coaching` / `Player.claim_coaching`（既定false）を追加し、
+  `config/players.json`のPlayer 1（CO登録に弱いCALM3）だけ`true`。`setup.create_game`で反映。
+- `true`のプレイヤーのみ「役職COの登録が発言の先頭形式に依存するため、COを出す場合は
+  1文目（【CO】ブロックまたは自然文の先頭）にCO形式を書く」を1行追加する。
+  **CO保留・パスの選択、議論の内容の自由度は変更しない**（他プレイヤーには出さない）。
+
+### 完了条件
+- `tests/test_task039_identity_and_co.py`: 文途中・自分の名前形式のCO認識、他者CO言及の非受理、
+  三人称自己参照の漏洩検出と正当COの許容、プロンプトの自己同一性・COコーチング差分、
+  エンジンの決定的CO補完（本文保持・台帳登録・非公開化なし）、三人称の一人称化決定的修復
+  （再生成0・HTTP1回）、漏洩再要求プロンプトの占い師CO案内、`claim_coaching`の設定反映を確認。
+- 既存の秘匿性・CO・リトライ・台帳・動的コンテキストテストをすべて維持
+  （`python -m pytest -q` 329件 green）。実機試合はローカルLLM負荷回避のため本タスク実行時には行わない。
+
+## TASK-040 追加実装 — Day1初ターンの一時的プロンプト（情報0件・占い選定理由の説明困難）
+
+Day1の初ターンは公開情報が0件なのに、モデルが「昨日の発言」「占い選定理由」等を捏造し、選定理由の説明に思考トークンを消費していた。初ターン限定の一時的な案内ブロックをプロンプトへ挿入した（恒久的なルールカードには加えない）。
+
+### 1. Day1・1巡目の昼議論プロンプト（全プレイヤー）
+- `prompts.py`に `DAY1_FIRST_TURN_MARKER`・`day1_first_turn_card()`・`PromptBuilder._is_day1_first_turn()`・`_day1_first_turn_block()` を追加。
+- 条件: `day == 1` かつ `state.discussion_turn <= 1`（stateが無い場合は本日の発言0件で判定）。2巡目以降・Day2以降は挿入しない。
+- 内容は台帳から算出した実数を含む: `死亡{n}件 / 投票{n}件 / 役職CO{n}件 / 公開された占い結果{n}件 / 本日のこれまでの発言{n}件`、根拠0件での捏造禁止、**初日のため占い対象の選定理由を後から説明することは困難**（理由を作らず「初日は情報がないため選定理由を説明できない」と述べて構わない／結果公開時は結果そのものを根拠にし選定理由の正当化は省略）、疑い・投票先は確定できないので確認計画を述べる、投票意向は「今は決めない」で構わない、ブロックの文言・システム情報の引用禁止。
+- 挿入位置は `SELF_ACTION_MEMORY`・【本日あなたのこれまでの発言】の直後（`compact()` 後も保持される）。`context_diagnostics["day1_first_turn_hint"]` を `llm_request_configuration` 記録へ残す。
+
+### 2. 初夜（Day1）の占い師プロンプト
+- `SEER_FIRST_NIGHT_MARKER`・`seer_first_night_card()` を追加し、`build_seer_prompt(day=1)` かつ過去の占い結果が無いときのみ挿入。
+- 初夜は情報0件・候補人数を明示、**占った理由を後で説明することは困難**なので根拠がなくてもよい（1人選ぶだけでよい）、理由を書くなら1文、思考・説明文を長くせず簡潔に出力する案内。`diagnostics={"first_night_hint": True}` を記録。
+
+### 完了条件
+- `tests/test_task040_day1_first_turn.py`（7件）: Day1初ターンのカード内容と件数、2巡目以降・Day2での非挿入、`compact()`後の保持、初夜占いカードの挿入とDay2での非挿入、`OllamaActions.discuss` の実際リクエストプロンプトへの含ませを確認。
+- `python -m pytest -q` 336件 green。実機試合はローカルLLM負荷回避のため本タスク実行時には行わない。
+
+
+
+## TASK-041 真占い師のフォールバック抑制（game_f6983c7cbcc2 Player 3）と狂人の占い結果の共通認識
+
+実機ログ `logs/game_f6983c7cbcc2.jsonl` で Player 3（真占い師・小モデル）の `fallback_used` が
+4件、`seer_result_claim_missing` が Player 3だけで5件出ていた。原因は応答形式の解析失敗と
+判定抽出の失敗であり、再試行後に英語の汎用フォールバックが公開され、他のプレイヤーが
+「Player 3の沈黙」と誤認していた。
+
+### 1. `[RESULT]`未公開表記と空行の正規化
+- `discussion_format.py`に`normalize_result_field()`（`None`/`null`/`なし`/`未公開`/空 → 結果なし）と
+  `normalize_claim_field()`（`なし`/`無し`/`しない` → none、`保留` → hold、英字表記も統一）を追加。
+- `parse_discussion_output()`は行頭マーカー直後の空白を水平空白に限定し、空の`[RESULT]`行でも
+  `[BODY]`行が匹配するようにした（旧実装は形式失敗→再試行になっていた）。
+- `parse_discussion_claim()`は共通の正規化を使い、COなし・保留＋結果行なしを受理する。
+- `llm_actions._discussion_response_issue()`は正規化した結果ブロックで`seer_result_without_claim`
+  を判定するため、`[CO] None` + `[RESULT] None`は失敗にならない。
+
+### 2. プレイヤー名別称の占い結果抽出
+- `engine._player_name_pattern()`追加。`対象名=プレイヤー5 結果=Human`・`P5は人間と判定された`等を
+  `Player 5`の判定として認識する。旧実装は抽出失敗→`seer_result_without_claim`→フォールバック。
+
+### 3. CO行の決定補完（再試行・フォールバックを回避）
+- `llm_actions._seer_claim_prefix_repair()`追加。真占い師が台帳と一致する判定を口にした応答、
+  またはCOだけでRESULT行のない応答へ、実判定からCO行を先頭に補完し本文を保持する。
+  台帳と一致しない対象（捏造）は補完しない。
+- `_free_text_with_context()`の試行ループで`seer_result_without_claim`・`discussion_output_format`を
+  この補完で受理し、`discussion_claim_deterministically_repaired`と`ledger_repair`
+  （`regeneration_avoided=True`）を記録する。
+- `_holds_human_seer_result()`は人間判定のみの占い師の`[CO] None`も保留と同等に受理する。
+
+### 4. フォールバック・修復文の応答言語化と本文保持
+- `_seer_info_fallback()`は直前の応答本文を保持し、応答言語（日本語／英語）で書く。
+- 既存の決定的CO補完文・`_fallback_discussion_turn()`・`_repair_discussion_response()`の修復定型文を
+  `_localized_text()`で応答言語へ統一し、英語文が日本語の公開発言に混入しないようにした。
+
+### 5. 狂人の占い結果の共通認識（占い師が狂人を占うと人間が出る）
+- `RULE_CARD`: 「a Madman is divined as Human（狂人の占い結果は「人間」になる）」を明記。
+- `WEREWOLF_THEORY_CARD`: 人間判定は村人または狂人であり村人の確定ではないこと、占い師COが
+  同一対象で食い違うなら真占い師は狂人を人狼と報告しないことを追記。
+- `ROLE_DESCRIPTIONS_EN`: 占い師・狂人・人狼・村人それぞれに狂人の判定が人間になることを追記。
+- `PromptBuilder._private_seer_block()`と`_discussion_claim_ledger()`に解釈行（日本語補足を含む）を追加。
+- エンジンの占い判定（`engine.py`の`"wolf" if role is Role.WOLF else "human"`）は仕様通り狂人を
+  人間として返すため変更なし。
+
+### 検証
+- `tests/test_seer_fallback_and_madman_rule.py`（LL不使用・脚本化応答）:
+  未公開`[RESULT]`の正規化、日本語別称の抽出、`[CO] None`の保留受理、CO決定補完の本文保持と
+  英語混入なし、日本語フォールバック、脚本化議論の`fallback_used=False`、ルールカード・
+  セオリーカード・役職説明・主張台帳の狂人認識。
+- `python -m pytest -q` 18件 green（既存9件を含む）。
+
+
+## TASK-042 初日単独COの真置き明記・人狼相談の視点修正・フォールバック緩和（game_0055be638e37）
+
+実機ログ `logs/game_0055be638e37.jsonl` / `.private.jsonl` の3つの問題に対応する。
+
+### 1. 占い師COを真置きするセオリー（対抗COのない初日CO）
+- `WEREWOLF_THEORY_CARD`に「初日の単独占い師COは疑う材料がほぼ存在しない（投票・死亡・公開判定が
+  まだ無い）ため、対抗COがない状態が続くほど真置きが安全」と明記（日本語補足行も追加）。
+  疑う理由として正当な不整合（同一対象の判定矛盾、CO後の未公開判定、CO/投票/襲撃の不一致、
+  投票直前だけのCO、根拠のない判定変更）はそのまま残す。
+- `_fact_header()`のCO候補ガイダンスを継続日数で段階化：対抗COなしで1日以上経過＝真置き（台帳の
+  判定を村の基準にして投票）、Day1巡2終了＝真寄り、Day1巡1＝まだ疑う根拠が薄い、対抗COあり＝比較。
+- `_private_seer_block()`（人間判定のみの保留案内）と`build_discussion_claim_prompt()`へ
+  「他の占い師COが無いなら沈黙よりCOが村に基準を与える」追記。対抗COがある場合は旧案内。
+- `day1_first_turn_card()`に「今日の判定を持つ占い師は初日にCOして公開する」行を追加。
+
+### 2. 人狼相談が村人視点で書かれる問題
+- `ROLE_DESCRIPTIONS_EN[Role.WOLF]`に `[Perspective Split]`（昼発言＝村人視点／夜相談＝自陣視点、
+  村人陣営は削る対象）を追加。
+- `build_wolf_discuss_prompt()`に `[Consult Perspective (internal to your camp)]` ブロックを追加し、
+  「村の秩序」「村人の安定チェック」等の村人視点の表現を禁止、候補は攻撃対象／CO餌／投票餌として
+  説明する旨を明記（日本語補足行を含む）。
+- `llm_actions`の人狼相談プロンプトの `[Instructions]` にも同じ視点行を追加。
+
+### 3. フォールバックの削減（生成上限・判定・プロンプト）
+- `config.py`の`DEFAULT_ACTION_NUM_PREDICT`を vote/attack/seer 256→640、discussion 2048→2560、
+  wolf_discussion 1200→1400、co_correction 384→512へ引き上げ、`MINIMAL_ACTION_MAX_NUM_PREDICT`の
+  キャップを768→1024（co_correction 640）へ引き上げ。`config/players.json`の各プレイヤーの
+  `num_predict`／`num_predict_by_action`も行動別で引き上げた。
+- `llm_actions.RETRY_NUM_PREDICT_LIMIT`を768→1024（再要求自体の切り詰め防止）。
+- 対象選択（vote/seer/attack）プロンプトを「対象行を1行目に書く」形式へ変更し、長い前置きが
+  切り詰められて対象行が未生成になる原因を減らした。
+- 切り詰め判定の緩和: `done_reason == "length"`でも、対象行が読める（`ActionParser.parse`成功）または
+  本文が構造化形式／文末が文として閉じているなら受理し、`llm_truncated_output_kept`だけを記録して
+  再試行・フォールバックを作らない（`_truncated_output_usable()`新設）。
+- `SelfConsistencyGuard`のwarning級（過去の行動理由の未回答）はstrictモードのみ再生成材料とし、
+  soft/noneでは再生成しない（`_discussion_response_issue()`）。
+- `unknown_player_reference`・`unverified_attributed_speech`を`LEDGER_REPAIR_ISSUES`へ移し、
+  該当文だけを決定的に除去する台帳修復で扱う（`_attributed_quote_sentences()`新設）。再生成→
+  フォールバックより情報損失が少ない。
+- フォールバックの本文保持: `_preserved_fallback_response()`新設。漏洩・致命的整合違反が残る場合のみ
+  破棄し、切り詰め・形式・重複系の残りエラーは許容してモデルの本文を保持する。`Pass`を公開する
+  経路を廃し、`_fallback_discussion_turn()`（生存者への確認点）または`_consult_fallback_text()`
+  （応答言語の相談文・攻撃候補）へ置き、`fallback_body_preserved`を記録。
+
+### 検証
+- `tests/test_theory_and_fallback_relaxation.py`（LL不使用・脚本化応答、14件）: セオリーカードの
+  初日単独CO／真置き、CO候補ガイダンスの継続日数段階化、人狼相談プロンプトの陣営視点、対象行先頭の
+  指定形式、切り詰め投票・議論のフォールバックなし受理、切り詰め判定規則、存在しないプレイヤー名と
+  架空引用の台帳修復、warning級がsoft/noneで再生成しない、フォールバックの本文保持と漏洩破棄、
+  空応答フォールバックが`Pass`にならない、相談フォールバックの応答言語化。
+- `python -m pytest -q` 32件 green。実機試合はローカルLLM負荷のため本タスクでは未実行。
+

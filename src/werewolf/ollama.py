@@ -87,6 +87,14 @@ class ChatResponse:
     effective_num_ctx: int | None = None
     num_ctx_source: str | None = None
 
+    def __post_init__(self) -> None:
+        # 応答本文は下流の正規表現・検証処理で文字列前提になるため、Noneを
+        # 空文字へ正規化する（Noneのまま渡すとTypeErrorになる）。
+        if self.content is None:
+            object.__setattr__(self, "content", "")
+        if not isinstance(self.content, str):
+            object.__setattr__(self, "content", str(self.content))
+
     def to_metadata(self) -> dict[str, str | int | bool | None]:
         metadata: dict[str, str | int | bool | None] = {
             "done_reason": self.done_reason,
@@ -113,12 +121,15 @@ class OllamaClient:
         base_url: str = "http://localhost:11434",
         timeout: float = 120.0,
         max_retries: int = 2,
+        timeout_retries: int = 1,
         transport: Transport | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("Timeout must be greater than zero.")
         if not 0 <= max_retries <= 2:
             raise ValueError("At most 2 retries are supported.")
+        if not 0 <= timeout_retries <= max_retries:
+            raise ValueError("Timeout retries must be between 0 and max_retries.")
         if not base_url.strip():
             raise ValueError("Ollama base URL cannot be empty.")
 
@@ -127,6 +138,9 @@ class OllamaClient:
         self.ps_endpoint = f"{base_url.rstrip('/')}/api/ps"
         self.timeout = timeout
         self.max_retries = max_retries
+        # タイムアウトは同じ要求の再送が同じタイムアウトを繰り返すため、http・通信失敗より
+        # 少ない再送回数に限定する（TASK-035: 180秒×3回の再送による長時間待避の対策）。
+        self.timeout_retries = timeout_retries
         self._transport = transport or _urlopen_transport
         self._modelfile_context_cache: dict[str, int | None] = {}
 
@@ -148,6 +162,8 @@ class OllamaClient:
         content = self.chat(
             model=model, messages=messages, options=options, tools=tools
         )
+        if content is None or not isinstance(content, str):
+            content = "" if content is None else str(content)
         return getattr(
             self,
             "_last_chat_response",
@@ -192,6 +208,7 @@ class OllamaClient:
             method="POST",
         )
 
+        timeout_attempts = 0
         for attempt in range(1, self.max_retries + 2):
             self._last_attempts = attempt
             try:
@@ -273,17 +290,25 @@ class OllamaClient:
                 if is_non_retryable_http_error(last_error.message, error.code):
                     raise last_error
             except (TimeoutError, socket.timeout) as error:
+                timeout_attempts += 1
                 last_error = OllamaError(
                     kind="timeout", message=str(error) or "Request timed out.", attempts=attempt
                 )
+                # 同じ要求の再送は同じ生成時間を消費するため、タイムアウト再送は上限で打ち切る。
+                if timeout_attempts > self.timeout_retries:
+                    raise last_error
             except URLError as error:
                 reason = error.reason
                 timed_out = isinstance(reason, (TimeoutError, socket.timeout))
+                if timed_out:
+                    timeout_attempts += 1
                 last_error = OllamaError(
                     kind="timeout" if timed_out else "connection",
                     message=str(reason),
                     attempts=attempt,
                 )
+                if timed_out and timeout_attempts > self.timeout_retries:
+                    raise last_error
             except OSError as error:
                 last_error = OllamaError(
                     kind="connection", message=str(error), attempts=attempt
@@ -472,8 +497,8 @@ CLAIM_ROLE_TOOL: dict[str, object] = {
     "function": {
         "name": "claim_role",
         "description": (
-            "公開の昼議論で自分が主張する役職と、占い師COなら公開する占い結果を記録します。"
-            "本人の実際の役職は公開しません。"
+            "Record the role you claim in the public day discussion, and the divination result "
+            "you publish if you claim Seer. Never publish your actual role."
         ),
         "parameters": {
             "type": "object",

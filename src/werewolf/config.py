@@ -26,18 +26,57 @@ PERSONALITY_PROFILES: dict[str, str] = {
     "intuitive": "発言や投票の目立つ変化を仮説として示し、観察した根拠を添える。",
 }
 
+# TASK-043: プレイヤー別の生成サンプリング設定。幻覚・案内文の模倣を起こすモデルは
+# temperature を下げて安定させ、全体設定（CLI）よりプレイヤー設定を優先する。
+GENERATION_SAMPLING_KEYS: tuple[str, ...] = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "repeat_penalty",
+)
+
+# 許容範囲（key: (下限, 上限, 整数必須)）。Ollamaのsamplerの範囲と一致させる。
+GENERATION_SAMPLING_BOUNDS: dict[str, tuple[float, float, bool]] = {
+    "temperature": (0.0, 2.0, False),
+    "top_p": (0.0, 1.0, False),
+    "top_k": (0, 400, True),
+    "repeat_penalty": (0.0, 2.0, False),
+}
+
+
+def validate_generation_option(value: object, key: str, label: str) -> float | int:
+    """プレイヤー別の生成サンプリング値を許容範囲で検証する。"""
+    low, high, requires_integer = GENERATION_SAMPLING_BOUNDS[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} for {key} must be a number.")
+    if not math.isfinite(value):
+        raise ValueError(f"{label} for {key} must be a finite number.")
+    if requires_integer and int(value) != value:
+        raise ValueError(f"{label} for {key} must be an integer.")
+    if not low <= value <= high:
+        raise ValueError(
+            f"{label} for {key} must be between {low} and {high} (got {value})."
+        )
+    return int(value) if requires_integer else float(value)
+
+
 # プレイヤー設定・CLI設定が未指定時に使う行動別デフォルト上限。
 # 議論は「質問回答・確認できる事実・疑う根拠・次の確認点」を説明する文量が必要なので、
 # 思考トークンの消費を考慮した残余を確保する（TASK-024で文量緩和）。
+# 思考系モデル（deepseek-r1, qwen3, gpt-oss, gemma4等）は思考トークンがnum_predictを
+# 消費するため、議論・人狼相談の既定値を引き上げ、本文生成のための残余を確保する。
 DEFAULT_ACTION_NUM_PREDICT: dict[str, int] = {
-    "discussion": 1536,
-    "wolf_discussion": 768,
-    "attack": 256,
-    "seer": 256,
-    "vote": 256,
+    "discussion": 2560,
+    "wolf_discussion": 1400,
+    # TASK-042: 対象選択は「対象行 + 短い理由」の2行構成になったため、切り詰め防止の
+    # 残余を確保する（実機ログでは vote/attack の 256 トークンが切り詰め原因になった）。
+    "attack": 640,
+    "seer": 640,
+    "vote": 640,
     # CO補正は「【CO】」「【結果】」「【本文】」の最小3行を出力できる量が必要。
     # 思考系モデルでは思考トークンが消費されるため、1行形式より広い残余を持つ。
-    "co_correction": 256,
+    # COの根拠説明を含めるため最低512トークンを確保。
+    "co_correction": 512,
 }
 
 # 最終回答が1行で済む行動（対象選択・CO補正）。大きい全体設定を持つ思考系モデルでも、
@@ -48,11 +87,13 @@ MINIMAL_OUTPUT_ACTION_KEYS: frozenset[str] = frozenset(
 
 # 全体設定（num_predict）から行動別上限へ降ろすときのキャップ。
 # 思考系のモデルが空応答・切り詰めを起こさないよう、既定値より広い残余を残す。
+# TASK-042: 実機ログでは投票・占い・襲撃の切り詰め（generation_truncated）が
+# フォールバックの主因になったため、キャップを引き上げる。
 MINIMAL_ACTION_MAX_NUM_PREDICT: dict[str, int] = {
-    "attack": 768,
-    "seer": 768,
-    "vote": 768,
-    "co_correction": 384,
+    "attack": 1024,
+    "seer": 1024,
+    "vote": 1024,
+    "co_correction": 640,
 }
 
 # 思考生成（thinking）を行動別に有効にする既定方針。
@@ -81,21 +122,20 @@ THINKING_RESOLUTION_PRIORITY: tuple[str, ...] = (
 # 設定で on と指定されていても、実際に400を返すモデルでは off へ落とす。
 THINKING_CAPABILITY_SOURCE = "model_capability"
 
-# 思考onで生成する行動では、思考トークンが num_predict を消費するため、
-# 最終回答の残余を確保する下限を適用する。実機ログでは思考だけが生成上限を
-# すべて消費し、contentが空のまま done_reason=length になった（TASK-024）。
-# 下限は「行動別既定値を使った場合」のみ適用し、player・CLIの明示設定は上書きしない。
-THINKING_AFFORDABLE_NUM_PREDICT: dict[str, int] = {
-    "discussion": 3072,
-    "wolf_discussion": 1536,
-}
-
 # 思考onの生成上限を引き上げたことを示す解決元ラベル。
 THINKING_NUM_PREDICT_SOURCE = "thinking_allowance"
 
 # 思考onで思考が生成上限を消費して切り詰めたモデルの解決元ラベル。
 # 以後の同一モデルの思考行動は off へ自動で切り替える。
 THINKING_BUDGET_SOURCE = "thinking_budget_exhausted"
+
+# 思考onの行動で、生成上限を引き上げた後の残余下限。思考トークンがnum_predictを
+# 消費するため、本文生成のための最低残余を確保する（TASK-024）。
+# 議論は根拠説明が必要なため、人狼相談より広い残余を持つ。
+THINKING_AFFORDABLE_NUM_PREDICT: dict[str, int] = {
+    "discussion": 4096,
+    "wolf_discussion": 2048,
+}
 
 # 思考予算不足の判定理由（イベント・ログ表示用）。
 THINKING_BUDGET_EXHAUSTED_REASON = "thinking_consumed_generation_budget"
@@ -186,6 +226,22 @@ class PlayerConfig:
     max_num_ctx: int | None = None
     recommended_num_ctx: int | None = None
     context_strategy: str | None = None
+    claim_coaching: bool = False
+    # TASK-043: プレイヤー別の生成サンプリング（未指定なら CLI / モデル既定値を使う）。
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    repeat_penalty: float | None = None
+
+    def __post_init__(self) -> None:
+        # TASK-043: プレイヤー別の生成サンプリングはここで範囲検証する
+        # （JSONローダー以外から直接作られた設定も同じ基準を通す）。frozenなので
+        # 値の正規化はせず、範囲外はValueErrorだけ返す。
+        for key in GENERATION_SAMPLING_KEYS:
+            value = getattr(self, key)
+            if value is None:
+                continue
+            validate_generation_option(value, key, f"Player {self.name}")
 
 
 def validate_action_num_predict(
@@ -346,6 +402,16 @@ def load_player_configs(
                 thinking_by_action,
                 f"Player thinking_by_action at index {index}",
             )
+        sampling: dict[str, float | int | None] = {}
+        for key in GENERATION_SAMPLING_KEYS:
+            value = entry.get(key)
+            if value is None:
+                sampling[key] = None
+                continue
+            sampling[key] = validate_generation_option(
+                value, key, f"Player {key} at index {index}"
+            )
+        claim_coaching = entry.get("claim_coaching", False)
         players.append(
             PlayerConfig(
                 name=name,
@@ -361,6 +427,11 @@ def load_player_configs(
                 thinking=thinking,
                 thinking_by_action=thinking_by_action,
                 personality_profile=personality_profile,
+                claim_coaching=claim_coaching,
+                temperature=sampling["temperature"],
+                top_p=sampling["top_p"],
+                top_k=sampling["top_k"],
+                repeat_penalty=sampling["repeat_penalty"],
             )
         )
 

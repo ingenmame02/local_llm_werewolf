@@ -1,0 +1,122 @@
+107 def request_token_estimate(
+128 def fit_dynamic_context(
+212 def classify_failure_reason(reason: str | None) -> str | None:
+246 def normalize_action_budget_key(budget_key: str, *, fallback: str = "discussion") -> str:
+256 def _global_num_predict(
+269 def resolve_action_num_predict(
+312 def resolve_thinking(
+341 def apply_thinking_floor(
+366 @dataclass(frozen=True)
+367 class ActionTrace:
+385 @dataclass
+386 class ModelDiscussionMetrics:
+400 @property
+401 def extraction_success_rate(self) -> float:
+404 @property
+405 def format_compliance_rate(self) -> float:
+408 @property
+409 def fallback_rate(self) -> float:
+413 class OllamaActions(ActionPolicy):
+414 def __init__(
+458 def _record_discussion_body_metrics(
+487 def wolf_discuss(
+510 def choose_attack(self, wolves: tuple[str, ...], candidates: tuple[str, ...]) -> str:
+533 def choose_seer_target(
+565 def _build_discussion_prompt_with_budget(
+608 def _question_answer_check(
+650 def discuss(
+679 def should_stage_discussion_claim(self, player: str) -> bool:
+706 def _has_unpublished_seer_result(self, player: str) -> bool:
+713 def choose_discussion_claim(
+739 def deterministic_discussion_claim(self, player: str) -> str:
+742 def discuss_body(
+810 def retry_after_secret_leak(
+938 def vote(
+970 def _select_target(
+987 def _with_budget(
+1227 def _valid_candidates(
+1243 def _target_retry_prompt(
+1268 def _public_response_leak_findings(
+1317 def _free_text_with_context(
+2075 @staticmethod
+2076 def _final_response(response: str | None) -> str:
+2084 @staticmethod
+2085 def _is_pass(response: str | None) -> bool:
+2091 def _must_use_seer_info(self, action: str, actor: Player) -> bool:
+2099 def _holds_human_seer_result(
+2115 def _references_seer_result(self, actor: Player, response: str) -> bool:
+2149 def _seer_info_fallback(
+2179 def _seer_claim_prefix_repair(
+2256 def _discussion_retry_instruction(
+2330 def _short_discussion_retry_prompt(
+2479 @staticmethod
+2480 def _escalated_num_predict(limit: int) -> int:
+2484 def _attempt_generation_guidance(
+2546 def _generation_budget_guidance(
+2595 def _wolf_consult_light_retry_prompt(
+2630 @staticmethod
+2631 def _result_label(result: str) -> str:
+2634 def _seer_co_correction_prompt(
+2665 @staticmethod
+2666 def _discussion_sentences(text: str | None) -> tuple[str, ...]:
+2676 @staticmethod
+2677 def _references_external_game_memory(text: str) -> bool:
+2695 def _dead_player_question_targets(self, text: str) -> tuple[str, ...]:
+2735 def _has_unverified_past_vote_reference(self, text: str) -> bool:
+2793 def _discussion_topic_repeated(
+2849 def category(sentence: str) -> str | None:
+2857 def normalized(sentence: str) -> str:
+2884 @staticmethod
+2885 def _adds_new_discussion_signal(current: str, previous: str) -> bool:
+2886 def signals(sentence: str | None) -> set[tuple[str, str]]:
+2916 @staticmethod
+2917 def _meta_echo_sentences(sentence: str) -> list[str]:
+2927 def _strip_meta_echo(self, content: str) -> str:
+2948 def _fallback_discussion_turn(
+2994 @staticmethod
+2995 def _localized_text(actor: Player, english: str, japanese: str) -> str:
+2999 def _repair_discussion_response(
+3328 def _third_person_self_sentences(
+3361 @staticmethod
+3362 def _first_person_substitution(sentence: str, actor: Player) -> str:
+3373 def _discussion_response_issue(
+3651 def _discussion_claim_response_issue(
+3702 def _deterministic_discussion_claim(self, actor: Player) -> str | None:
+3723 def _latest_seer_result(self) -> tuple[str, str]:
+3729 def _has_published_seer_result(
+3747 def _options_for(
+3853 def _dynamic_context_enabled(self) -> bool:
+3859 def _slow_model(self, actor: Player) -> bool:
+3865 @staticmethod
+3866 def _request_token_estimate(
+3872 def _fit_request_context(
+3891 def _dynamic_evidence_budget(
+3931 def _record_model_timeout(
+3950 def _fit_retry_budget(
+3998 def _chat_with_claim_tools(
+4109 @staticmethod
+4110 def _is_tool_call_unsupported(error: OllamaError) -> bool:
+4125 @staticmethod
+4126 def _is_thinking_unsupported(error: OllamaError) -> bool:
+4143 def _record_thinking_unsupported(
+4162 def _record_thinking_budget_exhausted(
+4191 def _record_tool_unsupported(
+4206 def _handle_public_tool_call(
+4233 def reject(message: str, reason: str) -> dict[str, str]:
+4401 def _chat(
+4504 def emit_request_configuration(
+4560 def send(request_options: dict[str, object] | None) -> ChatResponse:
+4648 @staticmethod
+4649 def _normalize_response_content(content: object) -> str:
+4661 @staticmethod
+4662 def _has_thinking(response: str | None) -> bool:
+4667 @staticmethod
+4668 def _is_context_overflow(error: OllamaError) -> bool:
+4684 @staticmethod
+4685 def _transport_failure_reason(error: OllamaError) -> str:
+4693 def _start_action(self, action: str, actor: Player) -> float:
+4703 def _complete_action(
+4785 def _emit(
+4828 @staticmethod
+4829 def _label(action: ActionKind) -> str:
+4836 def _player(self, name: str) -> Player:

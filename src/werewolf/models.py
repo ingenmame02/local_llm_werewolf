@@ -3,7 +3,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .config import ACTION_BUDGET_KEYS, PERSONALITY_PROFILES
+from .config import (
+    ACTION_BUDGET_KEYS,
+    GENERATION_SAMPLING_BOUNDS,
+    PERSONALITY_PROFILES,
+)
 
 
 class Role(str, Enum):
@@ -32,7 +36,7 @@ class Player:
     num_ctx: int | None = None
     timeout: float | None = None
     num_predict: int | None = None
-    response_language: str = "日本語"
+    response_language: str = "English"
     num_predict_by_action: Mapping[str, int] | None = None
     thinking: bool | None = None
     thinking_by_action: Mapping[str, bool] | None = None
@@ -40,6 +44,17 @@ class Player:
     max_num_ctx: int | None = None
     recommended_num_ctx: int | None = None
     context_strategy: str | None = None
+    # 役職COの先頭形式支援（TASK-039）。CO形式の案内を強調するだけで、
+    # 議論の自由度・CO保留・パスの選択は制限しない。
+    claim_coaching: bool = False
+    # TASK-043: プレイヤー別の生成サンプリング。幻覚を起こすモデルは temperature を
+    # 下げて安定させる（未指定なら CLI / モデル既定値がそのまま使える）。
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    repeat_penalty: float | None = None
+    action_memory: "PlayerActionMemory | None" = None
+    self_memory: "SelfMemory | None" = None
 
     def __post_init__(self) -> None:
         if self.num_ctx is not None and (
@@ -96,6 +111,8 @@ class Player:
                 "Player personality_profile must be one of "
                 f"{', '.join(PERSONALITY_PROFILES)}."
             )
+        if not isinstance(self.claim_coaching, bool):
+            raise ValueError("Player claim_coaching must be a boolean.")
         if self.num_predict_by_action is not None:
             if not isinstance(self.num_predict_by_action, Mapping):
                 raise ValueError(
@@ -128,6 +145,26 @@ class Player:
                     raise ValueError(
                         f"Player thinking_by_action value for {key} must be a boolean."
                     )
+        # TASK-043: 生成サンプリングの範囲検証（config.GENERATION_SAMPLING_BOUNDS と共通）。
+        for key, value in (
+            ("temperature", self.temperature),
+            ("top_p", self.top_p),
+            ("top_k", self.top_k),
+            ("repeat_penalty", self.repeat_penalty),
+        ):
+            if value is None:
+                continue
+            low, high, requires_integer = GENERATION_SAMPLING_BOUNDS[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"Player {key} must be a number.")
+            if not math.isfinite(value):
+                raise ValueError(f"Player {key} must be a finite number.")
+            if requires_integer and int(value) != value:
+                raise ValueError(f"Player {key} must be an integer.")
+            if not low <= value <= high:
+                raise ValueError(
+                    f"Player {key} must be between {low} and {high} (got {value})."
+                )
 
 
 @dataclass(frozen=True)
@@ -199,6 +236,121 @@ class ReasoningMemo:
     current_round_evidence: list[str] = field(default_factory=list)
     integrity_alerts: list[str] = field(default_factory=list)
     updates: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SelfMemory:
+    """Player's self memory for prompt consistency."""
+    
+    role: str
+    partner: str | None = None
+    past_actions: list[str] = field(default_factory=list, metadata={"max_size": 5})
+    current_stance: str = "Neutral observation"
+    unrevealed_info: str | None = None
+    
+    MAX_PAST_ACTIONS: int = 5
+    
+    def add_action(self, action: str) -> None:
+        """Add a past action, maintaining max size and skipping duplicates."""
+        # Skip if the same as the most recent action
+        if self.past_actions and self.past_actions[-1] == action:
+            return
+        # Add and trim to max size
+        self.past_actions.append(action)
+        if len(self.past_actions) > self.MAX_PAST_ACTIONS:
+            self.past_actions = self.past_actions[-self.MAX_PAST_ACTIONS:]
+    
+    def update_stance(self, stance: str) -> None:
+        """Update current stance."""
+        self.current_stance = stance
+    
+    def clear_unrevealed_info(self) -> None:
+        """Clear unrevealed info (e.g., after seer reveals result)."""
+        self.unrevealed_info = None
+    
+    def format_text(self) -> str:
+        """Render self memory to string."""
+        role_name = self.role
+        partner_str = f"partner: {self.partner}" if self.partner else "None"
+        
+        actions_lines = ""
+        if self.past_actions:
+            actions_lines = "  - " + "\n  - ".join(self.past_actions)
+        else:
+            actions_lines = "  - None"
+        
+        return (
+            f"- Role: {role_name} ({partner_str})\\n"
+            f"- My past actions:\\n"
+            f"{actions_lines}\\n"
+            f"- Current stance: {self.current_stance}\\n"
+            f"- Unrevealed info: {self.unrevealed_info or 'None'}"
+        )
+
+    role: str = ""
+    partner: str | None = None
+    past_actions: list[str] = field(default_factory=list)
+    current_stance: str = "Neutral observation"
+    unrevealed_info: str | None = None
+
+    def add_action(self, action_summary: str, max_count: int = 5) -> None:
+        """Add an action summary, keeping at most max_count entries."""
+        if not action_summary:
+            return
+        if self.past_actions and self.past_actions[-1] == action_summary:
+            return
+        self.past_actions.append(action_summary)
+        if len(self.past_actions) > max_count:
+            self.past_actions = self.past_actions[-max_count:]
+
+    def format_text(self) -> str:
+        """Render self memory to string."""
+        partner_str = f"partner: {self.partner}" if self.partner else "None"
+        if self.role.lower() == "werewolf":
+            role_line = f"- Role: Werewolf ({partner_str})"
+        else:
+            role_line = f"- Role: {self.role} ({partner_str})"
+
+        actions_lines = [f"  - {act}" for act in self.past_actions]
+        if not actions_lines:
+            actions_str = "  - None"
+        else:
+            actions_str = "\n".join(actions_lines)
+
+        unrevealed_str = self.unrevealed_info if self.unrevealed_info else "None"
+
+        return (
+            f"{role_line}\n"
+            "- My past actions:\n"
+            f"{actions_str}\n"
+            f"- Current stance: {self.current_stance}\n"
+            f"- Unrevealed info: {unrevealed_str}"
+        )
+
+
+@dataclass
+class PlayerActionMemory:
+    """プレイヤーごとの行動・判断履歴。
+
+    過去の投票先、発言内容、疑い対象、判断理由・信頼度、
+    過去からの変更理由、未回答質問などを構造化して保持する。
+    次の発言で「なぜその選択になったか」を説明するために使用する。
+    """
+
+    action_id: str = ""
+    day: int = 1
+    phase: str = "night_wolf"
+    action_type: str = ""  # "vote", "seer", "attack", "discussion", "claim", "pass", "question"
+    selected_target: str = ""
+    vote_target: str = ""
+    public_statement_summary: str = ""
+    suspicion_targets: list[str] = field(default_factory=list)
+    reasoning_summary: str = ""
+    confidence: str = "low"  # low | medium | high
+    unanswered_questions: list[str] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
+    previous_position: str = ""  # 以前の投票先や疑い対象
+    position_change_reason: str = ""  # 変更した場合の理由
 
 
 @dataclass(frozen=True)
@@ -276,6 +428,10 @@ class GameState:
     reasoning_memory_enabled: bool = True
     current_round_transcript: list[Message] = field(default_factory=list)
     integrity_alerts: list[IntegrityAlert] = field(default_factory=list)
+    player_action_memories: dict[str, list[PlayerActionMemory]] = field(default_factory=dict)
+    player_self_memories: dict[str, SelfMemory] = field(default_factory=dict)
+    # TASK-038: 質問への回答の強制度（"strict" / "soft" / "none"）。既定はsoft。
+    question_hint_mode: str = "soft"
 
     def __post_init__(self) -> None:
         if self.day < 0:
@@ -306,6 +462,21 @@ class GameState:
                 self.claim_ledger.public_seer_results[
                     (claim.claimant, claim.target)
                 ] = claim.result
+        for player in self.players:
+            if player.name not in self.player_self_memories:
+                role_name = {
+                    Role.WOLF: "Werewolf",
+                    Role.MADMAN: "Madman",
+                    Role.SEER: "Seer",
+                    Role.VILLAGER: "Villager",
+                }.get(player.role, str(player.role.value))
+                memory = SelfMemory(
+                    role=role_name,
+                    partner=player.partner,
+                )
+                self.player_self_memories[player.name] = memory
+                if player.self_memory is None:
+                    player.self_memory = memory
 
     @property
     def alive_players(self) -> list[str]:
@@ -414,7 +585,16 @@ class GameState:
                     or "？" in message.content
                     or any(
                         cue in message.content
-                        for cue in ("質問", "聞きたい", "確認したい", "教えて")
+                        for cue in (
+                            "質問",
+                            "聞きたい",
+                            "確認したい",
+                            "教えて",
+                            "question",
+                            "ask",
+                            "tell me",
+                            "check",
+                        )
                     )
                 )
                 addresses_player = (
@@ -426,7 +606,7 @@ class GameState:
                 )
                 if is_question and addresses_player and not later_reply:
                     unresolved.append(
-                        f"[speech:{speech_id}] {message.speaker}からの質問（未回答）"
+                        f"[speech:{speech_id}] Unanswered question from {message.speaker}"
                     )
 
             next_targets = [
@@ -479,17 +659,17 @@ class GameState:
                 "integrity_alerts": integrity_alerts,
             }
             updates = (
-                ["推理メモを初期化"]
+                ["Reasoning memo initialized"]
                 if previous is None
                 else [
-                    f"{key}を更新"
+                    f"Updated {key}"
                     for key, value in current_parts.items()
                     if getattr(previous, key) != value
                 ]
             )
             self.reasoning_memos[player.name] = ReasoningMemo(
                 **current_parts,
-                updates=updates or ["前回から変更なし"],
+                updates=updates or ["No change since previous turn"],
             )
 
     def snapshot_ledgers(

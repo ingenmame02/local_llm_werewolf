@@ -9,5 +9,5 @@ test = ["pytest>=8.0"]
 benchmark = ["psutil>=5.9"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]

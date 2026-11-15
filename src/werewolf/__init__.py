@@ -59,8 +59,8 @@ from .cli import build_parser, run_cli_game
 from .prompts import (
     PromptBuilder,
     PromptContext,
-    ROLE_DESCRIPTIONS_JA,
-    ROLE_NAMES_JA,
+    ROLE_DESCRIPTIONS_EN,
+    ROLE_NAMES_EN,
 )
 
 __all__ = [
@@ -93,8 +93,8 @@ __all__ = [
     "load_player_configs",
     "PromptBuilder",
     "PromptContext",
-    "ROLE_NAMES_JA",
-    "ROLE_DESCRIPTIONS_JA",
+    "ROLE_NAMES_EN",
+    "ROLE_DESCRIPTIONS_EN",
     "build_parser",
     "run_cli_game",
     "ACTION_BUDGET_KEYS",

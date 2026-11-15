@@ -1,0 +1,7 @@
+Input: '占い師' -> Matched: '占い師' -> lower(): '占い師' -> _CLAIMED_ROLE_NAMES: seer
+Input: 'SEER' -> Matched: 'SEER' -> lower(): 'seer' -> _CLAIMED_ROLE_NAMES: seer
+Input: 'Seer' -> Matched: 'Seer' -> lower(): 'seer' -> _CLAIMED_ROLE_NAMES: seer
+Input: 'seer' -> Matched: 'seer' -> lower(): 'seer' -> _CLAIMED_ROLE_NAMES: seer
+Input: 'Wolf' -> Matched: 'Wolf' -> lower(): 'wolf' -> _CLAIMED_ROLE_NAMES: wolf
+Input: 'wolf' -> Matched: 'wolf' -> lower(): 'wolf' -> _CLAIMED_ROLE_NAMES: wolf
+Input: 'WOLF' -> Matched: 'WOLF' -> lower(): 'wolf' -> _CLAIMED_ROLE_NAMES: wolf

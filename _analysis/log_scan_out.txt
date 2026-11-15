@@ -1,0 +1,82 @@
+=== input_token_count (real) by player/action ===
+Player 1 discussion: n=3 max=6906 avg=4326
+Player 1 vote: n=1 max=4142 avg=4142
+Player 2 discussion: n=9 max=9990 avg=7046
+Player 2 vote: n=4 max=4706 avg=4530
+Player 3 discussion: n=3 max=6817 avg=4812
+Player 3 vote: n=1 max=672 avg=672
+Player 4 discussion: n=5 max=8848 avg=7082
+Player 4 discussion_safety_retry: n=1 max=2001 avg=2001
+Player 4 seer: n=3 max=4155 avg=3537
+Player 4 vote: n=2 max=5158 avg=4927
+Player 5 discussion: n=9 max=9183 avg=7542
+Player 5 vote: n=4 max=4545 avg=4390
+Player 6 attack: n=2 max=4097 avg=3935
+Player 6 discussion: n=5 max=6902 avg=3809
+Player 6 discussion_safety_retry: n=4 max=2239 avg=2154
+Player 6 vote: n=4 max=5130 avg=3938
+Player 6 wolf_discussion: n=1 max=4000 avg=4000
+Player 7 discussion: n=9 max=10213 avg=8692
+Player 7 vote: n=4 max=4755 avg=1721
+Player 8 discussion: n=4 max=8545 avg=7348
+Player 8 discussion_safety_retry: n=2 max=2164 avg=2138
+Player 8 vote: n=2 max=4837 avg=4590
+Player 8 wolf_discussion: n=1 max=1110 avg=1110
+ALL: n=83 max=10213 avg=5318 over4000=59
+
+=== llm_action_parse_failed ===
+Player 3 discussion day1 reason=seer_result_without_claim class=required_format_or_claim will_retry=True target=None
+Player 4 discussion day1 reason=seer_result_required class=semantic_integrity will_retry=True target=None
+Player 1 discussion day1 reason=repeated_speech class=semantic_integrity will_retry=True target=None
+Player 6 discussion day1 reason=discussion_output_format class=soft_discussion_quality will_retry=True target=None
+Player 3 vote day1 reason=invalid_target class=invalid_target will_retry=True target=None
+Player 8 wolf_discussion day2 reason=thinking_only_response class=empty_or_thinking_only will_retry=True target=None
+Player 6 discussion day2 reason=discussion_output_format class=soft_discussion_quality will_retry=True target=None
+Player 2 discussion day2 reason=seer_result_without_claim class=required_format_or_claim will_retry=True target=None
+Player 2 discussion day2 reason=empty_content class=empty_or_thinking_only will_retry=False target=None
+Player 7 vote day2 reason=thinking_only_response class=empty_or_thinking_only will_retry=True target=None
+Player 6 discussion day3 reason=discussion_output_format class=soft_discussion_quality will_retry=True target=None
+Player 6 discussion day3 reason=discussion_output_format class=soft_discussion_quality will_retry=True target=None
+Player 6 vote day3 reason=invalid_target class=invalid_target will_retry=True target=None
+Player 7 vote day3 reason=thinking_only_response class=empty_or_thinking_only will_retry=True target=None
+Player 7 vote day3 reason=thinking_only_response class=empty_or_thinking_only will_retry=True target=None
+
+=== fallback / repair / leak events ===
+claim_tool_unavailable: Player 1 discussion day1 {"reason": "model_does_not_support_tools"}
+seer_result_claim_missing: Player 3 discussion day1 {"reason": "seer_result_without_claim"}
+discussion_integrity_repaired: Player 1 discussion day1 {"reason": "repeated_discussion_topic"}
+ledger_repair: Player 1 discussion day1 {"reason": "repeated_discussion_topic", "body_preserved": true, "regeneration_avoided": false}
+ledger_repair: Player 3 discussion day1 {"reason": "third_person_self_reference", "body_preserved": true, "regeneration_avoided": true}
+duplicate_claim_suppressed: None None day1 {}
+ledger_repair: Player 5 discussion day1 {"reason": "unverified_attributed_speech", "body_preserved": true, "regeneration_avoided": true}
+ledger_repair: Player 6 discussion day1 {"reason": "repeated_discussion_topic", "body_preserved": true, "regeneration_avoided": true}
+ledger_repair: Player 3 discussion day1 {"reason": "repeated_discussion_topic", "body_preserved": true, "regeneration_avoided": true}
+secret_role_leak_detected: Player 4 discussion day1 {}
+duplicate_claim_suppressed: None None day1 {}
+discussion_integrity_repaired: Player 6 discussion day1 {"reason": "repeated_discussion_topic"}
+ledger_repair: Player 6 discussion day1 {"reason": "repeated_discussion_topic", "body_preserved": true, "regeneration_avoided": false}
+thinking_budget_exhausted: Player 8 wolf_discussion day2 {"reason": "thinking_consumed_generation_budget"}
+duplicate_claim_suppressed: None None day2 {}
+secret_role_leak_detected: Player 6 discussion day2 {}
+secret_role_leak_detected: Player 8 discussion day2 {}
+secret_role_leak_detected: Player 8 discussion day2 {}
+duplicate_claim_suppressed: None None day2 {}
+secret_role_leak_detected: Player 8 discussion day2 {}
+secret_role_leak_detected: Player 8 discussion day2 {}
+seer_result_claim_missing: Player 2 discussion day2 {"reason": "seer_result_without_claim"}
+duplicate_claim_suppressed: None None day2 {}
+secret_role_leak_detected: Player 6 discussion day2 {}
+ledger_repair: Player 5 discussion day3 {"reason": "dead_player_action_target", "body_preserved": true, "regeneration_avoided": true}
+secret_role_leak_detected: Player 6 discussion day3 {}
+ledger_repair: Player 7 discussion day3 {"reason": "dead_player_action_target", "body_preserved": true, "regeneration_avoided": true}
+secret_role_leak_detected: Player 6 discussion day3 {}
+secret_role_leak_detected: Player 6 discussion day3 {}
+ledger_repair: Player 7 discussion day3 {"reason": "unknown_player_reference", "body_preserved": true, "regeneration_avoided": true}
+
+=== completed actions with fallback ===
+Player 2 discussion day2 fallback_used=True fatal=False retries=1 severity=ok classes=['required_format_or_claim', 'empty_or_thinking_only']
+
+=== Player 3 responses (all, truncated) ===
+day1 turnNone placeholder=True: これは、プレイヤーXが人間であることを示唆する新しい証拠です。しかし、狂人が人間として占われる可能性もあります。投票を提案します。
+day1 turnNone placeholder=False: 占い師COが二つ出ている現状、Player 4さんが具体的な情報を提供していることから、Player 4さんのCOの信頼性が高いと考えられます。 しかし、Player 3さんのCOも確認する必要があります。 私はまだ占った対象を明確にしていませんので、まずはその対象名と結果をこの場で明確にしてもらいたいです。 Player 4さんの情報との整合性を確認することで、どちらが真の占い師か判断できると思います。 現時点では、両者の発言の一貫性を見極め、疑念の対象を絞り込んでいきたいと思います。
+day1 turnNone placeholder=False: 今日は初日で情報が少ないですが、占い師COが二つある現状、Player 4さんがPlayer 1さんを人間と具体的に示しており、信頼性が高いと思われます。 一方、私のCOも確認が必要です。 私はまだ占った対象を明確にしていないため、まずはその対象名と結果をこの場で明確にしてもらいたいです。

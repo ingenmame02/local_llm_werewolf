@@ -14,27 +14,40 @@ from .models import (
     PublicRoleClaim,
     PublicSeerClaim,
     Role,
+    PlayerActionMemory,
+    SelfMemory,
 )
 from .discussion_format import (
+    DEFAULT_QUESTION_HINT_MODE,
+    QUESTION_HINT_NONE,
+    QUESTION_HINT_STRICT,
     SEVERITY_FATAL,
     SEVERITY_OK,
     SEVERITY_REPAIRABLE,
     SEVERITY_WARNING,
     DiscussionBodyDiagnosis,
+    answers_previous_question,
     extract_discussion_body,
     find_repeated_topic,
     is_pass_body,
+    normalize_question_hint_mode,
     parse_discussion_claim,
     parse_discussion_output,
     split_sentences,
 )
 from .secret_leak_guard import LeakFinding, SecretLeakGuard
+from .self_consistency import SelfConsistencyGuard
 
 _CLAIMED_ROLE_NAMES = {
     "占い師": "seer",
     "人狼": "wolf",
     "狂人": "madman",
     "村人": "villager",
+    "seer": "seer",
+    "wolf": "wolf",
+    "werewolf": "wolf",
+    "madman": "madman",
+    "villager": "villager",
 }
 
 
@@ -45,66 +58,122 @@ class _ClaimPublication:
     duplicate_suppressed: bool = False
 
 
-def extract_public_role_claim(content: str) -> str | None:
-    role_pattern = "|".join(_CLAIMED_ROLE_NAMES)
-    match = re.match(
-        rf"^\s*(?:対抗\s*)?"
-        rf"(?:(?:私|僕|俺|自分|わたし|ぼく)(?:は|が)?\s*)?"
-        rf"(?P<role>{role_pattern})",
-        content,
+# 役職COの自己参照（一人称語）prefix。自分のプレイヤー名でのCOも正当な公開主張
+# として認識するため、`self_name`を指定するとprefixへ加える（TASK-039）。
+_CLAIM_SELF_PREFIX = r"(?:私|僕|俺|自分|わたし|わたくし|ぼく|I|I'm|I am|my)"
+# 役職名の直後に認められる区切り・説明語の照合。他者COの言及を自分の主張として
+# 扱わないためのlookahead（TASK-039）。
+_CLAIM_CONTINUATION = r"(?=\s*[:：、,，／/。.]|(?=$)|\s+(?:対象|判定|結果|理由|投票|target|result|reason|vote|because|since|divin)|CO)"
+# 文頭マーカー（`【CO】`等）を剥がしてから文単位のCO認識をする。
+_CLAIM_MARKER_PREFIX = re.compile(r"^\s*(?:【(?:CO|結果|本文)】|\[(?:CO|RESULT|BODY)\])\s*", re.IGNORECASE)
+
+
+def extract_public_role_claim(
+    content: str, self_name: str | None = None
+) -> str | None:
+    """公開された役職CO主張を認識する。
+
+    旧来は全文の先頭形式だけを見ていたが、実機では本文の途中や別文にCOが現れる
+    （`game_20da533bc4a6` Player 1）ため、文単位の先頭形式と自分のプレイヤー名
+    形式も認識する（TASK-039）。役職名の直後に区切り・CO・対象/判定が続く場合だけ
+    主張とし、「Player 3の占い師COを確認した」のような他者COの言及は主張にしない。
+    """
+    self_terms = [_CLAIM_SELF_PREFIX]
+    if self_name:
+        self_terms.append(f"{re.escape(self_name)}(?:さん)?")
+    anchor = re.compile(
+        rf"^\s*(?:(?:counter(?:-?claim)?)\s*)?"
+        rf"(?:(?:{'|'.join(self_terms)})"
+        rf"(?:\s+(?:am|claim|is|state|declare|playing|pretend to be|claim to be)\s*"
+        rf"(?:a|an|the)?\s*)?)?\s*"
+        rf"(?P<role>{'|'.join(_CLAIMED_ROLE_NAMES)})",
+        re.IGNORECASE,
     )
-    if match is None:
-        return None
-
-    remainder = content[match.end() :]
-    explicit_claim = re.match(
-        r"\s*(?:CO(?:です|します)?|です|だ|として"
-        r"(?:名乗(?:る|ります|りました)|CO(?:です|します)?))"
-        r"(?=\s*[:：、,，／/。]|$|\s+(?:対象|判定|結果))",
-        remainder,
+    explicit_claim = re.compile(
+        r"\s*(?:CO|claim(?:s|ing|ing to be)?|am|as|to be|は|が)"
+        + _CLAIM_CONTINUATION,
+        re.IGNORECASE,
     )
-    claim_separator = re.match(r"\s*(?:[:：、,，／/。]|$)", remainder)
-    if explicit_claim is None and claim_separator is None:
-        return None
-    return _CLAIMED_ROLE_NAMES[match.group("role")]
+    claim_separator = re.compile(r"\s*(?:[:：、,，／/。.]|$)")
+    for sentence in split_sentences(content):
+        stripped = _CLAIM_MARKER_PREFIX.sub("", sentence.strip())
+        match = anchor.match(stripped)
+        if match is None:
+            continue
+        remainder = stripped[match.end() :]
+        if (
+            explicit_claim.match(remainder) is None
+            and claim_separator.match(remainder) is None
+        ):
+            continue
+        return _CLAIMED_ROLE_NAMES[match.group("role").lower()]
+    return None
 
 
-def is_public_seer_claim(content: str) -> bool:
-    return extract_public_role_claim(content) == Role.SEER.value
+def is_public_seer_claim(content: str, self_name: str | None = None) -> bool:
+    return extract_public_role_claim(content, self_name) == Role.SEER.value
+
+
+_PLAYER_NUMBER_ALIAS = re.compile(r"Player\s*(\d+)", re.IGNORECASE)
+
+
+def _player_name_pattern(name: str) -> str:
+    """プレイヤー名の別称（プレイヤー5 / Player5 / P5）を同一プレイヤーとして認識する（TASK-041）。
+
+    弱いモデルは `Player 5` を「プレイヤー5」や「P5」で書くため、占い結果の抽出だけ
+    失敗して `seer_result_without_claim` → フォールバックになる経路を消す。
+    """
+    alternatives = [re.escape(name)]
+    match = _PLAYER_NUMBER_ALIAS.fullmatch(name.strip())
+    if match is not None:
+        number = match.group(1)
+        alternatives.append(rf"Player\s*{number}")
+        alternatives.append(rf"プレイヤー\s*{number}")
+        alternatives.append(rf"(?<![\w])P\s*{number}")
+    return "|".join(alternatives)
 
 
 def extract_public_seer_result(
-    content: str, player_names: tuple[str, ...]
+    content: str | None, player_names: tuple[str, ...]
 ) -> tuple[str, str] | None:
+    if content is None or not isinstance(content, str) or not content:
+        return None
     names = sorted(player_names, key=len, reverse=True)
     target = next(
         (
             name
             for name in names
             if re.search(
-                rf"(?:占い)?対象\s*[：:=＝]\s*{re.escape(name)}"
+                rf"(?:占い)?(?:対象名|対象者|対象|ターゲット|target)"
+                rf"\s*[：:=＝]\s*(?:{_player_name_pattern(name)})"
                 rf"(?:さん)?(?:\s|[／/、。,，]|$)",
                 content,
+                re.IGNORECASE,
             )
         ),
         None,
     )
     result = re.search(
-        r"(?:判定|占い結果|結果)\s*[：:=＝]\s*(人狼|人間)",
+        r"(?:判定|占い結果|結果|result)\s*[：:=＝]\s*(人狼|人間|werewolf|wolf|human)",
         content,
+        re.IGNORECASE,
     )
     if target is not None and result is not None:
-        return target, "wolf" if result.group(1) == "人狼" else "human"
+        val = result.group(1).lower()
+        return target, "wolf" if val in ("人狼", "werewolf", "wolf") else "human"
 
     for name in names:
         natural_result = re.search(
-            rf"{re.escape(name)}(?:さん)?\s*(?:は|が)\s*"
+            rf"(?:{_player_name_pattern(name)})(?:さん)?\s*(?:(?:は|が)\s*"
             rf"(?:(?:占い結果|判定)で\s*)?(人狼|人間)"
-            rf"(?:と(?:判定(?:された|です|でした)?)?)?",
+            rf"(?:と(?:判定(?:された|です|でした)?)?)?|"
+            rf"\s+is\s+(?:a\s+)?(werewolf|wolf|human))",
             content,
+            re.IGNORECASE,
         )
         if natural_result is not None:
-            return name, "wolf" if natural_result.group(1) == "人狼" else "human"
+            val = (natural_result.group(1) or natural_result.group(2)).lower()
+            return name, "wolf" if val in ("人狼", "werewolf", "wolf") else "human"
     return None
 
 
@@ -130,7 +199,9 @@ _REPAIRABLE_REASONS = frozenset(
         "external_game_memory",
         "invalid_target",
         "repeated_discussion_topic",
-        "question_not_answered_first",
+        # TASK-043: プロンプトの案内文・プレースホルダの模倣は致命的ではなく、
+        # 該当文の除去で修復できる（幻覚の占い結果を公開しない）。
+        "template_placeholder_echo",
     }
 )
 
@@ -139,34 +210,76 @@ def _dead_player_names(state: GameState) -> frozenset[str]:
     return frozenset(player.name for player in state.players if not player.is_alive)
 
 
-def _asks_question(text: str) -> bool:
-    return bool(re.search(r"[？?]|(?:教|聞|なぜ|どうして|何|誰|どこ|いつ)", text))
+def _asks_question(text: str | None) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
+    return bool(
+        re.search(
+            r"[？?]|(?:教|聞|なぜ|どうして|何|誰|どこ|いつ)"
+            r"|(?:\bwho\b|\bwhat\b|\bwhy\b|\bhow\b|\bwhen\b|\bwhere\b"
+            r"|tell me|explain|do you know|can you)",
+            text,
+            re.IGNORECASE,
+        )
+    )
 
 
-def _references_dead_player(text: str, dead_names: frozenset[str]) -> bool:
+def _references_dead_player(text: str | None, dead_names: frozenset[str]) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
     return any(re.search(rf"{re.escape(name)}(?:さん)?", text) for name in dead_names)
 
 
-def _asserts_dead_role_as_fact(text: str, dead_names: frozenset[str]) -> bool:
+def _asserts_dead_role_as_fact(text: str | None, dead_names: frozenset[str]) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
     for name in dead_names:
         if re.search(
-            rf"{re.escape(name)}(?:さん)?\s*(?:は|が)\s*"
-            r"(?:人狼|狼|人間|占い師|村人|狂人)"
-            r"(?:です|だ|である|と思|だと|らしい|確定|本物|真の)",
+            rf"{re.escape(name)}(?:さん)?\s*(?:は|が|is|was|seems)\s*"
+            r"(?:人狼|狼|人間|占い師|村人|狂人"
+            r"|werewolf|wolf|human|seer|villager|madman)"
+            r"(?:です|だ|である|と思|だと|らしい|確定|本物|真の"
+            r"|for sure|definitely|certainly|confirmed)",
             text,
+            re.IGNORECASE,
         ):
             return True
     return False
 
 
-def _references_external_game_memory(text: str) -> bool:
+def _references_external_game_memory(text: str | None) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
     return bool(
         re.search(
             r"(?:過去のゲーム|前のゲーム|前回のゲーム|前にやった|別のゲーム|"
-            r"前世|前回の役職|学習|トレーニングデータ|研修|データセット)",
+            r"前世|前回の役職|学習|トレーニングデータ|研修|データセット)"
+            r"|(?:past|previous|last|other|another|other games?|earlier|in a previous)"
+            r"[^.!?]{0,24}(?:werewolf game|game|match|role|village)"
+            r"|(?:training data|training|learned|real-world|real person|in real life)",
             text,
+            re.IGNORECASE,
         )
     )
+
+
+# TASK-043: 案内文・プレースホルダの模倣（`Player X` / `プレイヤーX` / 判定の二者選択等）。
+# 実在しない対象を占った幻覚は、致命的扱いではなく修復対象として本文から除去する。
+_TEMPLATE_PLACEHOLDER = re.compile(
+    r"(?:\bplayer\s+[xX]\b"
+    r"|プレイヤー\s*[xXｘ]"
+    r"|(?:対象名|対象|ターゲット|target)\s*[:=＝]\s*[xXｘ]\b"
+    r"|werewolf\s*/\s*human"
+    r"|人狼\s*/\s*人間"
+    r"|\bplayer\s+name\b"
+    r"|\bplaceholder\b|プレースホルダ)",
+    re.IGNORECASE,
+)
+
+
+def _references_template_placeholder(text: str | None) -> bool:
+    """プロンプトの案内文・プレースホルダの模倣を含むか（TASK-043）。"""
+    return isinstance(text, str) and bool(_TEMPLATE_PLACEHOLDER.search(text))
 
 
 def _directly_addressed(text: str, previous_message: Message, actor_name: str) -> bool:
@@ -175,19 +288,14 @@ def _directly_addressed(text: str, previous_message: Message, actor_name: str) -
     content = previous_message.content
     return (
         actor_name in content
-        or re.search(r"(?:あなた|君|君|お前)", content) is not None
+        or re.search(r"(?:あなた|君|お前|\byou\b|\byour\b)", content, re.IGNORECASE) is not None
         or _asks_question(content)
     )
 
 
 def _answers_previous_question(text: str, previous_content: str) -> bool:
-    """直前の質問に対する応答があるかを軽量に判定する。"""
-    if not text or not previous_content:
-        return False
-    important: list[str] = []
-    for sentence in split_sentences(previous_content):
-        important.extend(re.findall(r"Player \d+|[^\s。、,？?]+", sentence))
-    return any(token in text for token in important[:6])
+    """直前の質問に対する応答があるかを軽量に判定する（共通実装へ委譲）。"""
+    return answers_previous_question(text, previous_content)
 
 
 def _is_redundant_body(body: str, transcript: tuple[Message, ...]) -> bool:
@@ -211,21 +319,30 @@ def diagnose_discussion_body(
     state: GameState,
     previous_message: Message | None = None,
     round_transcript: tuple[Message, ...] = (),
+    question_hint_mode: str | None = None,
 ) -> DiscussionBodyDiagnosis:
     """議論本文の違反を重大度別に診断する。
 
     致命的違反（秘匿情報漏洩・未公開の占い結果CO欠落・空本文）は
     安全フォールバックの対象とし、それ以外は修復可能または品質警告とする。
+
+    `question_hint_mode`（省略時は `state.question_hint_mode`）で質問回答の強制度を決める。
+    softでは品質警告のみ（再生成しない）、noneでは判定しない。
     """
     reasons: list[str] = []
     fatal = repairable = warning = False
+    hint_mode = normalize_question_hint_mode(
+        question_hint_mode
+        if question_hint_mode is not None
+        else getattr(state, "question_hint_mode", DEFAULT_QUESTION_HINT_MODE)
+    )
 
     if body is None or not body.strip():
         return DiscussionBodyDiagnosis(
             SEVERITY_FATAL, ("empty_body",), True, False, False, False
         )
     stripped = body.strip()
-    if stripped == "パス":
+    if is_pass_body(stripped):
         return DiscussionBodyDiagnosis(
             SEVERITY_OK, (), False, False, False, True
         )
@@ -245,7 +362,7 @@ def diagnose_discussion_body(
         )
         if (
             public_result is not None
-            and not is_public_seer_claim(stripped)
+            and not is_public_seer_claim(stripped, actor.name)
             and state.seer_results.get(public_result[0]) == public_result[1]
             and not _has_published_seer_result(
                 state, actor.name, public_result[0], public_result[1]
@@ -264,8 +381,12 @@ def diagnose_discussion_body(
                 repairable = True
             elif any(
                 re.search(
-                    rf"{re.escape(name)}\s*(?:を|が)\s*(?:占|襲|投|指|選|指定)",
+                    rf"{re.escape(name)}[^。！？!?]{{0,16}}"
+                    rf"(?:占|襲|投|指|選|指定|divine|attack|vote|target|choose)"
+                    rf"|(?:占|襲|投|指|選|指定|divine|attack|vote|target|choose)"
+                    rf"[^。！？!?]{{0,16}}{re.escape(name)}",
                     stripped,
+                    re.IGNORECASE,
                 )
                 for name in dead_names
             ):
@@ -280,13 +401,21 @@ def diagnose_discussion_body(
         elif _references_external_game_memory(stripped):
             reasons.append("external_game_memory")
             repairable = True
+        elif _references_template_placeholder(stripped):
+            # TASK-043: 案内文・プレースホルダの模倣は本文の該当文除去で修復する
+            # （再生成や安全フォールバックを作らない）。
+            reasons.append("template_placeholder_echo")
+            repairable = True
         elif (
-            previous_message is not None
+            hint_mode != QUESTION_HINT_NONE
+            and previous_message is not None
             and _directly_addressed(stripped, previous_message, actor.name)
             and not _answers_previous_question(stripped, previous_message.content)
         ):
+            # TASK-038: strict（1文目ルール）のみ再生成対象。softは内容回答を確認して警告のみ。
             reasons.append("question_not_answered_first")
-            repairable = True
+            repairable = hint_mode == QUESTION_HINT_STRICT
+            warning = warning or not repairable
         elif find_repeated_topic(stripped, round_transcript):
             reasons.append("repeated_discussion_topic")
             repairable = True
@@ -394,7 +523,7 @@ class GameEngine:
                 speaker=player.name,
                 category=category,
                 speech_id=speech_id,
-                summary="公開前に秘匿性ガードが検出したため内容は非公開",
+                summary="Content withheld: the secrecy guard detected hidden information before publishing",
             )
         if self.event_callback is None:
             return
@@ -428,7 +557,7 @@ class GameEngine:
         player = next(player for player in self.state.players if player.name == player_name)
         if (
             player.role is not Role.SEER
-            or extract_public_role_claim(claim) != Role.SEER.value
+            or extract_public_role_claim(claim, player_name) != Role.SEER.value
         ):
             return frozenset()
         parsed_result = extract_public_seer_result(
@@ -441,6 +570,43 @@ class GameEngine:
         ):
             return frozenset()
         return frozenset({parsed_result})
+
+    def _complete_seer_claim_for_publish(
+        self, player: Player, content: str, findings: tuple[LeakFinding, ...]
+    ) -> tuple[str, frozenset[tuple[str, str]]] | None:
+        """未公開の占い結果に言及した真占い師の発言へCO行を決定的に補完する（TASK-039）。
+
+        判定は台帳の実際の占い結果と一致する場合だけ公開し、人狼判定・人間判定の
+        どちらでもCO形式を先頭へ追加する。メタ・陣営漏洩は補完しない。
+        """
+        if player.role is not Role.SEER or not findings:
+            return None
+        if any(
+            finding.category not in {"secret_role_leak", "hidden_result_leak"}
+            for finding in findings
+        ):
+            return None
+        spoken = extract_public_seer_result(
+            content, tuple(item.name for item in self.state.players)
+        )
+        if spoken is None:
+            return None
+        target, result = spoken
+        if self.state.seer_results.get(target) != result:
+            return None
+        if _has_published_seer_result(self.state, player.name, target, result):
+            return None
+        label = "Werewolf" if result == "wolf" else "Human"
+        proposal = (
+            f"Vote for {target}."
+            if result == "wolf"
+            else f"Suspicion toward {target} is weak; I want to consider other possibilities carefully."
+        )
+        claim_line = (
+            f"I am Seer CO: Target={target}, Result={label}, "
+            f"Reason=divination result from Night 1, Vote proposal={proposal}"
+        )
+        return f"{claim_line}\n{content.strip()}", frozenset({(target, result)})
 
     def _guard_public_text(
         self,
@@ -470,6 +636,36 @@ class GameEngine:
         findings = findings_for(content)
         if not findings:
             return content
+        # 真占い師が未公開の占い結果に言及した場合は、安全再生成ではなく決定的な
+        # CO補完で直して情報を保持する（TASK-039）。再生成だと本文が消失し、三人称の
+        # 自己参照だけの発言が公開されていた（`game_20da533bc4a6` Player 1）。
+        completion = self._complete_seer_claim_for_publish(player, content, findings)
+        if completion is not None:
+            completed, authorized = completion
+            if not SecretLeakGuard.inspect(
+                completed,
+                player,
+                self.state,
+                allowed_public_claim=True,
+                allowed_public_results=authorized,
+            ):
+                target, result = next(iter(authorized))
+                if self.event_callback is not None:
+                    self.event_callback(
+                        {
+                            "type": "seer_claim_deterministically_completed",
+                            "day": self.state.day,
+                            "phase": self.state.phase.value,
+                            "player": player.name,
+                            "model": player.model,
+                            "action": action,
+                            "target": target,
+                            "result": result,
+                            "private": False,
+                            "elapsed_seconds": 0.0,
+                        }
+                    )
+                return completed
         self._record_secret_leak(player, action, content, findings, 0)
 
         retry = getattr(self.actions, "retry_after_secret_leak", None)
@@ -540,6 +736,14 @@ class GameEngine:
                     wolf.name, partner.name, tuple(self.state.wolf_chat_log)
                 )
                 self.state.wolf_chat_log.append(Message(wolf.name, content))
+                self._record_action_memory(
+                    player=wolf,
+                    action_type="wolf_discussion",
+                    day=self.state.day,
+                    phase=self.state.phase.value,
+                    summary=content,
+                    reasoning_summary=self._reason_from_text(content),
+                )
 
         candidates = tuple(
             player.name
@@ -563,6 +767,18 @@ class GameEngine:
             self.state.pending_attack = (
                 target if target in candidate_set.candidates else candidate_set.fallback
             )
+            if self.state.pending_attack is not None:
+                self._record_action_memory(
+                    player=wolves[0],
+                    action_type="attack",
+                    day=self.state.day,
+                    phase=self.state.phase.value,
+                    target=self.state.pending_attack,
+                    reasoning_summary=self._latest_action_reason(
+                        wolves[0].name, {"wolf_discussion"}
+                    ),
+                    evidence=[f"attack-candidates-day-{self.state.day}"],
+                )
         else:
             self.state.pending_attack = None
 
@@ -613,6 +829,17 @@ class GameEngine:
                 visibility="seer",
                 actor=seer.name,
             )
+        )
+        self._record_action_memory(
+            player=seer,
+            action_type="seer",
+            day=self.state.day,
+            phase=self.state.phase.value,
+            target=target,
+            reasoning_summary=self._latest_action_reason(
+                seer.name, {"discussion", "answer"}
+            ),
+            evidence=[f"seer-result-day-{self.state.day}-{target}"],
         )
 
     def resolve_morning(self) -> None:
@@ -699,7 +926,7 @@ class GameEngine:
                             tuple(self.state.conversation_log),
                             allow_public_claim=(
                                 decision is not None
-                                and extract_public_role_claim(decision.claim)
+                                and extract_public_role_claim(decision.claim, player.name)
                                 is not None
                             ),
                             allowed_public_results=authorized_results,
@@ -729,7 +956,7 @@ class GameEngine:
                                 allow_public_claim=(
                                     fallback_decision is not None
                                     and extract_public_role_claim(
-                                        fallback_decision.claim
+                                        fallback_decision.claim, player.name
                                     )
                                     is not None
                                 ),
@@ -739,7 +966,7 @@ class GameEngine:
                         self.state.snapshot_ledgers(
                             "after", "discussion_claim", player.name
                         )
-                        if decision is not None and decision.claim not in {"なし", "保留"}:
+                        if decision is not None and decision.claim not in {"none", "hold"}:
                             public_claim = "\n".join(
                                 part
                                 for part in (decision.claim, decision.result)
@@ -750,11 +977,25 @@ class GameEngine:
                                 public_claim,
                                 claim_text=decision.claim,
                             )
+                            self._record_action_memory(
+                                player=player,
+                                action_type="claim",
+                                day=self.state.day,
+                                phase=self.state.phase.value,
+                                summary=public_claim,
+                                reasoning_summary=self._reason_from_text(
+                                    public_claim
+                                ),
+                                evidence=[
+                                    f"public-claim-day-{self.state.day}-"
+                                    f"{player.name}"
+                                ],
+                            )
                             public_lines = []
                             if publication.role_published:
                                 public_lines.append(decision.claim)
                             if publication.result_published and decision.result:
-                                public_lines.append(f"【結果】{decision.result}")
+                                public_lines.append(f"[RESULT] {decision.result}")
                             if (
                                 publication.duplicate_suppressed
                                 and not publication.result_published
@@ -785,7 +1026,42 @@ class GameEngine:
                     # TASK-034: 検証を重大度別に扱い、本文が存在する場合はパスへ置換せず情報を保持する。
                     # 致命的違反（秘匿情報漏洩・未公開結果CO欠落）または空本文のみ安全フォールバックする。
                     round_transcript = tuple(self.state.current_round_transcript)
-                    previous_message = round_transcript[-1] if round_transcript else None
+                    previous_message = next(
+                        (
+                            message
+                            for message in reversed(round_transcript)
+                            if message.speaker not in {"system", player.name}
+                        ),
+                        None,
+                    )
+                    consistency_findings = SelfConsistencyGuard.inspect(
+                        body, player, self.state, previous_message
+                    )
+                    repair_findings = [
+                        finding
+                        for finding in consistency_findings
+                        if finding.severity == "repair"
+                    ]
+                    if repair_findings:
+                        finding = repair_findings[0]
+                        self.state.add_integrity_alert(
+                            speaker=player.name,
+                            category=finding.category,
+                            speech_id=len(self.state.conversation_log) + 1,
+                            summary=finding.summary,
+                        )
+                        body = (
+                            "I cannot verify a statement consistent with my past action records,"
+                            "so I will hold this judgment."
+                        )
+                    else:
+                        for finding in consistency_findings:
+                            self.state.add_integrity_alert(
+                                speaker=player.name,
+                                category=finding.category,
+                                speech_id=len(self.state.conversation_log) + 1,
+                                summary=finding.summary,
+                            )
                     diagnosis = diagnose_discussion_body(
                         body,
                         player,
@@ -801,19 +1077,19 @@ class GameEngine:
                             ),
                             speech_id=len(self.state.conversation_log) + 1,
                             summary=(
-                                "本文が空または秘匿情報を含むため公開を差し止め、パスへ置換"
+                                "Empty body or hidden info detected; publishing withheld, replaced with Pass"
                                 if not body.strip()
-                                else "秘匿情報または未公開占い結果の検出によりパスへ置換"
+                                else "Replaced with Pass after detecting hidden info or an unpublished divination result"
                             ),
                         )
-                        body = "パス"
+                        body = "Pass"
                     elif diagnosis.repairable:
                         self.state.add_integrity_alert(
                             speaker=player.name,
                             category=diagnosis.reasons[0] if diagnosis.reasons else "discussion_repair",
                             speech_id=len(self.state.conversation_log) + 1,
                             summary=(
-                                "議論本文を修復対象として保持: "
+                                "Discussion body kept as repairable: "
                                 + ",".join(diagnosis.reasons)
                             ),
                         )
@@ -823,13 +1099,14 @@ class GameEngine:
                             category=diagnosis.reasons[0] if diagnosis.reasons else "discussion_quality",
                             speech_id=len(self.state.conversation_log) + 1,
                             summary=(
-                                "議論本文の品質警告（公開保持）: "
+                                "Discussion body quality warning (kept public): "
                                 + ",".join(diagnosis.reasons)
                             ),
                         )
                     if body:
                         self._append_discussion_message(Message(player.name, body))
                         self._record_model_inference(player.name, body)
+                        self._record_public_speech_memory(player, body)
                 else:
                     self.state.snapshot_ledgers("before", "discussion", player.name)
                     content = self.actions.discuss(
@@ -850,7 +1127,7 @@ class GameEngine:
                         else content
                     )
                     allow_public_claim = (
-                        extract_public_role_claim(claim_text) is not None
+                        extract_public_role_claim(claim_text, player.name) is not None
                         or SecretLeakGuard.allows_public_claim(content, player)
                     )
                     authorized_results = self._authorized_public_results(
@@ -870,8 +1147,21 @@ class GameEngine:
                         publication = self._record_public_role_claim(
                             player.name, content
                         )
+                        if extract_public_role_claim(content, player.name) is not None:
+                            self._record_action_memory(
+                                player=player,
+                                action_type="claim",
+                                day=self.state.day,
+                                phase=self.state.phase.value,
+                                summary=content,
+                                reasoning_summary=self._reason_from_text(content),
+                                evidence=[
+                                    f"public-claim-day-{self.state.day}-"
+                                    f"{player.name}"
+                                ],
+                            )
                         body = (
-                            self._remove_duplicate_claim(content)
+                            self._remove_duplicate_claim(content, player.name)
                             if publication.duplicate_suppressed
                             else content
                         )
@@ -882,7 +1172,7 @@ class GameEngine:
                             self._record_model_inference(player.name, body)
                     else:
                         publication = _ClaimPublication()
-                        if structured_output.claim not in {"なし", "保留"}:
+                        if structured_output.claim not in {"none", "hold"}:
                             claim_parts = [
                                 part
                                 for part in (
@@ -897,14 +1187,68 @@ class GameEngine:
                                 "\n".join(claim_parts),
                                 claim_text=structured_output.claim,
                             )
+                            self._record_action_memory(
+                                player=player,
+                                action_type="claim",
+                                day=self.state.day,
+                                phase=self.state.phase.value,
+                                summary="\n".join(claim_parts),
+                                reasoning_summary=self._reason_from_text(
+                                    "\n".join(claim_parts)
+                                ),
+                                evidence=[
+                                    f"public-claim-day-{self.state.day}-"
+                                    f"{player.name}"
+                                ],
+                            )
                         body = structured_output.body
                         if publication.duplicate_suppressed:
-                            body = self._remove_duplicate_claim(body)
+                            body = self._remove_duplicate_claim(body, player.name)
                         if body:
+                            previous_message = next(
+                                (
+                                    message
+                                    for message in reversed(
+                                        self.state.current_round_transcript
+                                    )
+                                    if message.speaker
+                                    not in {"system", player.name}
+                                ),
+                                None,
+                            )
+                            consistency_findings = SelfConsistencyGuard.inspect(
+                                body, player, self.state, previous_message
+                            )
+                            repair_findings = [
+                                finding
+                                for finding in consistency_findings
+                                if finding.severity == "repair"
+                            ]
+                            if repair_findings:
+                                finding = repair_findings[0]
+                                self.state.add_integrity_alert(
+                                    speaker=player.name,
+                                    category=finding.category,
+                                    speech_id=len(self.state.conversation_log) + 1,
+                                    summary=finding.summary,
+                                )
+                                body = (
+                                    "I cannot verify a statement consistent with my past action records,"
+                                    "so I will hold this judgment."
+                                )
+                            else:
+                                for finding in consistency_findings:
+                                    self.state.add_integrity_alert(
+                                        speaker=player.name,
+                                        category=finding.category,
+                                        speech_id=len(self.state.conversation_log) + 1,
+                                        summary=finding.summary,
+                                    )
                             self._append_discussion_message(
                                 Message(player.name, body)
                             )
                             self._record_model_inference(player.name, body)
+                            self._record_public_speech_memory(player, body)
                 if self.state.reasoning_memory_enabled:
                     self.state.refresh_reasoning_memos()
         self.state.phase = Phase.VOTING
@@ -1016,10 +1360,12 @@ class GameEngine:
         return self.state.winner
 
     def _record_public_role_claim(
-        self, speaker: str, content: str, claim_text: str | None = None
+        self, speaker: str, content: str | None, claim_text: str | None = None
     ) -> _ClaimPublication:
+        if not isinstance(content, str):
+            content = ""
         claimed_role = extract_public_role_claim(
-            claim_text if claim_text is not None else content
+            claim_text if claim_text is not None else content, speaker
         )
         if claimed_role is None:
             return _ClaimPublication()
@@ -1039,7 +1385,12 @@ class GameEngine:
             ),
         )
         correction = bool(
-            re.search(r"(?:訂正|訂正します|誤りでした|撤回します)", content)
+            re.search(
+                r"(?:訂正|訂正します|誤りでした|撤回します"
+                r"|correct|corrected|correction|withdraw|retract|was wrong|my mistake)",
+                content,
+                re.IGNORECASE,
+            )
         )
         role_published = ledger_claim is None
         duplicate_suppressed = ledger_claim is not None and prior_role == claimed_role
@@ -1079,10 +1430,14 @@ class GameEngine:
                 claimed_role=claimed_role,
             )
         reason_match = re.search(
-            r"(?:理由|根拠)\s*[：:=＝]\s*([^、,，。\n]+)", content
+            r"(?:理由|根拠|reason|basis)\s*[：:=＝]\s*([^、,，。\n]+)",
+            content,
+            re.IGNORECASE,
         )
         vote_match = re.search(
-            r"(?:投票提案|次の提案)\s*[：:=＝]\s*([^。\n]+)", content
+            r"(?:投票提案|次の提案|vote proposal|vote)\s*[：:=＝]\s*([^。\n]+)",
+            content,
+            re.IGNORECASE,
         )
         if role_published:
             self.state.public_role_claims.append(
@@ -1093,7 +1448,7 @@ class GameEngine:
                     reason=(
                         reason_match.group(1).strip()
                         if reason_match
-                        else "訂正"
+                        else "correction"
                         if correction
                         else None
                     ),
@@ -1176,6 +1531,8 @@ class GameEngine:
                 duplicate_suppressed=duplicate_suppressed,
             )
         self.state.claim_ledger.public_seer_results[result_key] = claimed_result
+        if speaker in self.state.player_self_memories:
+            self.state.player_self_memories[speaker].unrevealed_info = None
         if ledger_claim is not None:
             ledger_claim.latest_published_day = self.state.day
             ledger_claim.latest_published_turn = self.state.discussion_turn
@@ -1197,7 +1554,7 @@ class GameEngine:
                 reason=(
                     reason_match.group(1).strip()
                     if reason_match
-                    else "訂正"
+                    else "correction"
                     if correction
                     else None
                 ),
@@ -1222,22 +1579,24 @@ class GameEngine:
             duplicate_suppressed=duplicate_suppressed,
         )
 
-    def _remove_duplicate_claim(self, content: str) -> str:
-        role = extract_public_role_claim(content)
+    def _remove_duplicate_claim(self, content: str | None, speaker: str | None = None) -> str:
+        if not isinstance(content, str) or not content:
+            return ""
+        role = extract_public_role_claim(content, speaker)
         if role is None:
             return content.strip()
         lines = content.splitlines()
-        if len(lines) > 1 and extract_public_role_claim(lines[0]) == role:
+        if len(lines) > 1 and extract_public_role_claim(lines[0], speaker) == role:
             return "\n".join(lines[1:]).strip()
         sentence = re.search(r"[。！？!?]", content)
         if sentence is not None and extract_public_role_claim(
-            content[: sentence.end()]
+            content[: sentence.end()], speaker
         ) == role:
             return content[sentence.end() :].strip()
         return ""
 
-    def _record_model_inference(self, speaker: str, content: str) -> None:
-        if content.strip() and content.strip() != "パス":
+    def _record_model_inference(self, speaker: str, content: str | None) -> None:
+        if isinstance(content, str) and content.strip() and not is_pass_body(content.strip()):
             self.state.fact_ledger.model_inferences.append(
                 LedgerFact(
                     day=self.state.day,
@@ -1246,6 +1605,261 @@ class GameEngine:
                     actor=speaker,
                 )
             )
+
+    def _record_action_memory(
+        self,
+        player: Player,
+        action_type: str,
+        day: int,
+        phase: str,
+        target: str = "",
+        reason: str = "",
+        summary: str = "",
+        suspicion: list[str] | None = None,
+        confidence: str = "low",
+        unanswered: list[str] | None = None,
+        evidence: list[str] | None = None,
+        previous_position: str = "",
+        position_change_reason: str = "",
+        reasoning_summary: str | None = None,
+    ) -> None:
+        """Store the committed outcome, not a model's unverified action claim."""
+        memory_list = self.state.player_action_memories.setdefault(player.name, [])
+        previous_vote = next(
+            (
+                memory.vote_target
+                for memory in reversed(memory_list)
+                if memory.action_type == "vote"
+            ),
+            "",
+        )
+        if not previous_position:
+            previous_position = previous_vote
+        if (
+            action_type == "vote"
+            and previous_position
+            and previous_position != target
+            and not position_change_reason
+        ):
+            position_change_reason = self._latest_action_reason(
+                player.name, {"discussion", "answer"}
+            )
+        reason = reasoning_summary if reasoning_summary is not None else reason
+        if not reason and action_type in {"vote", "seer", "attack"}:
+            reason = "Original reason was not recorded"
+        memory = PlayerActionMemory(
+            action_id=(
+                f"{player.name}-{day}-{phase}-{action_type}-"
+                f"{len(memory_list) + 1}"
+            ),
+            day=day,
+            phase=phase,
+            action_type=action_type,
+            selected_target=target if action_type in ("seer", "attack") else "",
+            vote_target=target if action_type == "vote" else "",
+            public_statement_summary=summary,
+            suspicion_targets=suspicion if suspicion else [],
+            reasoning_summary=reason,
+            confidence=confidence,
+            unanswered_questions=unanswered if unanswered else [],
+            evidence_ids=evidence if evidence else [],
+            previous_position=previous_position,
+            position_change_reason=position_change_reason,
+        )
+        memory_list.append(memory)
+        player.action_memory = memory
+
+# Update SelfMemory
+        # Only update for alive players
+        if not player.is_alive:
+            return
+        self_mem = self.state.player_self_memories.get(player.name)
+        if self_mem is not None:
+            if not self_mem.role:
+                self_mem.role = {
+                    Role.WOLF: "Werewolf",
+                    Role.MADMAN: "Madman",
+                    Role.SEER: "Seer",
+                    Role.VILLAGER: "Villager",
+                }[player.role]
+            # Add current action to past actions (if applicable)
+            # This is called after actions like discussion, voting, night actions
+            # The action text should be provided by the caller
+        elif player.self_memory is None:  # 8 spaces indent (the fix!)
+            # Initialize new SelfMemory
+            role_name = {
+                Role.WOLF: "Werewolf",
+                Role.MADMAN: "Madman",
+                Role.SEER: "Seer",
+                Role.VILLAGER: "Villager",
+            }[player.role]
+            memory = SelfMemory(
+                role=role_name,
+                partner=player.partner,
+            )
+            self.state.player_self_memories[player.name] = memory
+            player.self_memory = memory
+        
+            self_mem.role = {
+                    Role.WOLF: "Werewolf",
+                    Role.MADMAN: "Madman",
+                    Role.SEER: "Seer",
+                    Role.VILLAGER: "Villager",
+                }.get(player.role, str(player.role.value))
+            if not self_mem.partner and player.partner:
+                self_mem.partner = player.partner
+
+            # Action formatting
+            if action_type == "vote":
+                self_mem.add_action(f"Day {day} Vote: {target}")
+            elif action_type == "seer":
+                seer_verdict = "Werewolf" if self.state.seer_results.get(target) == "wolf" else "Human"
+                self_mem.add_action(f"Night {day} Divine: {target} -> {seer_verdict}")
+                # Set unrevealed info
+                self_mem.unrevealed_info = f"Divined {target} as {seer_verdict}"
+            elif action_type == "attack":
+                self_mem.add_action(f"Night {day} Attack: {target}")
+            elif action_type in {"discussion", "answer"}:
+                short = summary.replace("\n", " ").strip()
+                if len(short) > 60:
+                    short = short[:57] + "..."
+                self_mem.add_action(f"Day {day} Discussion: {short}")
+                if suspicion:
+                    self_mem.current_stance = f"Suspecting {', '.join(suspicion)}"
+                elif "pass" in short.lower() or short == "Pass":
+                    self_mem.current_stance = "Passed / Low-profile"
+                else:
+                    self_mem.current_stance = f"Observing ({short[:30]})"
+
+    def _record_public_speech_memory(self, player: Player, content: str | None) -> None:
+        content = content if isinstance(content, str) else ""
+        previous_message = next(
+            (
+                message
+                for message in reversed(self.state.current_round_transcript)
+                if message.speaker not in {"system", player.name}
+            ),
+            None,
+        )
+        previous_content = (
+            previous_message.content
+            if previous_message is not None and isinstance(previous_message.content, str)
+            else ""
+        )
+        previous_is_question = bool(
+            previous_message is not None
+            and previous_message.speaker != player.name
+            and (
+                _asks_question(previous_content)
+                or player.name in previous_content
+                or re.search(
+                    r"(?:あなた|君|\byou\b|\byour\b)", previous_content, re.IGNORECASE
+                )
+            )
+        )
+        action_type = (
+            "pass"
+            if is_pass_body(content)
+            else "answer"
+            if previous_is_question
+            else "discussion"
+        )
+        unanswered = (
+            [previous_content]
+            if previous_is_question
+            and previous_message is not None
+            and not _answers_previous_question(content, previous_content)
+            else []
+        )
+        suspicion = self._suspicion_targets(content)
+        reason = self._reason_from_text(content)
+        self._record_action_memory(
+            player=player,
+            action_type=action_type,
+            day=self.state.day,
+            phase=self.state.phase.value,
+            summary=content,
+            suspicion=suspicion,
+            confidence=self._confidence_from_text(content),
+            unanswered=unanswered,
+            reasoning_summary=reason,
+            evidence=[
+                f"public-message-{len(self.state.conversation_log)}"
+            ],
+        )
+        if action_type != "pass" and _asks_question(content):
+            self._record_action_memory(
+                player=player,
+                action_type="question",
+                day=self.state.day,
+                phase=self.state.phase.value,
+                summary=content,
+                suspicion=suspicion,
+                confidence=self._confidence_from_text(content),
+                reasoning_summary=reason,
+                evidence=[
+                    f"public-message-{len(self.state.conversation_log)}"
+                ],
+            )
+
+    def _latest_action_reason(
+        self, player_name: str, action_types: set[str]
+    ) -> str:
+        for memory in reversed(
+            self.state.player_action_memories.get(player_name, [])
+        ):
+            if memory.action_type in action_types:
+                if memory.reasoning_summary:
+                    return memory.reasoning_summary
+                if memory.public_statement_summary:
+                    return (
+                        "What the player stated before voting (no explicit reason): "
+                        + memory.public_statement_summary[:240]
+                    )
+        return "The reason at that time was not recorded"
+
+    def _reason_from_text(self, text: str | None) -> str:
+        if not isinstance(text, str) or not text:
+            return ""
+        match = re.search(
+            r"(?:理由|根拠|変更理由|reason|basis|change reason)\s*[：:=＝]\s*([^。\n]+)",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1).strip()[:240] if match else ""
+
+    def _suspicion_targets(self, text: str | None) -> list[str]:
+        if not isinstance(text, str) or not text:
+            return []
+        if not re.search(
+            r"(?:疑|怪し|投票|処刑|人狼)|(?:suspect|suspicious|vote|execute|exile|werewolf)",
+            text,
+            re.IGNORECASE,
+        ):
+            return []
+        return [
+            player.name
+            for player in self.state.players
+            if player.name in text and player.name != "system"
+        ]
+
+    @staticmethod
+    def _confidence_from_text(text: str | None) -> str:
+        if not isinstance(text, str) or not text:
+            return "medium"
+        if re.search(
+            r"(?:確信|間違いなく|確実に)|(?:confident|definitely|certainly|surely)",
+            text,
+            re.IGNORECASE,
+        ):
+            return "high"
+        if re.search(
+            r"(?:可能性|かもしれ|まだ|保留|不確か)|(?:maybe|might|possibly|still|hold|uncertain|not sure)",
+            text,
+            re.IGNORECASE,
+        ):
+            return "low"
+        return "medium"
 
     def _emit_public_claim(self, event_type: str, **details: object) -> None:
         if self.event_callback is not None:
@@ -1260,7 +1874,7 @@ class GameEngine:
                     "type": "discussion_message",
                     "day": self.state.day,
                     "phase": self.state.phase.value,
-                    "phase_label": "昼・議論",
+                    "phase_label": "Day discussion",
                     "speaker": message.speaker,
                     "player": message.speaker,
                     "action": "discussion",
@@ -1337,6 +1951,18 @@ class GameEngine:
             if selected is None:
                 raise RuntimeError(f"No deterministic vote fallback for {voter}.")
             votes[voter] = selected
+            self._record_action_memory(
+                player=self._player(voter),
+                action_type="vote",
+                day=day,
+                phase=Phase.VOTING.value,
+                target=selected,
+                summary=f"{voter} voted for {selected}.",
+                reasoning_summary=self._latest_action_reason(
+                    voter, {"discussion", "answer"}
+                ),
+                evidence=[f"vote-{ballot_id}-{voter}"],
+            )
             self._emit_voting_event(
                 "vote_completed",
                 voting_phase_id=ballot_id,

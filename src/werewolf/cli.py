@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import sys
+import traceback
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -41,6 +42,11 @@ from werewolf import (
     parse_action_num_predict_pairs,
     parse_thinking_by_action_pairs,
 )
+from werewolf.self_consistency import SelfConsistencyGuard
+from werewolf.discussion_format import (
+    DEFAULT_QUESTION_HINT_MODE,
+    normalize_question_hint_mode,
+)
 
 # フェーズ表示用ラベル
 PHASE_NAMES_JA = {
@@ -58,6 +64,55 @@ ROLE_NAMES_JA = {
     Role.SEER: "占い師",
     Role.VILLAGER: "村人",
 }
+
+# 公開CO・占い結果の主張は台帳イベントとしてのみ発行され、構造化出力では本文メッセージに
+# CO行が含まれない（二層形式は【本文】だけを公開会話へ残す）。そのためターミナルでは
+# 台帳イベントを本文の直前に別行として表示する。本文に既に書かれている場合は重複表示しない。
+PUBLIC_CLAIM_DISPLAY_TYPES: frozenset[str] = frozenset(
+    {
+        "claim_role_published",
+        "claim_role_corrected",
+        "seer_result_claim",
+        "seer_result_corrected",
+    }
+)
+
+
+def _role_label(value: object) -> str:
+    claimed_role = str(value or "")
+    try:
+        return ROLE_NAMES_JA[Role(claimed_role)]
+    except ValueError:
+        return claimed_role
+
+
+def public_claim_display_line(event: dict[str, object]) -> str:
+    """台帳のCO・占い結果主張を表示用の1行にする（未確認の主張である旨を明記する）。"""
+    claimant = str(event.get("claimant", "?"))
+    event_type = str(event.get("type", ""))
+    correction = "（訂正）" if event_type.endswith("corrected") else ""
+    if event_type in {"claim_role_published", "claim_role_corrected"}:
+        return (
+            f"  [{claimant}] 公開CO: {_role_label(event.get('claimed_role'))}"
+            f"を主張（未確認）{correction}"
+        )
+    result_label = "人狼" if str(event.get("claimed_result", "")) == "wolf" else "人間"
+    return (
+        f"  [{claimant}] 占い結果の主張: {event.get('target', '?')} = {result_label}"
+        f"{correction}"
+    )
+
+
+def claim_covered_by_speech(event: dict[str, object], speech: str) -> bool:
+    """その主張が発言本文に既に書かれているかを判定する（表示の重複を避ける）。"""
+    event_type = str(event.get("type", ""))
+    if event_type in {"claim_role_published", "claim_role_corrected"}:
+        return _role_label(event.get("claimed_role")) in speech
+    result_label = "人狼" if str(event.get("claimed_result", "")) == "wolf" else "人間"
+    target = str(event.get("target", ""))
+    if target and result_label in speech:
+        return target in speech or "占い" in speech
+    return False
 
 
 class GameLogger:
@@ -89,6 +144,10 @@ class GameLogger:
             "discussion_bodies": 0,
             "discussion_bodies_preserved": 0,
             "question_not_answered": 0,
+            "question_checks": 0,
+            "question_directed": 0,
+            "question_answered": 0,
+            "question_answer_forced": 0,
             "ledger_repairs": 0,
             "duplicate_claims_suppressed": 0,
             "public_claim_updates": 0,
@@ -153,6 +212,15 @@ class GameLogger:
         if event_type == "llm_action_parse_failed":
             if diagnostic_record.get("reason") == "question_not_answered_first":
                 self._ledger_metrics["question_not_answered"] += 1
+        # TASK-038: 質問への回答観測（再生成しないモードでも回答率を測る）
+        if event_type == "discussion_question_check":
+            self._ledger_metrics["question_checks"] += 1
+            if bool(diagnostic_record.get("question_directed")):
+                self._ledger_metrics["question_directed"] += 1
+                if bool(diagnostic_record.get("question_answered")):
+                    self._ledger_metrics["question_answered"] += 1
+            if bool(diagnostic_record.get("question_answer_forced")):
+                self._ledger_metrics["question_answer_forced"] += 1
         if event_type == "ledger_repair":
             self._ledger_metrics["ledger_repairs"] += 1
         if event_type == "duplicate_claim_suppressed":
@@ -446,6 +514,24 @@ class GameLogger:
                     / max(1, int(self._ledger_metrics["discussion_bodies"])),
                     4,
                 ),
+                # TASK-038: 直前の発言が自分宛だった発言への回答率（観測ベース・再生成なし）
+                "question_answer_rate": round(
+                    int(self._ledger_metrics["question_answered"])
+                    / max(1, int(self._ledger_metrics["question_directed"])),
+                    4,
+                ),
+                "question_unanswered_rate": (
+                    round(
+                        (
+                            int(self._ledger_metrics["question_directed"])
+                            - int(self._ledger_metrics["question_answered"])
+                        )
+                        / max(1, int(self._ledger_metrics["question_directed"])),
+                        4,
+                    )
+                    if int(self._ledger_metrics["question_directed"])
+                    else 0.0
+                ),
                 "duplicate_claim_rate": round(
                     int(self._ledger_metrics["duplicate_claims_suppressed"])
                     / max(
@@ -458,6 +544,20 @@ class GameLogger:
             },
             "conversation_log": conversation_data,
             "votes": state.votes,
+            "action_memory_count": sum(
+                len(memories)
+                for memories in state.player_action_memories.values()
+            ),
+            "self_consistency_alert_count": sum(
+                alert.category
+                in {
+                    "contradictory_past_vote",
+                    "recorded_action_denied",
+                    "dead_player_action_target",
+                    "past_action_question_unanswered",
+                }
+                for alert in state.integrity_alerts
+            ),
             "model_stats": self._model_stats,
             "model_capabilities": {
                 model: dict(capabilities)
@@ -489,6 +589,13 @@ class GameLogger:
                 "model_inferences": [
                     asdict(fact) for fact in state.fact_ledger.model_inferences
                 ],
+            },
+            "player_action_memories": {
+                player: [
+                    SelfConsistencyGuard.serialize(memory)
+                    for memory in memories
+                ]
+                for player, memories in state.player_action_memories.items()
             },
             "action_candidate_sets": {
                 key: asdict(candidate_set)
@@ -538,6 +645,11 @@ def run_cli_game(args: argparse.Namespace) -> int:
         raise ValueError("--override-player-num-ctx requires --num-ctx.")
     if getattr(args, "override_player_num_ctx", False):
         options["override_player_num_ctx"] = True
+    options["dynamic_context"] = bool(getattr(args, "dynamic_context", True))
+    question_hint_mode = normalize_question_hint_mode(
+        getattr(args, "question_hint_mode", DEFAULT_QUESTION_HINT_MODE)
+    )
+    options["question_hint_mode"] = question_hint_mode
     if args.thinking in {"on", "off"}:
         options["thinking"] = args.thinking == "on"
     for key, value in action_num_predict.items():
@@ -546,7 +658,13 @@ def run_cli_game(args: argparse.Namespace) -> int:
         options[f"thinking_by_action:{key}"] = value
 
     # ゲーム初期化
-    state = create_game(seed=args.seed, config_path=Path(args.models_file))
+    # TASK-038: --language引数が指定されている場合はresponse_languageを上書き
+    kwargs = {}
+    if getattr(args, "language", None) is not None:
+        kwargs["response_language"] = args.language
+    state = create_game(seed=args.seed, config_path=Path(args.models_file), **kwargs)
+    # TASK-038: engine側の本文診断も同じ強制度を使う（state経由で参照される）
+    state.question_hint_mode = question_hint_mode
 
     meta = {
         "mode": args.mode,
@@ -565,8 +683,11 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "thinking": args.thinking,
         "thinking_by_action": action_thinking,
         "default_thinking_by_action": dict(DEFAULT_THINKING_BY_ACTION),
+        "dynamic_context": bool(getattr(args, "dynamic_context", True)),
+        "question_hint_mode": question_hint_mode,
         "base_url": args.base_url,
         "show_private": args.show_private,
+        "response_language": getattr(args, "language", None),
     }
     print(f"行動別生成上限（規定）: {' / '.join(ACTION_BUDGET_DEFAULT_LABELS.values())}")
     print(
@@ -601,6 +722,20 @@ def run_cli_game(args: argparse.Namespace) -> int:
             else "未設定"
         )
     )
+    print(
+        "動的コンテキスト: "
+        + (
+            "on（送信プロンプト実測サイズ＋生成上限へnum_ctxを調整・発言履歴を予算化）"
+            if getattr(args, "dynamic_context", True)
+            else "off（num_ctxは設定値をそのまま送信）"
+        )
+    )
+    question_hint_mode_labels = {
+        "strict": "strict（1文目に回答対象・形式違反は1回の意味的再要求）",
+        "soft": "soft（質問は観測として提示・回答の強制と再生成なし）",
+        "none": "none（質問欄・回答指示なし・完全中立の証拠のみ）",
+    }
+    print(f"質問ヒントモード: {question_hint_mode_labels[question_hint_mode]}")
     print("player設定の行動別num_predict:")
     for player in state.players:
         per_action = (
@@ -700,6 +835,19 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 if thinking_enabled is None
                 else ("on" if thinking_enabled else "off")
             )
+            retry_fit_note = ""
+            if event.get("retry_budget_fit"):
+                retry_fit_note = (
+                    " (再要求でnum_predict・num_ctxを要求サイズへ縮小"
+                    f": 元num_ctx={event.get('num_ctx_before_retry_fit', '未指定')})"
+                )
+            if event.get("dynamic_context_fit"):
+                retry_fit_note += (
+                    " (動的コンテキスト"
+                    f": 元num_ctx={event.get('num_ctx_before_dynamic_fit', '未指定')}"
+                    f"→必要量概算={event.get('context_needed_tokens', '不明')}"
+                    f", 優先元={event.get('num_ctx_setting_source', '不明')})"
+                )
             print(
                 f"{prefix} LLM要求 #{request_number} [{request_reason}] ({tool_label}): API要求num_ctx={requested_context}, "
                 f"Modelfile PARAMETER num_ctx={modelfile_context}, "
@@ -713,7 +861,8 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 f"(行動={event.get('action_budget_key')}, 優先元={event.get('num_predict_source')}), "
                 f"think={thinking_label} (優先元={event.get('thinking_source')}), "
                 f"max_retries={event.get('max_retries')}, "
-                f"timeout={event.get('request_timeout_seconds')}秒",
+                f"timeout再送上限={event.get('timeout_retries', event.get('max_retries'))}, "
+                f"timeout={event.get('request_timeout_seconds')}秒{retry_fit_note}",
                 flush=True,
             )
         elif event_type == "thinking_unavailable":
@@ -727,6 +876,24 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 f"(生成トーク数={event.get('eval_count')}, num_predict={event.get('num_predict')})",
                 flush=True,
             )
+        elif event_type == "model_timeout_downgrade":
+            print(
+                f"{prefix} タイムアウト観測 → 以後の議論・人狼相談はthink=off・"
+                f"num_predict<={event.get('num_predict')}・発言予算{event.get('evidence_ratio')}で送信します",
+                flush=True,
+            )
+        elif event_type == "ledger_repair":
+            reason = event.get("reason")
+            if reason == "meta_instruction_echo":
+                print(
+                    f"{prefix} メタ発話（システム・修復定型文）を本文から除去して公開します",
+                    flush=True,
+                )
+            elif reason == "repeated_discussion_topic":
+                print(
+                    f"{prefix} 当日の議論で重複した文を本文から除去しました（メタ定型文は挿しません）",
+                    flush=True,
+                )
         elif event_type == "llm_action_completed":
             retries = int(event["total_retries"])
             fallback = "有" if event["fallback_used"] else "無"
@@ -754,15 +921,51 @@ def run_cli_game(args: argparse.Namespace) -> int:
             ):
                 print(f"  {player}: {content}", flush=True)
 
+    # 台帳のCO・占い結果主張は本文メッセージに含まれない形式があるため、本文の直前に
+    # 表示用の行を積んでおき、同一発言者の本文が出る時点で（本文に既に含まれていなければ）flushする。
+    pending_claims: list[dict[str, object]] = []
+    pending_claim_speaker: str | None = None
+
+    def flush_pending_claims(speech: str | None = None) -> None:
+        """未表示のCO・占い結果主張をターミナルへ出す。本文に既にあれば出さない。"""
+        nonlocal pending_claims, pending_claim_speaker
+        if not pending_claims:
+            pending_claim_speaker = None
+            return
+        if speech is None or not all(
+            claim_covered_by_speech(event, speech) for event in pending_claims
+        ):
+            for event in pending_claims:
+                print(public_claim_display_line(event), flush=True)
+        pending_claims = []
+        pending_claim_speaker = None
+
     def on_engine_event(event: dict[str, object]) -> None:
         """Persist engine events and display public speeches as they arrive."""
+        nonlocal pending_claims, pending_claim_speaker
         logger.append_record(event)
-        if event.get("type") == "discussion_message":
+        event_type = event.get("type")
+        if event_type in PUBLIC_CLAIM_DISPLAY_TYPES:
+            claimant = str(event.get("claimant", "?"))
+            if pending_claim_speaker not in (None, claimant):
+                flush_pending_claims()
+            pending_claim_speaker = claimant
+            pending_claims.append(event)
+            return
+        if event_type == "discussion_message":
+            speaker = str(event.get("speaker", event.get("player", "?")))
+            content = str(event.get("content", ""))
+            if pending_claim_speaker == speaker:
+                # 本文にCO・占い結果が既に書かれている場合は重複表示しない
+                flush_pending_claims(content)
+            else:
+                flush_pending_claims()
             print(
-                f"  [{event.get('speaker', event.get('player', '?'))}]: "
-                f"{event.get('content', '')}",
+                f"  [{speaker}]: {content}",
                 flush=True,
             )
+            return
+        flush_pending_claims()
 
     # クライアントとポリシーの設定
     client: OllamaClient | None = None
@@ -822,6 +1025,7 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 }
             )
             print(f"  中断した処理: {active_call}", flush=True)
+        flush_pending_claims()
         traces = getattr(actions, "traces", None)
         logger.finalize(state, traces=traces, error="interrupted")
         print(f"ログ保存完了: {logger.log_file}")
@@ -927,12 +1131,16 @@ def run_cli_game(args: argparse.Namespace) -> int:
         return 1
     except Exception as exc:
         print_banner(f"[エラー] 予期せぬエラーが発生しました: {exc}")
+        # 予期せぬエラーはスタックトレースも出力する（メッセージだけでは原因箇所が不明なため）。
+        traceback.print_exc()
         traces = getattr(actions, "traces", None)
         logger.finalize(state, traces=traces, error=str(exc))
         print(f"ログを保存しました: {logger.log_file}")
         return 1
 
     # ゲーム終了表示
+    # 最終発言に付随するCO・占い結果主張が未表示ならここで出力する
+    flush_pending_claims()
     winner_str = "村人陣営 (village)" if state.winner == "village" else "人狼陣営 (werewolf)"
     print_banner(f"ゲーム終了！ 勝者: {winner_str}")
     print(
@@ -1012,6 +1220,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--question-hint-mode",
+        choices=["strict", "soft", "none"],
+        default="soft",
+        help=(
+            "How strongly the prompt pushes answering the previous question. "
+            "soft (default): shows the question as observation only and never "
+            "regenerates for answer format. strict: legacy behavior (answer must "
+            "appear in the first sentence, one semantic retry). none: no question "
+            "section or answer instruction at all (fully neutral evidence)."
+        ),
+    )
+    parser.add_argument(
+        "--no-dynamic-context",
+        dest="dynamic_context",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable dynamic context sizing. By default num_ctx is shrunk to the measured "
+            "prompt size plus the per-action generation budget (and expanded up to "
+            "max_num_ctx when the prompt needs it), and discussion history is budgeted to "
+            "the allocated window. Use this flag for fixed-context comparison runs."
+        ),
+    )
+    parser.add_argument(
         "--num-predict",
         type=int,
         default=None,
@@ -1076,6 +1308,12 @@ def build_parser() -> argparse.ArgumentParser:
             "--thinking-by-action discussion=true"
         ),
     )
+    parser.add_argument(
+        "--language",
+        choices=["English", "Japanese"],
+        default=None,
+        help="Language for player responses (English or Japanese)",
+    ),
     parser.add_argument(
         "--log-dir",
         type=Path,
