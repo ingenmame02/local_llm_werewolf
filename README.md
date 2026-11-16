@@ -1,44 +1,268 @@
-python src/werewolf/cli.py --mode ollama --num-predict 2048 --timeout 180
+# ローカルLLM人狼（Local LLM Werewolf）
 
-python src/werewolf/cli.py `
-  --mode ollama `
+Ollama でローカルLLM 8体 を人狼ゲームのプレイヤーとして実行する、完全ターン制の CLI アプリケーションです。
+ゲームロジック（エンジン）と LLM 呼び出しを分離しており、Ollama がなくても **モックモード** で全フローを動作確認できます。
+
+## 主な特徴
+
+- 役職配布、昼議論、投票、夜行動（人狼相談・襲撃・占い）、勝敗判定を決定的なゲームエンジンが管理
+- 各 LLM 呼び出しを JSONL に記録（観戦用の公開ログと管理者用ログを分離）
+- 議論応答を CO（役職名乗り）と本文に構造化し、公開主張・占い結果を台帳で冪等に管理
+- 秘匿情報（真役職・人狼相談・占い結果）を他プレイヤーへ渡さない情報分離と漏えい検出
+- 行動別（議論・占い・投票など）の生成上限 `num_predict` と思考生成 `think` の制御
+- コンテキスト戦略・コンテキスト長・サンプリングのモデル別設定と比較ベンチマーク
+
+## ゲームルール
+
+| 項目 | 内容 |
+|---|---|
+| 役職 | 人狼 2 / 狂人 1 / 占い師 1 / 村人 4（計 8 名） |
+| 村人陣営の勝利 | 生存している人狼が 0 名 |
+| 人狼陣営の勝利 | 生存人狼数 ≥ 生存（占い師＋村人）数（狂人は人数計算に含めない） |
+| 初夜（Day 1） | 占い師の占いのみ（襲撃・人狼相談なし、死亡者発表なし） |
+| Day 2 以降の夜 | 人狼相談（人狼 2 名時、最大 2 ターン）→ 襲撃 → 占い |
+| 昼 | 議論 3 ターン → 投票・処刑 → 勝敗判定 |
+| 占い結果 | 狂人を占うと「人間」が出る。結果は占い師本人のみが参照できる |
+
+詳細な仕様は `SPECIFICATION.md` を参照してください。
+
+## インストール
+
+```powershell
+pip install -e .              # 本体
+pip install -e ".[test]"      # 開発（pytest）
+pip install -e ".[benchmark]" # コンテキストベンチマーク（psutil）
+```
+
+Python 3.10 以上が必要です。モックモードは追加の依存なく動作します。実プレイには Ollama（既定 `http://localhost:11434`）と 8 体のモデルが必要です。
+
+## 使い方
+
+### モックモード（Ollama 不要・開発・テスト用）
+
+```powershell
+python src/werewolf/cli.py --mode mock --seed 42
+```
+
+### Ollama モード（1 ゲーム）
+
+```powershell
+python src/werewolf/cli.py --mode ollama `
   --models-file config/players.json `
   --seed 20261106 `
   --timeout 180 `
   --temperature 0.7 `
-  --log-dir logs `
-  --private-log `
-  --show-private
+  --language Japanese `
+  --log-dir logs
+```
 
+秘密情報（人狼相談・占い結果）を端末に表示し、管理者ログも残す場合:
 
-$env:CUDA_VISIBLE_DEVICES="0,1"
-$env:OLLAMA_SCHED_SPREAD="1"
-$env:OLLAMA_FLASH_ATTENTION="1"
-$env:OLLAMA_CONTEXT_LENGTH="8192"
+```powershell
+python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 20261106 --timeout 180 --private-log --show-private
+```
 
+### 推奨の Ollama サーバー設定
 
-$env:OLLAMA_NUM_PARALLEL="1"
+モデルの並列数・コンテキスト長は **Ollama サーバープロセスの環境変数** で設定します（クライアント CLI からは設定できません）。ゲームは直列進行なので `OLLAMA_NUM_PARALLEL=1` を推奨します。
+
+```powershell
+$env:CUDA_VISIBLE_DEVICES = "0,1"   # GPU を複数使う場合
+$env:OLLAMA_SCHED_SPREAD = "1"
+$env:OLLAMA_FLASH_ATTENTION = "1"
+$env:OLLAMA_CONTEXT_LENGTH = "8192"
+$env:OLLAMA_NUM_PARALLEL = "1"
 $env:OLLAMA_KEEP_ALIVE = "5m"
+
 ollama serve
+```
 
-python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 1001 --timeout 180 --temperature 0.7 --question-hint-mode none --show-private --language Japanese 
+既定の `config/players.json` は 8 プレイヤーそれぞれに別モデルを割り当てます（モデル名は環境に合わせて変更してください）。
 
-`--num-ctx`は省略時、Ollama APIリクエストには含まれず、サーバー／モデル側の既定値が使われます。現在の`config/players.json`では全プレイヤーの`num_ctx`を12288に設定しているため、プレイヤーごとのAPI要求へ明示されます。プレイヤー別`num_ctx`はCLIの`--num-ctx`より優先されます。
+| プレイヤー | 既定モデル |
+|---|---|
+| Player 1 | `werewolf-calm3-22b-8k` |
+| Player 2 | `werewolf-muse-glimmer-8k` |
+| Player 3 | `werewolf-mistral-small-8k` |
+| Player 4 | `werewolf-glm-4.7-flash-8k` |
+| Player 5 | `werewolf-qwen3.8-8k` |
+| Player 6 | `werewolf-deepseek-r1-8k` |
+| Player 7 | `werewolf-gpt-oss-20b-8k` |
+| Player 8 | `werewolf-gemma4-8k` |
 
---show-privateで管理者用ログを生成し、端末にも表示
---private-logで管理者用ログだけを生成
---private-logでは端末に秘密情報を表示しない
+## CLI オプション
 
-## Ollamaコンテキスト診断
+| オプション | 既定値 | 説明 |
+|---|---|---|
+| `--mode {mock,ollama}` | `mock` | 実行モード |
+| `--models-file PATH` | `config/players.json` | プレイヤー設定ファイル |
+| `--seed INT` | `42` | 役職配布・同票処理を再現可能にする乱数シード |
+| `--timeout SEC` | `120` | Ollama リクエストのタイムアウト |
+| `--temperature FLOAT` | `0.7` | 生成温度（全体設定） |
+| `--num-ctx INT` | 未設定 | コンテキスト長。省略時は API リクエストに含めず、サーバー／モデル既定値が使われます |
+| `--override-player-num-ctx` | off | `--num-ctx` をプレイヤー別 `num_ctx` より優先させる（`--num-ctx` と併用） |
+| `--no-dynamic-context` | off | 動的コンテキストを停止（固定コンテキストの比較用） |
+| `--num-predict INT` | 未設定 | 生成上限（全体設定）。省略時は行動別既定値 |
+| `--num-predict-by-action ACTION=N` | — | 行動別生成上限の上書き（複数指定可） |
+| `--thinking {auto,on,off}` | `auto` | 思考生成。`auto` は行動別既定（議論・人狼相談 on／襲撃・占い・投票・CO補正 off） |
+| `--thinking-by-action ACTION=true\|false` | — | 行動別思考の上書き（複数指定可） |
+| `--discussion-claim-mode {legacy,candidates,all}` | `legacy` | 議論 CO の生成方式（旧来併走／候補のみ二段階／全員二段階） |
+| `--context-strategy {...}` | `hybrid_retrieval` | 議論に渡す履歴の構成（後述） |
+| `--question-hint-mode {strict,soft,none}` | `soft` | 直前の質問への回答指示の強さ。`soft` は観測のみ／`strict` は旧来（1文目ルール＋1回再生成）／`none` は質問欄も指示も出しません |
+| `--language {English,Japanese}` | 設定／日本語 | 応答言語 |
+| `--log-dir DIR` | `logs` | JSONL ログの出力先 |
+| `--base-url URL` | `http://localhost:11434` | Ollama API のベース URL |
+| `--show-private` | off | 秘密情報を端末に表示し、管理者ログも生成 |
+| `--private-log` | off | 管理者ログのみ生成（端末には秘密情報を表示しません） |
 
-Modelfileの`PARAMETER num_ctx`、Pythonプロセスの`OLLAMA_CONTEXT_LENGTH`、API要求値、ロード済みモデルの`/api/ps` CONTEXT/PROCESSORは別の値です。次のコマンドでモデル別の診断を`config/ollama_context.json`へ保存できます。`--num-ctx`を省略するとAPI要求値は未指定として記録されます。
+行動キー: `discussion` / `wolf_discussion`（別名 `wolf_consult`）/ `attack` / `seer` / `vote`（別名 `target`）/ `co_correction`
+
+## プレイヤー設定（`config/players.json`）
+
+各プレイヤーにモデルと生成条件を指定します。**プレイヤー設定は常に CLI の全体設定より優先されます。**
+
+```json
+{
+  "players": [
+    {
+      "name": "Player 1",
+      "model": "werewolf-calm3-22b-8k",
+      "num_ctx": 12288,
+      "num_predict": 1536,
+      "num_predict_by_action": { "discussion": 2560, "vote": 768 },
+      "thinking_by_action": { "discussion": false },
+      "personality_profile": "analytical",
+      "response_language": "日本語"
+    }
+  ]
+}
+```
+
+| フィールド | 説明 |
+|---|---|
+| `name` / `model` | 表示名 / Ollama モデル名 |
+| `num_ctx` | API リクエストに送るコンテキスト長（`--num-ctx` より優先） |
+| `max_num_ctx` / `recommended_num_ctx` | 動的コンテキストの拡張上限 / 推奨値 |
+| `timeout` | このプレイヤーだけのリクエスト時間上限（秒） |
+| `num_predict` / `num_predict_by_action` | 生成上限（全体 / 行動別） |
+| `thinking` / `thinking_by_action` | 思考生成（全体 / 行動別） |
+| `personality_profile` | 議論の話し方の傾向（`balanced` `analytical` `questioning` `assertive` `cautious` `consensus` `intuitive`） |
+| `context_strategy` | このプレイヤーだけのコンテキスト戦略 |
+| `claim_coaching` | CO の先頭形式案内を強調（既定 `false`。議論の自由度・CO 保留・パスは制限しません） |
+| `temperature` / `top_p` / `top_k` / `repeat_penalty` | プレイヤー別サンプリング（許容範囲 0–2 / 0–1 / 0–400 / 0–2） |
+| `response_language` | 応答言語（既定 日本語） |
+
+## 議論応答形式（CO / 本文）
+
+昼の議論は 1 回の生成で公開主張（CO）と本文を分離します。日本語は `【CO】` / `【本文】`、英語は `[CO]` / `[BODY]` を使います。CO は公開主張の構造化に使い、会話履歴には本文だけを追加します（旧来形式の文章 CO も互換のため受け付けます）。
+
+```text
+【CO】なし
+【本文】Player 2 への疑いは弱めます。Player 3 の発言も確認したいです。
+```
+
+- CO欄は `なし` と `保留` を区別します。CO 行だけを公開主張として解析し、本文だけを会話履歴へ登録します。
+- 占い結果を公開しない表記（`【結果】None`・空・`なし`・`未公開`）は「結果なし」として正規化し、形式失敗や再試行の原因にしません。誤って結果行が付いた場合も公開しません。
+- 公開 CO と占い結果は台帳で冪等に管理され、同一 CO の再送は本文から除去します。CO 判定は毎ターン行わず、初回・未公開の新しい占い結果・明示的な訂正要求時に限定します。
+- 修復できる違反（死亡者への行動提案など）は再生成せず `ledger_repair` として記録します。候補外の襲撃・占い・投票は短い再回答後に合法候補へ補正します。
+- 真占い師が未公開の判定を口にした応答は CO 行を決定的に補完して受理し、再試行とフォールバックを避けます（修復文は応答言語で書き、本文を保持します）。
+- 昼議論プロンプトには確定ルール・ゲーム台帳とは別に「人狼セオリーカード」を含めます（対抗 CO のない初日単独 CO の評価、狂人を占うと人間が出る＝人間判定は村人の確定ではない、等）。
+- 個性（`personality_profile`）は昼の議論本文だけに影響し、CO の判定や対象選択には影響しません。議論の質・事実整合性・質問回答・形式指示より優先度が低く、追加の説明や質問を強制しません。
+- `--discussion-claim-mode candidates`（占い師・CO 公開済みプレイヤーのみ）/ `all`（全員）は二段階 CO の比較用です。CO 専用リクエストが増えるため呼び出し回数・所要時間が増える可能性があります。同一シードで各モードを実行し、ログの `discussion_claim_mode` と `ledger_metrics`（CO 呼び出し、実送信・再試行、重複 CO、台帳修復、本文保持、質問未回答、処理時間）を比較してください。
+
+## コンテキスト戦略
+
+| 戦略 | 内容 |
+|---|---|
+| `full_transcript` | 公開会話の全文 |
+| `structured_ledger` | 台帳（確定事実・CO・占い・投票・死亡履歴）＋現在の質問 |
+| `hybrid_retrieval`（既定） | 直近発言＋現在の質問に関連する過去発言・投票理由・CO・占い結果 |
+| `round_transcript_memory` | 現在ラウンドの全文＋プレイヤー別「継続推理メモ」＋確定台帳 |
+
+- 動的コンテキスト（既定 on）: 実測したプロンプトサイズ＋行動別生成上限に合わせて `num_ctx` を調整し、必要時は `max_num_ctx` まで拡張します。`--no-dynamic-context` で固定できます。
+- `round_transcript_memory` は過去ゲーム全体の全文を毎回投入する方式ではないため、モデル別の実効コンテキスト上限を超えにくく、秘匿情報をプレイヤー間で混ぜません。再試行でも現在ラウンド全文と継続メモを維持します。
+- 推理メモはゲームエンジンが公開台帳・投票・発言 ID から決定的に更新します（LLM は差分の整理だけを行い、確定事実・役職・秘匿情報を生成させません）。狼相談や占い師本人の結果は本人専用領域に分離し、他プレイヤーへ共有しません。メモ更新に失敗した場合は直前の有効メモと確定台帳でゲームを継続します。
+- メタ漏洩・異常発言の警告も、内容を漏らさない安全な要約として次のプレイヤーへ渡します。
+- 再試行では失敗理由に応じた修正指示と、直近の公開発言・公開 CO など必要な情報だけを再送します。占い師本人の非公開結果は、その占い師の再試行にのみ含めます。
+- 全履歴系のプロンプト監査では公開発言の SHA-256、通し発言番号、選択理由、除外範囲を記録し、会話本文や非公開の狼相談・占い結果は診断イベントに含めません。
+
+## 生成上限（num_predict）と思考生成（think）
+
+- 優先順位は **player 行動別 → CLI 行動別 → 全体設定 → player 全体 → CLI 全体 → 行動別既定値** です。行動別既定値は 議論 1536 / 人狼相談 768 / 襲撃・占い・投票 256 / CO補正 256。
+- 最終回答が 1 行で済む行動（襲撃・占い・投票・CO補正）は上限キャップ（襲撃・占い・投票 768、CO補正 384）へ降ろし、思考系モデルの無駄な生成による長時間応答を抑制します。議論・人狼相談は根拠を説明できる文量を確保するため全体設定をそのまま使います（昼議論の文量目安は 5〜8 文）。
+- 生成起因の失敗（空応答・思考のみ・`done_reason=length`）では `num_predict` を倍にして再送します。議論の 3 回目再要求は生成起因の失敗だけに限定し、意味検証の失敗は従来の 2 回までです。
+- `num_predict` は思考トークンも消費します。思考の既定は 議論・人狼相談 = on / 襲撃・占い・投票・CO補正 = off で、リクエスト毎の `think` として Ollama に送ります。再要求（CO補正・軽い再要求・対象選択の再要求）は思考 off に切り替え、プロンプトにも「思考生成（think）はオフ」と実際に送信する生成上限を明記して、指示とリクエストの値を一致させます。
+- 未指定の思考 on 行動では思考残余を確保するため下限へ引き上げます（議論 3072、人狼相談 1536）。player・CLI の明示設定は優先順位上より高いため、下限で上書きしません。
+- 実機で思考が上限を使い切って `done_reason=length` ＋空 content になったモデルは `thinking_budget_exhausted` として記録し、以後そのモデルの思考行動を off に落とします。
+- `think` を受け付けないモデルでは Ollama が HTTP 400 を返します。同じ要求を再送せず、ただちに `think=false` で 1 回だけ再送し、以後の全行動で思考 off にします。
+- 各行動の要求は `num_predict_source`（`player_by_action` / `cli_by_action` / `global_capped` / `player_global` / `cli_global` / `default_by_action` / `thinking_allowance`）と `thinking_source` を記録し、CLI は「行動」「優先元」「think=on|off」を表示します。
+
+## ログ
+
+| ファイル | 内容 |
+|---|---|
+| `logs/game_<id>.jsonl` | 観戦用の公開ログ（公開発言、CO、投票、死亡、襲撃、占い履歴の公開分、勝敗と判定に用いた生存人数） |
+| `logs/game_<id>.private.jsonl` | 管理者用ログ（人狼相談、占い師本人の占い結果、候補集合、プロンプト／生応答の診断メタ、失敗理由、台帳スナップショット、`context_strategy`、`integrity_alerts`、推理メモ、入力トークン量） |
+
+- `--show-private`: 管理者ログを生成し、端末にも秘密情報を表示
+- `--private-log`: 管理者ログだけを生成（端末には表示しません）
+- 公開ログには秘密情報・診断メタデータ・失敗詳細を含めません。管理者ログを共有する場合は取り扱いに注意してください。
+
+## 評価・ベンチマーク
+
+### モデル評価（固定シナリオ）
+
+8 モデル一括ではなく、まず 1〜2 モデルだけ先行実行できます。
+
+```powershell
+python scripts/evaluate_models.py --models muse-glimmer --output evaluation-results/pilot
+python scripts/evaluate_models.py --models glm-4.7 --models calm3 --output evaluation-results/pilot
+python scripts/evaluate_models.py   # 絞り込みなし = 全モデル
+```
+
+- `--models` はモデル名・プレイヤー名の部分一致（大文字小文字無視）で評価対象を絞り込みます。プロンプトは常に 8 人分の名前を使うため、絞り込みしてもゲーム状況は同じです。
+- 主なオプション: `--models-file` / `--output` / `--personality` / `--rounds` / `--timeout` / `--temperature` / `--context-length` / `--max-context-length` / `--no-dynamic-context` / `--num-predict` / `--num-predict-by-action` / `--thinking` / `--thinking-by-action` / `--base-url`
+- 文量の変更効果は出力文字数ではなく、`done_reason` 別（空応答・思考のみ・`done_reason=length`）、生成トークン数（`eval_count`）、生成上限の実解決と出所（`action_budget_key` / `num_predict_source` / `num_predict_by_attempt`）、解析成功率、具体性（`specific_rate`）、実送信回数（`request_attempts`）、処理時間、フォールバック率で比較します。
+- `summary.json` に `models_filter`・`selected_models`・モデル別の `by_action`・思考 on/off 送信数・`thinking_affordable_num_predict` を記録します。`generation_truncated` が多いモデルは上限増の候補、タイムアウトが多いモデルは上限据え置き候補として分けて判定します。
+- Seer CO 比較では CO 成立率・結果公開率・ゲーム内 CO 公開率・フォールバック率を出力します。
+
+### コンテキスト比較ベンチマーク
+
+Ollama サーバーはゲームと同様に直列実行します。`OLLAMA_NUM_PARALLEL=1` を**サーバープロセスの環境**へ設定して再起動してから実行してください。
+
+```powershell
+pip install -e ".[benchmark]"
+python scripts/benchmark_context.py `
+  --models werewolf-calm3-22b-8k `
+  --context-lengths 8192 12288 16384 `
+  --context-strategies full_transcript structured_ledger hybrid_retrieval `
+  --reasoning-memory both `
+  --rounds 10 `
+  --actions discussion `
+  --output evaluation-results/context-benchmark.jsonl
+```
+
+- 同一の固定シナリオ・生成設定でコンテキスト長・戦略・推理メモ on/off を組み合わせ、質問回答率、新しい根拠カテゴリの有無、投票意向の具体性、再試行・フォールバック、入出力トークン、処理時間、CPU/RAM/GPU/VRAM を JSONL に追記します。各試行には要求・実効 `num_ctx`、トークン数、終了理由、応答時間、メモリサンプルが記録されます。
+- 条件を一度だけ固定して実行する場合は `--reasoning-memory off` または `--reasoning-memory on` を指定します（既定は `both` で on/off を別条件として比較します）。
+- GPU 使用率と VRAM は `nvidia-smi` 対応 GPU がある場合のみ記録されます。`ollama ps` の PROCESSOR は CPU/GPU へのロード割当であり使用率そのものではありません。
+- 大きいコンテキスト（例 32k）の採用基準は事先決めします: 最低 10 件の議論で質問回答率・新根拠カテゴリ率・投票意向具体率のいずれかが 10 ポイント以上改善、解析成功率が悪化せず、平均応答時間の増加が 25% 以内。`thinking_present` は記録しますが、Ollama 応答から思考トークンだけを分離して正確に数える値は取得できません。
+- 単一ゲームで条件比較するときは `--seed` とモデル設定を固定し、`--context-strategy` と `--num-ctx` だけを切り替えます。`config/players.json` のプレイヤー別 `num_ctx` を指定値で上書きするには `--override-player-num-ctx` を併用してください。
+
+### Ollama コンテキスト診断
+
+Modelfile の `PARAMETER num_ctx`、Python プロセスの `OLLAMA_CONTEXT_LENGTH`、API リクエスト値、ロード済みモデルの `/api/ps` の CONTEXT/PROCESSOR はそれぞれ別の値です。モデル別の診断結果を JSON に保存できます（`--num-ctx` を省略すると API 要求値は未指定として記録されます）。
 
 ```powershell
 python scripts/diagnose_ollama_context.py
 python scripts/diagnose_ollama_context.py --num-ctx 4096 --output config/ollama_context-4096.json
 ```
 
-コンテキスト変更はOllamaサーバーの環境変数またはAPI要求へ設定し、モデルが既にロード済みならアンロード／再ロードしてください。Modelfileを変更する場合は元モデルを上書きせず、派生モデル名を使います。
+- コンテキストの変更は Ollama サーバーの環境変数または API 要求で設定し、モデルが既にロード済みならアンロード／再ロードして実際の CONTEXT と PROCESSOR を確認してください。
+- 大きいコンテキストを評価する場合は、JSONL の `loaded_context` / `effective_num_ctx` が実際にその値になった環境でのみ評価します。`loaded_context` が `null`（診断時にアンロード済み）や要求より小さい値に丸められた場合は実測とは見なさず、Ollama サーバー設定と利用可能メモリを確認します。サーバーに `OLLAMA_KEEP_ALIVE` と `OLLAMA_NUM_PARALLEL=1` を設定して再起動し、再実行してください。大きいコンテキストはモデル・VRAM で実行可能な場合のみ指定してください。
+
+## 派生モデル（Modelfile）
+
+コンテキスト長を変えたモデルは元モデルを**上書きせず**、派生モデル名で作成します（`modelfiles/` に 8k 派生と 32k 派生の例があります）。同じ重みを使い、既定コンテキストだけを変更します。
 
 ```text
 FROM existing-model:latest
@@ -47,135 +271,46 @@ PARAMETER num_ctx 4096
 
 ```powershell
 ollama create werewolf-existing-model-4k -f Modelfile
+ollama show werewolf-existing-model-4k --modelfile
 ```
 
-## コンテキスト比較ベンチマーク
+量子化済み GGUF モデルを使う場合は「モデル名-量子化方式-コンテキスト長」の形式で登録し、元モデルの派生とは分けて評価します（`PARAMETER num_ctx` の変更は量子化ではなく、Ollama のコンテキスト長設定です）。
 
-Ollamaサーバーはゲームと同様に直列実行し、`OLLAMA_NUM_PARALLEL=1`を設定してから再起動してください（この環境変数はクライアントCLIからではなく、Ollamaサーバープロセスの環境へ設定します）。4096と8192の二層形式率・形式適合率・解析成功率・応答時間・再試行・CPU使用率・Ollamaプロセスメモリ、利用可能ならNVIDIA GPU使用率・VRAMを比較し、結果をJSONLへ追記します。
-
-```powershell
-pip install -e ".[benchmark]"
-python scripts/benchmark_context.py --context-lengths 4096 8192 --rounds 2
-```
-
-結果は`evaluation-results/context-benchmark.jsonl`に保存されます。GPU使用率とVRAMは`nvidia-smi`対応GPUがある場合に記録されます。`ollama ps`のPROCESSORはCPU/GPUへのロード割当であり、使用率そのものではありません。Modelfile設定やサーバー環境変更後はモデルを再ロードし、実際のCONTEXTとPROCESSORを確認してください。
-
-TASK-030では会話コンテキストを`full_transcript`（公開会話全文）、`structured_ledger`（台帳と現在の質問）、`hybrid_retrieval`（直近発言と関連発言。既定）から選べます。比較ベンチマークは同一の固定シナリオ・生成設定でコンテキスト長と戦略を組み合わせ、質問回答率、新しい根拠カテゴリの有無、投票意向の具体性、再試行・フォールバック、入出力トークン、処理時間、CPU/RAM/GPU/VRAMをJSONLに記録します。コンテキスト拡大による改善・残存・新規失敗も比較します。32k以上を採用する基準は事前に固定し、最低10件の議論で質問回答率・新根拠カテゴリ率・投票意向具体率のいずれかが10ポイント以上改善、解析成功率が悪化せず、平均応答時間の増加が25%以内の場合に限ります。`thinking_present`は記録しますが、Ollama応答から思考トークンだけを分離して正確に数える値は取得できません。
-
-TASK-031では、プレイヤー設定の`num_ctx`（要求値）、`max_num_ctx`、`recommended_num_ctx`、`context_strategy`でモデル別の運用値を指定できます。実効値は`/api/ps`から取得できた場合のみ記録し、取得できない場合は未計測のままです。議論プロンプトにはゲームエンジンが公開台帳・投票・発言IDから決定的に更新したプレイヤー別推理メモを付けます。狼相談や占い師本人の結果は本人専用のメモ領域に分離し、他プレイヤーへ共有しません。
-
-コンテキストベンチマークは既定で推理メモoff/onを別条件として比較します。既存の比較コマンドを一度だけ実行する場合は`--reasoning-memory off`または`--reasoning-memory on`を指定してください。出力JSONLの各試行には要求・実効`num_ctx`、トークン数、終了理由、応答時間、メモリサンプルが記録されます。
-
-例としてCALM3のハイブリッド履歴を、8k／12k／16k要求と推理メモoff/onで各10件比較します。32k条件を追加する場合は、JSONLの`effective_num_ctx`が実際に32768となる環境でのみ評価してください。
-
-```powershell
-python scripts\benchmark_context.py --models werewolf-calm3-22b-8k --context-lengths 8192 12288 16384 --context-strategies hybrid_retrieval --reasoning-memory both --rounds 10 --actions discussion --output evaluation-results\task031-calm3-memory-r10.jsonl
-```
-
-```powershell
-ollama create werewolf-calm3-22b-32k -f modelfiles\calm3-22b-32k.Modelfile
-ollama show werewolf-calm3-22b-32k --modelfile
-```
-
-32k派生モデルは8kモデルと同じ重みを使い、既定コンテキストだけを32kに設定します。専用設定`config/players_task030_32k.json`はPlayer 1だけを派生モデルへ切り替え、残りのプレイヤーと議論条件はそのままにします。まず1条件だけ試し、JSONLの`loaded_context`が32768になったことを確認してください。`loaded_context`が`null`の場合はモデルが診断時にアンロード済みです。Ollamaサーバープロセスに`OLLAMA_KEEP_ALIVE=5m`と`OLLAMA_NUM_PARALLEL=1`を設定して再起動し、パイロットを再実行してください。16k以下のままなら32k実測とは見なさず、Ollamaサーバー設定や利用可能メモリを確認します。32kはモデル・VRAMで実行可能な場合のみ指定してください。
-
-```powershell
-python scripts\benchmark_context.py --models-file config\players_task030_32k.json --models werewolf-calm3-22b-32k --context-lengths 32768 --context-strategies hybrid_retrieval --rounds 1 --actions discussion --output evaluation-results\task030-calm3-32k-pilot.jsonl
-```
-
-`loaded_context`が32768と確認できたら、各条件10ラウンドの本比較を実行します。8k側も同じラウンド数で取り直す場合は、既定設定ファイルを使い、モデル名を`werewolf-calm3-22b-8k`、出力先を別ファイルにしてください。単一ゲームを同じ条件で比較するときは`--seed`とモデル設定を固定し、`--context-strategy`と`--num-ctx`だけを切り替えます。`config/players.json`のプレイヤー別`num_ctx`を指定値で上書きするには`--override-player-num-ctx`も付けてください。全履歴モードのプロンプト監査には公開発言のSHA-256、通し発言番号、選択理由、除外範囲が記録され、会話本文や非公開の狼相談・占い結果は診断イベントに含めません。
-
-```powershell
-python scripts\benchmark_context.py --models-file config\players_task030_32k.json --models werewolf-calm3-22b-32k --context-lengths 8192 12288 16384 32768 --context-strategies full_transcript structured_ledger hybrid_retrieval --rounds 10 --actions discussion --output evaluation-results\task030-calm3-32k-r10.jsonl
-```
-
-比較対照の8kモデルも10ラウンドで実行する場合は、32k結果とは別ファイルへ保存します。
-
-```powershell
-python scripts\benchmark_context.py --models-file config\players.json --models werewolf-calm3-22b-8k --context-lengths 8192 12288 16384 --context-strategies full_transcript structured_ledger hybrid_retrieval --rounds 10 --actions discussion --output evaluation-results\task030-calm3-8k-r10.jsonl
-```
-
-## 議論応答形式
-
-新形式は1回の生成でCOと議論本文を分離します。COは公開主張の構造化に使い、会話履歴には本文だけを追加します。旧形式の明示的な文章COも互換のため受け付けます。
-
-二段階COを全プレイヤーに適用して1ゲーム確認する場合は、次のように実行します。全員にCO専用リクエストが追加されるため、従来方式より呼び出し回数・所要時間が増える可能性があります。
-
-```powershell
-python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 20261106 --timeout 180 --discussion-claim-mode all --log-dir evaluation-results/task027-task028-game --private-log
-```
-
-`--discussion-claim-mode candidates`は占い師・CO公開済みプレイヤーを対象とする比較用です。`all`は全員に二段階COを適用します。ログには非公開情報が含まれるため、共有時は取り扱いに注意してください。
-
-公開COと占い結果は`ClaimLedger`で冪等に管理され、同一COの再送は本文から取り除かれます。`all`でもCO判定は同じプレイヤーに毎ターン行わず、初回判定・未公開の新しい占い結果・明示的な訂正要求時に限定します。候補外の襲撃・占い・投票は短い再回答後に合法候補へ補正し、死亡者への回答要求など台帳で修復できる違反は再生成せず`ledger_repair`として記録します。
-
-ゲーム結果JSONLには公開FactLedgerと比較用の`ledger_metrics`（CO呼び出し、実送信・再試行、重複CO、台帳修復、本文保持、質問未回答、処理時間）が含まれます。占い師本人だけの結果、候補集合、生成前後の台帳スナップショットは管理者用の`--private-log`にのみ記録されます。同一シードでモードを比較する場合は、各モードを同じ`--seed`で実行し、JSONLの`discussion_claim_mode`と`ledger_metrics`を比較してください。
-
-CO専用応答では、構造化されたCO／結果行だけを採用し、余分な説明文は議論本文へ混入しないよう破棄します。COなし・保留に誤った結果行が付いた場合も、結果を公開せずCOなし・保留として扱います。`[RESULT] None`・空・`なし`・`未公開`のような「判定を公開しない」表記は結果なしへ正規化し、形式失敗や再試行の原因にしません。占い結果の抽出は`プレイヤー5`や`P5`のような`Player 5`の別称も同じプレイヤーとして認識します。COプロンプトは会話履歴を重ねず、既に記録された公開COと占い師本人の結果だけを渡します。
+## リポジトリ構成
 
 ```text
-【CO】なし または 占い師CO：対象=Player 2、判定=人間、理由=占い結果、投票提案=Player 3へ投票
-【本文】Player 2への疑いは弱めます。Player 3の発言も確認したいです。
+src/werewolf/                ゲームエンジン、プロンプト生成、Ollama クライアント、CO/本文解析、漏えいガード、CLI
+scripts/                     evaluate_models.py（モデル評価） / benchmark_context.py（コンテキスト比較） / diagnose_ollama_context.py（コンテキスト診断）
+config/players.json          プレイヤー 8 体の設定
+modelfiles/                  Ollama 派生モデル定義
+tests/                       pytest（ルール、対象解析、秘匿性、CO、再試行、動的コンテキストの検証）
+logs/                        ゲームログ（公開 / 管理者用）
+evaluation-results/          評価・ベンチマーク結果（JSONL・summary.json）
+SPECIFICATION.md             詳細仕様
 ```
 
-昼議論プロンプトには、確定ルール・ゲーム台帳とは分けて「人狼セオリーカード」を含めます。単独占い師COは1巡目後も対抗がいない場合に限って真寄りと評価し、真確定にはしません。未公開の人狼判定は早期公開を促し、人間判定だけの場合はCO・結果を保留する選択肢も示します。狂人を占っても人間が出るため、人間判定は村人の確定ではないことをルールカード・役職説明・セオリーカード・主張台帳の解釈行に共通認識として明記します。真占い師が未公開の判定を口にした応答はCO行を決定的に補完して受理し（`discussion_claim_deterministically_repaired`）、再試行とフォールバックを避け、フォールバックや修復文は応答言語で書いて本文を保持します。
-
-`config/players.json`ではプレイヤーごとに弱い議論スタイル（分析、質問、慎重、合意形成、直感、主張など）を指定します。個性は昼の議論本文だけに適用し、CO判定や対象選択には適用しません。議論の質・事実整合性・質問回答・形式指示より優先度を下げ、追加の説明や質問を強制しない設定です。
-
-## ラウンド全文＋継続推理メモ方式（TASK-033）
-
-現在の昼議論ラウンドの公開発言を全文で渡し、過去ラウンドはプレイヤーごとの推理メモと確定台帳から引き継ぐ方式です。メタ漏洩・異常発言の警告も、内容を漏らさない安全な要約として次のプレイヤーへ渡します。まずは固定シナリオまたはモックで確認し、実戦ではログの`context_strategy`、`integrity_alerts`、推理メモ、入力トークン量を確認してください。
+## 開発
 
 ```powershell
-python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 20261108 --timeout 240 --discussion-claim-mode candidates --context-strategy round_transcript_memory --log-dir evaluation-results/task033-trial-1 --private-log
+pip install -e ".[test]"
+python -m pytest -q
 ```
 
-この方式の再試行でも現在ラウンド全文と継続メモを維持します。過去ゲーム全体の全文を毎回投入する方式ではないため、モデル別の実効コンテキスト上限を超えにくく、秘匿情報をプレイヤー間で混ぜない構成になっています。推理メモ更新に失敗した場合は直前の有効メモと確定台帳を使ってゲームを継続します。
+Ollama 不要で全フロー検証できるため、CI やローカル負荷なしのテストにもモックモードが使えます。
 
-再試行では失敗理由に応じた修正指示と、直近の公開発言・公開COなど必要な情報だけを再送します。占い師本人の非公開結果は、その占い師の再試行にのみ含めます。モデルごとの生成上限は`config/players.json`のプレイヤー別`num_predict`で調整できます。
+## 安全・再現性の設計
 
-## 行動別の生成上限（num_predict）
+- LLM の出力はゲーム状態へ直接反映せず、必ず「ラベル解析 → 生存者・候補・行動者自身の検証 → 再要求 → 合法候補からのシード付き乱数フォールバック」を通ります。通信エラーは初回を含め最大 3 回（再試行 2 回）まで試行し、モデルが応答しなくてもゲーム全体は停止しません。
+- 投票・占い・襲撃の対象行がない応答も、別称（`プレイヤー3` / `P3`）や最初の行の単一候補名から解決するため、ランダムフォールバックが減ります。
+- プロンプトの案内文の例（プレースホルダ）をそのまま模倣した応答は致命的扱いではなく、台帳修復で該当文・該当行だけ除去し、本文と正当な CO は保持します（幻覚対象を含む結果行・CO 行は公開せず記録します）。
+- 他プレイヤーの役職、占い結果、人狼相談が誤って漏えいしないことをテストで確認しています。
+- 同一乱数シード＋同一モック応答で同一結果が再現できます（実モデルの応答は再現しません）。
 
-議論・人狼相談・襲撃・占い・投票・CO補正で生成上限を分けます。優先順位はplayer行動別 → CLI行動別 → 全体設定 → player全体 → CLI全体 → 行動別既定値です。`--num-predict`を省略すると行動別既定値を使い、`--num-predict-by-action`（複数指定可）で上書きできます。
+## 関連ドキュメント
 
-```powershell
-python src/werewolf/cli.py --mode ollama --num-predict-by-action discussion=1024 --num-predict-by-action vote=256
-```
+- `SPECIFICATION.md` — ゲーム仕様、プロンプト、Ollama 接続、ログと受け入れ条件
+- `PROMPT_TEMPLATES.md` — プロンプトテンプレート
+- `TASKS.md` / `PROJECT_PLAN.md` / `EVALUATION_PLAN.md` — 内部の開発・変更履歴（公開用説明は本 README に集約しています）
 
-player設定では`players.json`の`num_predict_by_action`に行動キーで書けます。キーは`discussion`、`wolf_discussion`（別名`wolf_consult`）、`attack`、`seer`、`vote`（別名`target`）、`co_correction`です。既定値は議論(1536)、人狼相談(768)、襲撃(256)、占い(256)、投票(256)、CO補正(256)です。襲撃・占い・投票・CO補正は最終回答が1行（またはCO最小3行）で済む行動なので、全体`num_predict`が大きい思考系モデルでは上限キャップ（襲撃/占い/投票=768、CO補正=384）へ降ろし、ムダな思考生成による長時間応答を抑制します。議論・人狼相談は根拠を説明できる文量を確保するため全体設定をそのまま使います（昼議論の文量目安は5〜8文）。生成起因の再試行（空応答・思考のみ・`done_reason=length`）では`num_predict`を倍へ増やして再送します。各行動の要求は`llm_request_configuration`へ`action_budget_key`と`num_predict_source`（`player_by_action`、`cli_by_action`、`global_capped`、`player_global`、`cli_global`、`default_by_action`）を記録し、CLI表示にも「行動」「優先元」を出します。
 
-## プレイヤー別の生成サンプリング（temperature等）
 
-幻覚や案内文の模倣を起こすモデルは、`players.json`の`temperature` / `top_p` / `top_k` / `repeat_penalty`でそのプレイヤーだけを安定させます。未指定ならCLI（`--temperature`等）またはモデル既定値が使われ、プレイヤー設定は全体設定より優先されます。許容範囲は`temperature` 0〜2、`top_p` 0〜1、`top_k` 0〜400（整数）、`repeat_penalty` 0〜2です。`game_e2991441d6f0`で幻覚（`プレイヤーX`の占い結果CO）を起こしたPlayer 3（mistral-small）は`temperature 0.25` / `top_p 0.9` / `top_k 20`へ下げました。
-
-## 幻覚・プレースホルダとフォール基準
-
-案内文の例（`Player X` / `人狼/人間`の二者選択表記）はプロンプトから削除し、対象は`Target=<あなたが実際に占ったプレイヤー名>`のような名前slotで示します。応答が案内文をそのまま模倣した場合（`template_placeholder_echo`）は致命的扱いではなく台帳修復で該当文・該当行だけ除去し、本文と正当なCOは保持します（幻覚の対象を含む結果行・CO行は公開せず`hallucinated_template_line_dropped`として記録）。投票・占い・襲撃の対象行がない応答も、別称（`プレイヤー3` / `P3`）や最初の行の単一候補名から解決し、再要求は3回目まで許すためランダムフォールバックを減ります。議論の3回目再要求は生成起因の失敗（空・思考のみ・切り詰め）だけに限定し、意味検証の失敗は従来の2回までの挙動を維持します。
-
-## 思考生成（think）の行動別設定
-
-Ollamaの`num_predict`は思考トークンも消費します。思考系モデルでは、1行で済む行動（襲撃・占い・投票・CO補正）の思考が上限を食い、`done_reason=length`＋空content→再試行、というリトライが大量に発生していました。そこで思考生成を行動別に制御します。
-
-既定方針は議論(思考on)、人狼相談(思考on)、襲撃(思考off)、占い(思考off)、投票(思考off)、CO補正(思考off)です。Ollamaへはリクエスト毎の`think`として送り、アプリのPython環境や他のリクエストには影響しません。優先順位はplayer行動別（`players.json`の`thinking_by_action`）→ CLI行動別（`--thinking-by-action`）→ player全体（`thinking`）→ CLI全体（`--thinking`）→ 行動別既定値です。
-
-設定未指定（行動別既定値を使った場合）の思考on行動では、思考トークンの残余を確保するため下限へ引き上げます（議論3072、人狼相談1536。`num_predict_source=thinking_allowance`）。player・CLIの明示設定は優先順位上より高いため、下限で上書きしません。実機で思考onが上限を思考だけで使い切って`done_reason=length`＋空contentになったモデルは `thinking_budget_exhausted` として記録し、以後そのモデルの思考行動はoffへ落とします（`thinking_source=thinking_budget_exhausted`）。
-
-```powershell
-python src/werewolf/cli.py --mode ollama --thinking-by-action discussion=true --thinking-by-action vote=false
-```
-
-再要求（CO補正・軽い再要求・対象選択の再要求）は、短い必須項目だけを求めるため思考をoffに切り替えます（`thinking_source=retry_thinking_off`）。このときプロンプトにも「思考生成（think）はオフ」と、実際に送信する生成上限（倍へ増やした値）を明記し、指示とリクエストの値を一致させます。`llm_request_configuration`と評価JSONLには`thinking_enabled`・`thinking_source`・試行別の`thinking_by_attempt`を記録し、CLIは`think=on|off (優先元=...)`を表示します。集計側は`thinking_off_requests`・`thinking_retry_off_requests`・`thinking_only_count`・`truncated_count`でモデル別の削減効果を比較できます。
-
-`think`を受け付けないモデルではOllamaがHTTP 400を返します。同じ要求を再送せず、ただちに`think=false`で1回だけ再送し、`thinking_unavailable`イベントと`GameState.model_capabilities`へ記録して、以後の全行動でも思考をoffにします（`thinking_source=model_capability`）。CLIは「思考非対応のためthink=offへ切替」を表示します。
-
-## 評価ハーネスのモデル絞り込みと文量比較
-
-評価は8モデル一括ではなく、まず1〜2モデルだけ先行実行できます。`--models`はモデル名・プレイヤー名の部分一致（大文字小文字無視）で評価対象を絞り、プロンプトは常に8人分の名前を使います。
-
-```powershell
-python scripts/evaluate_models.py --models muse-glimmer --output evaluation-results/task024-disc
-python scripts/evaluate_models.py --models glm-4.7 --models calm3 --output evaluation-results/task024-pilot
-python scripts/evaluate_models.py  # 絞り込みなし＝全8モデル
-```
-
-文量の変更効果は出力文字数ではなく、`done_reason`別（空応答・思考のみ・`done_reason=length`）、生成トークン数（`eval_count`）、生成上限の実解決と出所（`action_budget_key`・`num_predict_source`・`num_predict_by_attempt`）、解析成功率、具体性（`specific_rate`）、実送信回数（`request_attempts`）、処理時間、フォールバック率で比較します。`summary.json`には`models_filter`・`selected_models`・モデル別の`by_action`・思考on/off送信数・`thinking_affordable_num_predict`が記録され、量子化評価と同じ指標でJSONLへ保存されます。`generation_truncated`が多いモデルは上限増の候補、タイムアウトが多いモデルは上限据え置き候補として分けて判定します。

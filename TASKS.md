@@ -1831,3 +1831,8 @@ Day1の初ターンは公開情報が0件なのに、モデルが「昨日の発
   空応答フォールバックが`Pass`にならない、相談フォールバックの応答言語化。
 - `python -m pytest -q` 32件 green。実機試合はローカルLLM負荷のため本タスクでは未実行。
 
+$env:OLLAMA_NUM_PARALLEL="1"
+$env:OLLAMA_KEEP_ALIVE = "5m"
+ollama serve
+
+python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 1001 --timeout 180 --temperature 0.7 --question-hint-mode none --show-private --language Japanese 
