@@ -1,4 +1,5 @@
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -7,6 +8,15 @@ from .config import (
     ACTION_BUDGET_KEYS,
     GENERATION_SAMPLING_BOUNDS,
     normalize_personality_profile,
+)
+from .discussion_novelty import DiscussionTopicLedger
+from .hypothesis_ledger import (
+    REFUTATION_SUPERSEDED,
+    STATEMENT_MAX_CHARS,
+    VISIBILITY_PRIVATE,
+    HypothesisLedger,
+    confidence_from_text,
+    stance_of_sentence,
 )
 
 
@@ -421,6 +431,13 @@ class GameState:
     winner_counts: dict[str, int] = field(default_factory=dict)
     claim_ledger: ClaimLedger = field(default_factory=ClaimLedger)
     fact_ledger: FactLedger = field(default_factory=FactLedger)
+    # TASK-047: 未確定解釈（仮説・矛盾・反証）は確定事実台帳とは別台帳で保持する
+    hypothesis_ledger: HypothesisLedger = field(default_factory=HypothesisLedger)
+    # TASK-048: 既出論点（主張・質問・回答・投票提案・立場）の台帳。次ターンの
+    # 「既出論点の要約」に使い、連呼と正当な繰り返しを区別する（観測のみ・強制しない）。
+    topic_ledger: DiscussionTopicLedger = field(default_factory=DiscussionTopicLedger)
+    # TASK-048: 低新規性時の処理ポリシー（"publish" / "append" / "legacy_repair"）。既定 publish。
+    novelty_policy: str = "publish"
     action_candidate_sets: dict[str, ActionCandidateSet] = field(default_factory=dict)
     discussion_claim_checks: set[tuple[int, str]] = field(default_factory=set)
     ledger_snapshots: list[LedgerSnapshot] = field(default_factory=list)
@@ -522,39 +539,31 @@ class GameState:
 
     def refresh_reasoning_memos(self) -> None:
         """Refresh actor-specific notes using public state and actor-owned secrets only."""
+        # TASK-047: 確定事実・公開主張は本文を再掲せずIDだけ渡す。同じID付きの本文は
+        # [CLAIM_LEDGER] に1回だけ存在するため、同じ証拠の重複提示が省ける。
         public_facts = [
-            f"[fact:{fact.day}:{index}] {fact.description}"
+            f"[fact:{fact.day}:{index}]"
             for index, fact in enumerate(self.fact_ledger.confirmed_facts, 1)
             if fact.visibility == "public"
+            # TASK-047: 死亡・投票は [death:*] / [vote:*] のIDで1回だけ提示する
+            and fact.kind not in {"attack_death", "execution", "vote"}
         ]
         public_facts.extend(
-            f"[vote:{day}:{'runoff' if runoff else 'initial'}:{voter}] "
-            f"{voter} voted for {target}"
+            f"[vote:{day}:{'runoff' if runoff else 'initial'}:{voter}]"
             for day, runoff, votes in self.vote_history
             for voter, target in votes.items()
         )
         public_facts.extend(
-            f"[death:attack:{day}:{player}] {player} died in an attack"
-            for day, player in self.attack_deaths
+            f"[death:attack:{day}:{player}]" for day, player in self.attack_deaths
         )
         public_facts.extend(
-            f"[death:execution:{day}:{player}] {player} was executed"
-            for day, player in self.executions
+            f"[death:execution:{day}:{player}]" for day, player in self.executions
         )
         public_claims = [
-            f"[claim:{index}] Day {claim.day}: {claim.claimant} publicly claimed "
-            f"{claim.claimed_role}"
-            + (
-                f"; {claim.target}={claim.result}"
-                if claim.target is not None and claim.result is not None
-                else ""
-            )
-            + " (unverified)"
-            for index, claim in enumerate(self.public_role_claims, 1)
+            f"[claim:{index}]" for index, claim in enumerate(self.public_role_claims, 1)
         ]
         public_claims.extend(
-            f"[seer_claim:{index}] Day {claim.day}: {claim.claimant} publicly "
-            f"claimed {claim.target}={claim.result} (unverified)"
+            f"[seer_claim:{index}]"
             for index, claim in enumerate(self.seer_claims, 1)
             if claim.target is not None and claim.result is not None
         )
@@ -576,40 +585,56 @@ class GameState:
         for message in self.conversation_log:
             if message.speaker != "system":
                 speech_records.append((len(speech_records) + 1, message))
+        # TASK-047: 死亡者への質問は回答不能なので、未回答項目には注記して渡す
+        dead_names_for_notes = frozenset(
+            player.name for player in self.players if not player.is_alive
+        )
 
         for player in self.players:
             unresolved: list[str] = []
-            for position, (speech_id, message) in enumerate(speech_records):
-                if message.speaker == player.name:
-                    continue
-                is_question = (
-                    "?" in message.content
-                    or "？" in message.content
-                    or any(
-                        cue in message.content
-                        for cue in (
-                            "質問",
-                            "聞きたい",
-                            "確認したい",
-                            "教えて",
-                            "question",
-                            "ask",
-                            "tell me",
-                            "check",
+            # TASK-047: 死亡者宛の質問は未回答のまま永久に提示しない（回答不能な未解決項目は
+            # プロンプト生成前に解決済みとし、死亡者への質問誘導を作らない）。
+            if player.is_alive:
+                for position, (speech_id, message) in enumerate(speech_records):
+                    if message.speaker == player.name:
+                        continue
+                    is_question = (
+                        "?" in message.content
+                        or "？" in message.content
+                        or any(
+                            cue in message.content
+                            for cue in (
+                                "質問",
+                                "聞きたい",
+                                "確認したい",
+                                "教えて",
+                                "question",
+                                "ask",
+                                "tell me",
+                                "check",
+                            )
                         )
                     )
-                )
-                addresses_player = (
-                    player.name in message.content
-                )
-                later_reply = any(
-                    later.speaker == player.name
-                    for _, later in speech_records[position + 1 :]
-                )
-                if is_question and addresses_player and not later_reply:
-                    unresolved.append(
-                        f"[speech:{speech_id}] Unanswered question from {message.speaker}"
+                    addresses_player = (
+                        player.name in message.content
                     )
+                    later_reply = any(
+                        later.speaker == player.name
+                        for _, later in speech_records[position + 1 :]
+                    )
+                    if is_question and addresses_player and not later_reply:
+                        dead_reference = next(
+                            (name for name in dead_names_for_notes if name in message.content),
+                            None,
+                        )
+                        note = (
+                            " (dead players cannot answer; ask living players about the record instead)"
+                            if dead_reference
+                            else ""
+                        )
+                        unresolved.append(
+                            f"[speech:{speech_id}] Unanswered question from {message.speaker}{note}"
+                        )
 
             next_targets = [
                 target
@@ -686,6 +711,138 @@ class GameState:
         memo.model_memo_history.append(reasoning_text.strip())
         if len(memo.model_memo_history) > memo.MODEL_MEMO_HISTORY_LIMIT:
             memo.model_memo_history = memo.model_memo_history[-memo.MODEL_MEMO_HISTORY_LIMIT:]
+
+    def _speech_id_for(self, speaker: str, content: str) -> str:
+        """発言の証拠ID（reasoning memo の `[speech:N]` と同じ番号）を返す。"""
+        index = 0
+        for message in self.conversation_log:
+            if message.speaker == "system":
+                continue
+            index += 1
+            if message.speaker == speaker and message.content == content:
+                return f"[speech:{index}]"
+        return f"[speech:{index}]"
+
+    def record_hypotheses_from_speech(
+        self, speaker: str, content: str | None, day: int, turn: int
+    ) -> int:
+        """公開発言から未確定解釈（疑い・信頼）だけを仮説台帳へ登録する。
+
+        確定事実（死亡・投票・CO・占い結果の公開）は FactLedger 側が持つため、
+        ここでは発言の解釈だけを `evidence_ids` 付きで登録する。同じ立場・本文の
+        再掲は台帳側で統合され、新しいレコードは作らない。
+        """
+        if not isinstance(content, str) or not content.strip():
+            return 0
+        evidence_id = self._speech_id_for(speaker, content)
+        confidence = confidence_from_text(content)
+        created = 0
+        for sentence in re.split(r"(?<=[。！？!?])\s*|\n+", content):
+            if created >= 4:
+                break
+            stance = stance_of_sentence(sentence)
+            if stance is None:
+                continue
+            for player in self.players:
+                if player.name == speaker or player.name not in sentence:
+                    continue
+                if created >= 4:
+                    break
+                created += int(
+                    self.hypothesis_ledger.record(
+                        subject=player.name,
+                        actor=speaker,
+                        day=day,
+                        turn=turn,
+                        stance=stance,
+                        statement=sentence.strip()[:STATEMENT_MAX_CHARS],
+                        evidence_ids=[evidence_id],
+                        confidence=confidence,
+                    )
+                )
+        return created
+
+    def record_hypotheses_from_reasoning_memo(
+        self, actor_name: str, memo_text: str | None, day: int, turn: int
+    ) -> int:
+        """モデル自身の推理メモから仮説を登録する（本人だけの私的仮説として扱う）。"""
+        if not isinstance(memo_text, str) or not memo_text.strip():
+            return 0
+        evidence_id = f"[memo:{actor_name}-day-{day}-turn-{turn}]"
+        confidence = confidence_from_text(memo_text)
+        created = 0
+        for sentence in re.split(r"(?<=[。！？!?])\s*|\n+", memo_text):
+            if created >= 4:
+                break
+            stance = stance_of_sentence(sentence)
+            if stance is None:
+                continue
+            for player in self.players:
+                if player.name == actor_name or player.name not in sentence:
+                    continue
+                if created >= 4:
+                    break
+                created += int(
+                    self.hypothesis_ledger.record(
+                        subject=player.name,
+                        actor=actor_name,
+                        day=day,
+                        turn=turn,
+                        stance=stance,
+                        statement=sentence.strip()[:STATEMENT_MAX_CHARS],
+                        evidence_ids=[evidence_id],
+                        confidence=confidence,
+                        visibility=VISIBILITY_PRIVATE,
+                    )
+                )
+        return created
+
+    def resolve_hypothesis_ledger(self) -> None:
+        """プロンプト生成前に死亡者参照・反証・重複COの矛盾を台帳へ反映する。"""
+        self.hypothesis_ledger.resolve(self)
+
+    def render_hypotheses_for(self, actor_name: str) -> tuple[str, dict[str, object]]:
+        """本人向けの仮説台帳（短縮版）と診断情報を返す。"""
+        return self.hypothesis_ledger.render_for(actor_name)
+
+    def snapshot_hypothesis_presentation(self, actor_name: str) -> None:
+        """このターンで本人へ提示した仮説状態を記録する（次ターンの差分基準）。"""
+        self.hypothesis_ledger.snapshot_presentation(actor_name)
+
+    def record_topics_from_speech(
+        self, speaker: str, content: str | None, day: int, turn: int
+    ) -> int:
+        """公開発言から既出論点（主張・質問・回答・投票提案・立場）を台帳へ登録する。
+
+        本文の再掲はせず、短縮本文＋`[speech:N]` IDで保持する。同じ論点の再掲は
+        seen を増やして統合し、新根拠を伴う再確認は正当な繰り返しとして数える。
+        """
+        if not isinstance(content, str) or not content.strip():
+            return 0
+        return self.topic_ledger.record_speech(
+            speaker=speaker,
+            content=content,
+            day=day,
+            turn=turn,
+            speech_id=self._speech_id_for(speaker, content),
+            player_names=tuple(player.name for player in self.players),
+        )
+
+    def topic_summary_for(self, actor_name: str, day: int) -> tuple[str, dict[str, object]]:
+        """次ターンへ渡す既出論点の要約（観測のみ・1ブロックだけ）を返す。"""
+        return self.topic_ledger.summarize_for(actor_name, day)
+
+    def own_stances_for(self, actor_name: str) -> dict[str, str]:
+        """本人がこれまでに取った立場（対象→立場）を返す（立場変更の計測基準）。"""
+        stances: dict[str, str] = {}
+        for record in self.hypothesis_ledger.records.values():
+            if (
+                record.generated_by != actor_name
+                or record.refutation_status == REFUTATION_SUPERSEDED
+            ):
+                continue
+            stances[record.subject] = record.stance
+        return stances
 
     def snapshot_ledgers(
         self, boundary: str, action: str, actor: str

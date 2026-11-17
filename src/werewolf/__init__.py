@@ -25,7 +25,7 @@ from .config import (
     validate_thinking_by_action,
 )
 from .action_parser import ActionKind, ActionParser
-from .engine import ActionPolicy, GameEngine, MockActions
+from .engine import ActionPolicy, GameEngine, MockActions, UNVERIFIED_HYPOTHESIS_AS_FACT
 from .llm_actions import (
     ACTION_BUDGET_KEY_ALIASES,
     ACTION_BUDGET_RESOLUTION_PRIORITY,
@@ -35,6 +35,22 @@ from .llm_actions import (
     normalize_action_budget_key,
     resolve_action_num_predict,
     resolve_thinking,
+)
+from .hypothesis_ledger import (
+    ContradictionPair,
+    HypothesisLedger,
+    HypothesisRecord,
+)
+from .discussion_novelty import (
+    DEFAULT_NOVELTY_POLICY,
+    NOVELTY_CLASSES,
+    NOVELTY_MEASURED_ISSUES,
+    NOVELTY_POLICIES,
+    DiscussionTopicLedger,
+    NoveltyResult,
+    TopicRecord,
+    classify_novelty,
+    normalize_novelty_policy,
 )
 from .models import (
     ActionCandidateSet,
@@ -74,6 +90,19 @@ __all__ = [
     "FactLedger",
     "GameState",
     "GameEngine",
+    "HypothesisLedger",
+    "HypothesisRecord",
+    "ContradictionPair",
+    "DiscussionTopicLedger",
+    "TopicRecord",
+    "NoveltyResult",
+    "classify_novelty",
+    "normalize_novelty_policy",
+    "DEFAULT_NOVELTY_POLICY",
+    "NOVELTY_CLASSES",
+    "NOVELTY_POLICIES",
+    "NOVELTY_MEASURED_ISSUES",
+    "UNVERIFIED_HYPOTHESIS_AS_FACT",
     "ActionKind",
     "ActionParser",
     "ActionTrace",

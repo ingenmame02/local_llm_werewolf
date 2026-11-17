@@ -109,6 +109,7 @@ ollama serve
 | `--discussion-claim-mode {legacy,candidates,all}` | `legacy` | 議論 CO の生成方式（旧来併走／候補のみ二段階／全員二段階） |
 | `--context-strategy {...}` | `hybrid_retrieval` | 議論に渡す履歴の構成（後述） |
 | `--question-hint-mode {strict,soft,none}` | `soft` | 直前の質問への回答指示の強さ。`soft` は観測のみ／`strict` は旧来（1文目ルール＋1回再生成）／`none` は質問欄も指示も出しません |
+| `--novelty-policy {publish,append,legacy_repair}` | `publish` | 低新規性（既出論点の連呼）時の処理。`publish` は本文をそのまま公開（再生成・文の除去なし）／`append` は本文を保持し未論点への短い任意の追記要求のみ／`legacy_repair` は旧挙動（重複文の除去＋1回の意味的再要求・A/B比較用） |
 | `--language {English,Japanese}` | 設定／日本語 | 応答言語 |
 | `--personality {…profiles…,free}` | 設定そのまま | 全プレイヤーの個性プロファイルを上書き。`free` は自由発言モード（話し方の preset なし） |
 | `--log-dir DIR` | `logs` | JSONL ログの出力先 |

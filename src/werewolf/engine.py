@@ -199,8 +199,12 @@ _REPAIRABLE_REASONS = frozenset(
         "unverified_past_vote_reference",
         "external_game_memory",
         "invalid_target",
-        "repeated_discussion_topic",
+        # TASK-048: 論点の再掲は修復対象から外した（警告＋新規性計測のみ・本文はそのまま公開）
+        # 旧挙動との比較は novelty_policy="legacy_repair" で行える。
+        # "repeated_discussion_topic",
         # TASK-043: プロンプトの案内文・プレースホルダの模倣は致命的ではなく、
+        # 該当文の除去で修復できる（幻覚の占い結果を公開しない）。
+        "template_placeholder_echo",
         # 該当文の除去で修復できる（幻覚の占い結果を公開しない）。
         "template_placeholder_echo",
     }
@@ -246,6 +250,47 @@ def _asserts_dead_role_as_fact(text: str | None, dead_names: frozenset[str]) -> 
         ):
             return True
     return False
+
+
+# TASK-047: 未確定の仮説を「確定事実」として断定した発言の検出。修復や再生成は行わず
+# 警告のみとする（論点・口調・結論はモデルの選択のまま、評価ログで再掲率を測る）。
+UNVERIFIED_HYPOTHESIS_AS_FACT = "unverified_hypothesis_as_fact"
+
+_CERTAINTY_CUE = re.compile(
+    r"(?:確定|確実に|間違いなく|断定|断定する)"
+    r"|(?:\bdefinitely\b|\bcertainly\b|\bfor sure\b|\bconfirmed\b|\bundeniably\b|\bproven\b)",
+    re.IGNORECASE,
+)
+_ROLE_CUE = re.compile(
+    r"(?:人狼|狼|占い師|村人|狂人)|(?:werewolf|wolf|seer|villager|madman)",
+    re.IGNORECASE,
+)
+
+
+def _asserts_unverified_role_as_fact(
+    text: str | None, state: GameState
+) -> tuple[str, ...]:
+    """生存者の役職を台帳の裏付けなしに断定している文を検出する（未確定仮説の確定化）。"""
+    if not isinstance(text, str) or not text:
+        return ()
+    alive = frozenset(state.alive_players)
+    confirmed_text = " ".join(
+        fact.description
+        for fact in state.fact_ledger.confirmed_facts
+        if fact.visibility == "public"
+    )
+    hits: list[str] = []
+    for sentence in split_sentences(text):
+        if _CERTAINTY_CUE.search(sentence) is None or _ROLE_CUE.search(sentence) is None:
+            continue
+        mentioned = [name for name in alive if name in sentence]
+        if not mentioned:
+            continue
+        if any(name in confirmed_text for name in mentioned):
+            # 台帳の確定事実が裏付けになっている場合は指摘しない
+            continue
+        hits.append(sentence)
+    return tuple(hits)
 
 
 def _references_external_game_memory(text: str | None) -> bool:
@@ -373,6 +418,10 @@ def diagnose_discussion_body(
             fatal = True
 
     if not fatal:
+        # TASK-047: 未確定仮説の確定化は警告のみ（本文はそのまま公開し、修復・再生成しない）
+        if _asserts_unverified_role_as_fact(stripped, state):
+            warning = True
+            reasons.append(UNVERIFIED_HYPOTHESIS_AS_FACT)
         if _references_dead_player(stripped, dead_names):
             if _asks_question(stripped) and any(
                 name in stripped for name in dead_names
@@ -418,8 +467,11 @@ def diagnose_discussion_body(
             repairable = hint_mode == QUESTION_HINT_STRICT
             warning = warning or not repairable
         elif find_repeated_topic(stripped, round_transcript):
+            # TASK-048: 論点の再掲は致命的でも修復対象でもなく「品質警告＋新規性の計測」。
+            # 本文はそのまま公開し、文の除去・再生成・定型文の挿入を行わない。
+            # （同一論点の連呼と、新根拠を伴う正当な繰り返しは llm_actions 側で区別する）
             reasons.append("repeated_discussion_topic")
-            repairable = True
+            warning = True
 
     if not fatal and not repairable and _is_redundant_body(stripped, round_transcript):
         warning = True
@@ -872,6 +924,8 @@ class GameEngine:
         for turn in range(1, 4):
             self.state.discussion_turn = turn
             self.state.begin_discussion_turn()
+            # TASK-047: ターン開始時に仮説台帳の死亡者参照・反証・重複CO矛盾を解決する
+            self.state.resolve_hypothesis_ledger()
             for player in self.state.players:
                 if not player.is_alive:
                     continue
@@ -1108,11 +1162,28 @@ class GameEngine:
                         self._append_discussion_message(Message(player.name, body))
                         self._record_model_inference(player.name, body)
                         self._record_public_speech_memory(player, body)
+                        # TASK-047: 公開発言から未確定解釈だけを仮説台帳へ登録する
+                        self.state.record_hypotheses_from_speech(
+                            player.name,
+                            extract_discussion_body(body) or body,
+                            self.state.day,
+                            turn,
+                        )
+                        self.state.snapshot_hypothesis_presentation(player.name)
+                        # TASK-048: 既出論点台帳へ論点（主張・質問・回答・投票提案）を登録し、
+                        # 次ターンの要約に使う（本文の再掲はしない）。
+                        self.state.record_topics_from_speech(
+                            player.name, extract_discussion_body(body) or body, self.state.day, turn
+                        )
                     # モデル推理メモの抽出・保存（discussion_bodyパス）
                     raw_body_for_reasoning = body
                     reasoning_memo = extract_reasoning_memo(raw_body_for_reasoning)
                     if reasoning_memo:
                         self.state.store_model_reasoning_memo(player.name, reasoning_memo)
+                        # 本人限定の私的仮説として台帳へ登録する（他プレイヤーには渡さない）
+                        self.state.record_hypotheses_from_reasoning_memo(
+                            player.name, reasoning_memo, self.state.day, turn
+                        )
                 else:
                     self.state.snapshot_ledgers("before", "discussion", player.name)
                     content = self.actions.discuss(
@@ -1176,6 +1247,22 @@ class GameEngine:
                                 Message(player.name, body)
                             )
                             self._record_model_inference(player.name, body)
+                            # TASK-047: マーカーなしの自由本文（legacy応答）からも未確定解釈を
+                            # 台帳へ登録する。確定事実の登録は行わない。
+                            self.state.record_hypotheses_from_speech(
+                                player.name,
+                                extract_discussion_body(body) or body,
+                                self.state.day,
+                                turn,
+                            )
+                            self.state.snapshot_hypothesis_presentation(player.name)
+                            # TASK-048: legacy応答の自由本文からも既出論点を登録する。
+                            self.state.record_topics_from_speech(
+                                player.name,
+                                extract_discussion_body(body) or body,
+                                self.state.day,
+                                turn,
+                            )
                     else:
                         publication = _ClaimPublication()
                         if structured_output.claim not in {"none", "hold"}:
@@ -1255,6 +1342,15 @@ class GameEngine:
                             )
                             self._record_model_inference(player.name, body)
                             self._record_public_speech_memory(player, body)
+                            # TASK-047: 公開発言から未確定解釈だけを仮説台帳へ登録する
+                            self.state.record_hypotheses_from_speech(
+                                player.name, body, self.state.day, turn
+                            )
+                            self.state.snapshot_hypothesis_presentation(player.name)
+                            # TASK-048: 既出論点台帳へ登録（次ターンの要約・連呼計測に使う）
+                            self.state.record_topics_from_speech(
+                                player.name, body, self.state.day, turn
+                            )
                     # モデル推理メモの抽出・保存（structured outputパス）
                     reasoning_memo = None
                     if structured_output is not None and structured_output.reasoning:
@@ -1263,6 +1359,10 @@ class GameEngine:
                         reasoning_memo = extract_reasoning_memo(content)
                     if reasoning_memo:
                         self.state.store_model_reasoning_memo(player.name, reasoning_memo)
+                        # 本人限定の私的仮説として台帳へ登録する（他プレイヤーには渡さない）
+                        self.state.record_hypotheses_from_reasoning_memo(
+                            player.name, reasoning_memo, self.state.day, turn
+                        )
                 if self.state.reasoning_memory_enabled:
                     self.state.refresh_reasoning_memos()
         self.state.phase = Phase.VOTING

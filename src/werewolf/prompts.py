@@ -1054,6 +1054,7 @@ class PromptBuilder:
             record for record in records if int(record["index"]) in selected
         ]
         evidence_dropped: list[int] = []
+        dropped_indices: set[int] = set()
         mandatory_reasons = {
             "current_question_context",
             "latest_utterance",
@@ -1074,8 +1075,6 @@ class PromptBuilder:
                     int(record["index"]),
                 ),
             )
-            dropped_indices: set[int] = set()
-
             def evidence_chars() -> int:
                 return sum(
                     len(
@@ -1121,6 +1120,26 @@ class PromptBuilder:
             else:
                 excluded_ranges.append([index, index])
 
+        # TASK-046: 必須証拠（現在の質問・直近発言・公開CO台帳・直近保護・全文台帳）と
+        # 予算削除で除外した証拠の詳細を別々に記録する。「何を落としたか」を数値だけでなく
+        # 検証可能にし、必須証拠の保持率（retention）は設計上常に 1.0 のはずだが、
+        # 実測値として記録して_regressionで確認できる。発言の論点・口調には干渉しない。
+        required_indices = sorted(
+            index for index in reasons if reasons[index] & mandatory_reasons
+        )
+        required_kept = [index for index in required_indices if index in selected]
+        dropped_detail = [
+            {
+                "index": int(record["index"]),
+                "day": int(record["day"]),
+                "turn": int(record["turn"]),
+                "speaker": str(record["speaker"]),
+                "reasons": sorted(reasons.get(int(record["index"]), set())),
+            }
+            for record in records
+            if int(record["index"]) in dropped_indices
+        ]
+
         diagnostics: dict[str, object] = {
             "context_strategy": context_strategy,
             "round_transcript": context_strategy == "round_transcript_memory",
@@ -1135,63 +1154,141 @@ class PromptBuilder:
             "evidence_char_budget": char_budget,
             "evidence_char_count": sum(len(line) for line in lines),
             "evidence_dropped_indices": evidence_dropped,
+            # TASK-046: 必須証拠の保持率と、圧縮で落とされた発言の識別情報。
+            "required_event_indices": required_indices,
+            "required_events_kept": required_kept,
+            "required_evidence_retention": (
+                round(len(required_kept) / len(required_indices), 4)
+                if required_indices
+                else 1.0
+            ),
+            "dropped_events_detail": dropped_detail,
+            "compression_stage": (
+                "evidence_budget_compressed" if evidence_dropped else "full"
+            ),
         }
         return "\n".join(lines), diagnostics
 
     @staticmethod
-    def _inference_ledger_text(state: GameState | None) -> str:
-        """モデル発言由来の推測（未確認）だけを返す（TASK-043: 議論の事実重複を省く）。"""
-        inference_ledger = (
-            [
-                json.dumps(fact.description, ensure_ascii=False)
-                for fact in state.fact_ledger.model_inferences[-6:]
-            ]
-            if state is not None
-            else []
-        )
+    def _inference_ledger_text(
+        state: GameState | None, actor: Player | None = None
+    ) -> str:
+        """モデル発言由来の推測（未確認）だけを返す（TASK-043: 議論の事実重複を省く）。
+
+        TASK-047: 発言全文をそのまま再掲せず、仮説台帳の要約（立場・短縮本文・証拠ID）へ
+        置き換える。全文は [CONVERSATION_EVIDENCE] に既に存在するため重複にならない。
+        """
+        if state is None:
+            return "- Player Speech & Inferences (Unverified): None\n"
+        summary = ""
+        if actor is not None:
+            summary = state.hypothesis_ledger.summary_for(actor.name)
+        if summary:
+            return f"- Player Speech & Inferences (Unverified): {summary}\n"
+        inference_ledger = [
+            json.dumps(fact.description[:120], ensure_ascii=False)
+            for fact in state.fact_ledger.model_inferences[-6:]
+        ]
         return f"- Player Speech & Inferences (Unverified): {' / '.join(inference_ledger) or 'None'}\n"
+
+    @staticmethod
+    def _hypothesis_section(
+        state: GameState | None, actor: Player, day: int
+    ) -> tuple[str, dict[str, object]]:
+        """未確定解釈台帳の本人向け欄を作る（確定事実の欄とは別に出す）。
+
+        プロンプト生成前に死亡者参照・未公開情報の参照・矛盾を解決してから描画する。
+        結論・口調・論点の強制指示は追加しない（参考情報としての提示のみ）。
+        """
+        if state is None:
+            return "", {}
+        state.resolve_hypothesis_ledger()
+        block, diagnostics = state.render_hypotheses_for(actor.name)
+        if not block:
+            return "", diagnostics
+        return f"[HYPOTHESIS_LEDGER]\n{block}\n\n", diagnostics
+
+    @staticmethod
+    def _topic_summary_section(
+        state: GameState | None, actor: Player, day: int
+    ) -> tuple[str, dict[str, object]]:
+        """既出論点の要約欄を作る（TASK-048: 観測のみ・論点や口調の強制しない）。
+
+        直近の議論から主張・質問・回答・投票提案を軽量抽出した台帳を、1セクション・
+        1回だけ添える。本文の再掲はせず `[speech:N]` IDで参照するため、コンテキストの
+        重複増を避けられる。連呼の抑制は「この論点を避ける」という指示ではなく、
+        既出状態の提示としてだけ行う（新根拠を添えた再確認は正当な繰り返し）。
+        """
+        if state is None:
+            return "", {}
+        block, diagnostics = state.topic_summary_for(actor.name, day)
+        if not block:
+            return "", diagnostics
+        return f"[PREVIOUS_TOPICS]\n{block}\n\n", diagnostics
 
     @staticmethod
     def _discussion_claim_ledger(state: GameState | None) -> str:
         if state is None:
             return "(No ledger)"
-        claims = [
-            f"Day {claim.day}: {claim.claimant} claims "
-            f"{ROLE_NAMES_EN.get(Role(claim.claimed_role), claim.claimed_role)} (unverified)"
-            + (
-                f"; {claim.target}={('Werewolf' if claim.result == 'wolf' else 'Human')}"
-                if claim.target is not None and claim.result is not None
-                else ""
+        # TASK-047: 各行に証拠IDを付与する（CONTINUITY_MEMO・HYPOTHESIS_LEDGERは同じIDで
+        # 本文を参照するため、同じ証拠の再掲を省ける）。占い結果は [seer_claim:N] が既に
+        # 持つのでCO行の判定重複は統合し、死亡・投票は FactLedger の重複記述をスキップする。
+        seer_verdicts = {
+            (claim.claimant, claim.target, claim.result)
+            for claim in state.seer_claims
+            if claim.target is not None and claim.result is not None
+        }
+        claims = []
+        for index, claim in enumerate(state.public_role_claims, 1):
+            line = (
+                f"- Public Claim [claim:{index}] Day {claim.day}: {claim.claimant} claims "
+                f"{ROLE_NAMES_EN.get(Role(claim.claimed_role), claim.claimed_role)} (unverified)"
             )
-            for claim in state.public_role_claims
-        ]
+            if (
+                claim.target is not None
+                and claim.result is not None
+                and (claim.claimant, claim.target, claim.result) not in seer_verdicts
+            ):
+                line += (
+                    f"; {claim.target}={('Werewolf' if claim.result == 'wolf' else 'Human')}"
+                )
+            claims.append(line)
         facts = [
-            f"Day {fact.day}: {fact.description}"
-            for fact in state.fact_ledger.confirmed_facts
+            f"- Confirmed Fact [fact:{fact.day}:{index}] Day {fact.day}: {fact.description}"
+            for index, fact in enumerate(state.fact_ledger.confirmed_facts, 1)
             if fact.visibility == "public"
+            and fact.kind not in {"attack_death", "execution", "vote"}
         ]
         facts.extend(
-            f"Day {vote_day} {'Runoff' if runoff else 'Regular'} vote: "
-            + " / ".join(f"{voter}->{target}" for voter, target in votes.items())
+            f"- Confirmed Fact Day {vote_day} {'Runoff' if runoff else 'Regular'} vote: "
+            + " / ".join(
+                f"[vote:{vote_day}:{'runoff' if runoff else 'initial'}:{voter}] "
+                f"{voter}->{target}"
+                for voter, target in votes.items()
+            )
             for vote_day, runoff, votes in state.vote_history
         )
         facts.extend(
-            f"Day {death_day}: {player} {event}"
-            for event, death_day, player in (
-                [("killed in attack", day, player) for day, player in state.attack_deaths]
-                + [("executed", day, player) for day, player in state.executions]
-            )
+            f"- Confirmed Fact [death:attack:{death_day}:{player}] "
+            f"Day {death_day}: {player} killed in attack"
+            for death_day, player in state.attack_deaths
+        )
+        facts.extend(
+            f"- Confirmed Fact [death:execution:{death_day}:{player}] "
+            f"Day {death_day}: {player} executed"
+            for death_day, player in state.executions
         )
         public_seer_results = [
-            f"Day {claim.day}: {claim.claimant} publicly claimed {claim.target} is "
+            f"- Public Seer Result [seer_claim:{index}] Day {claim.day}: {claim.claimant} "
+            f"publicly claimed {claim.target} is "
             f"{'Werewolf' if claim.result == 'wolf' else 'Human'} (unverified)"
-            for claim in state.seer_claims
+            for index, claim in enumerate(state.seer_claims, 1)
             if claim.target is not None and claim.result is not None
         ]
         lines = [
-            *(f"- Confirmed Fact: {fact}" for fact in facts),
-            *(f"- Public Claim: {claim}" for claim in claims),
-            *(f"- Public Seer Result: {result}" for result in public_seer_results),
+            *facts,
+            *claims,
+            *public_seer_results,
         ]
         if public_seer_results:
             lines.append(
@@ -1393,8 +1490,10 @@ class PromptBuilder:
         if memo is None:
             memo = ReasoningMemo()
         payload = {
-            "confirmed_public_facts": memo.confirmed_facts,
-            "unverified_public_claims": memo.public_claims,
+            # TASK-047: 確定事実・公開主張の本文は [CLAIM_LEDGER] に1回だけ存在する。
+            # ここはIDのみ渡し、同じ証拠の再掲を省く（追跡性はIDで維持される）。
+            "confirmed_fact_ids": memo.confirmed_facts,
+            "public_claim_ids": memo.public_claims,
             "suspicion_ranking_from_public_votes": memo.suspicion_ranking,
             "unanswered_questions": memo.unresolved_questions,
             "next_targets_to_check": memo.next_targets,
@@ -1423,7 +1522,8 @@ class PromptBuilder:
         return (
             "[CONTINUITY_MEMO: Decisively Updated Reasoning State]\n"
             "Derived from public info. Distinguish confirmed facts from unverified claims and quote evidence IDs. "
-            "Do not assert guesses as facts.\n"
+            "Do not assert guesses as facts. Fact and claim text lives in [CLAIM_LEDGER] under the same IDs; "
+            "refer to those IDs instead of restating them.\n"
             f"{json.dumps(payload, ensure_ascii=False)}\n"
             "[INTEGRITY_ALERTS]\n"
             "Alerts for unusual public speech. Do not confirm true roles solely on alerts; inspect the speech.\n"
@@ -1448,6 +1548,7 @@ class PromptBuilder:
         evidence_char_budget: int | None = None,
         free_form_priority: bool = False,
         question_hint_mode: str = DEFAULT_QUESTION_HINT_MODE,
+        include_topic_summary: bool = True,
     ) -> PromptContext:
         if not actor.is_alive:
             raise ValueError(f"Dead player {actor.name} cannot act.")
@@ -1587,6 +1688,23 @@ class PromptBuilder:
             if actor.role is Role.SEER and state is not None
             else ""
         )
+        claim_ledger_text = cls._discussion_claim_ledger(state)
+        inference_text = cls._inference_ledger_text(state, actor)
+        hypothesis_block, hypothesis_diagnostics = cls._hypothesis_section(state, actor, day)
+        # TASK-048: 既出論点の要約は観測情報として1回だけ添える（論点・口調の強制しない）。
+        topic_block, topic_diagnostics = (
+            cls._topic_summary_section(state, actor, day)
+            if include_topic_summary
+            else ("", {})
+        )
+        continuity_memo = cls._reasoning_memo_text(actor, state)
+        context_diagnostics.update(hypothesis_diagnostics)
+        context_diagnostics.update(topic_diagnostics)
+        context_diagnostics["claim_ledger_chars"] = len(claim_ledger_text)
+        context_diagnostics["inference_ledger_chars"] = len(inference_text)
+        context_diagnostics["hypothesis_ledger_chars"] = len(hypothesis_block)
+        context_diagnostics["topic_summary_chars"] = len(topic_block)
+        context_diagnostics["continuity_memo_chars"] = len(continuity_memo)
         user_prompt = (
             "[SYSTEM_RULES]\n"
             + RULE_CARD
@@ -1597,14 +1715,17 @@ class PromptBuilder:
             + "\n[CLAIM_LEDGER]\n"
             # TASK-043: 確定事実と未確認主張の区別はここで1回だけ書く（旧Information
             # ClassificationブロックはFactLedger見出しへ統合済み）。
+            # TASK-047: 各行が証拠IDを持つため、memo・仮説台帳は本文を再掲せずIDで参照する。
             "Only system-recorded facts below are confirmed; claims and speech stay unverified.\n"
-            + cls._discussion_claim_ledger(state)
+            + claim_ledger_text
             + "\n"
-            + cls._inference_ledger_text(state)
+            + inference_text
             + "\n\n"
+            + hypothesis_block
+            + topic_block
             + cls._self_action_memory_text(actor, state, public_phase=True)
             + private_seer_block
-            + cls._reasoning_memo_text(actor, state)
+            + continuity_memo
             + cls._own_speech_text(actor, current_day_history)
             + day1_first_turn_block
             + (

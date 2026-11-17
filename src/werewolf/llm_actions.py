@@ -8,6 +8,11 @@ from difflib import SequenceMatcher
 from typing import Callable
 
 from .action_parser import ActionKind, ActionParser
+from .context_budget import (
+    EffectiveContextResolution,
+    process_env_context,
+    resolve_effective_context_limit,
+)
 from .engine import (
     ActionPolicy,
     diagnose_discussion_body,
@@ -43,9 +48,24 @@ from .discussion_format import (
     parse_discussion_claim,
     parse_discussion_output,
 )
+from .discussion_novelty import (
+    DEFAULT_NOVELTY_POLICY,
+    NOVELTY_MEASURED_ISSUES,
+    NOVELTY_POLICY_APPEND,
+    NOVELTY_POLICY_LEGACY_REPAIR,
+    NoveltyResult,
+    classify_novelty,
+    normalize_novelty_policy,
+)
 from .models import GameState, Message, Player, PublicRoleClaim, PublicSeerClaim, Role
 from .ollama import CLAIM_ROLE_TOOL, ChatResponse, OllamaClient, OllamaError, ToolCall
-from .prompts import PromptBuilder, PromptContext, ROLE_NAMES_EN, is_japanese_language
+from .prompts import (
+    PromptBuilder,
+    PromptContext,
+    ROLE_NAMES_EN,
+    is_japanese_language,
+    language_directive,
+)
 from .secret_leak_guard import LeakFinding, SecretLeakGuard
 from .self_consistency import SelfConsistencyGuard
 
@@ -107,6 +127,10 @@ CONTEXT_TOKENS_PER_CHAR = RETRY_NUM_CTX_TOKENS_PER_CHAR
 CONTEXT_MARGIN_TOKENS = 512
 CONTEXT_MIN_CTX = 2048
 CONTEXT_SHRINK_RATIO = 2
+# TASK-046: thinking on のリクエストでは、思考トークンが生成上限を消費し本文が
+# 空・切り詰めになりやすい。実測（thinking_budget_exhausted・thinking_only）から、
+# thinking分として別枠の余白を予算計算に含める（TASK-049のモデル別プロファイルへ接続）。
+THINKING_MARGIN_TOKENS = 1024
 # 発言履歴（CONVERSATION_EVIDENCE相当）の文字数予算の下限・上限。
 # TASK-046: 600字は直近の議論数件しか残さなかった（game_22754212a062 では42回のうち
 # 40回が下限に潰れ、Day1 6発言→2件だけ保持）。議論の断裂を防ぐため下限を引き上げる。
@@ -121,13 +145,19 @@ TIMEOUT_SAFE_THINKING_SOURCE = "model_timeout_fit"
 TIMEOUT_EVIDENCE_RATIO = 0.6
 
 
-def request_token_estimate(
-    messages: list[dict[str, object]], num_predict: object
-) -> int:
-    """送信プロンプトの実測文字数と生成上限から、必要なコンテキストトーク数を概算する。
+def context_budget_breakdown(
+    messages: list[dict[str, object]],
+    num_predict: object,
+    *,
+    thinking_enabled: bool = False,
+    effective_limit: object = None,
+) -> dict[str, object]:
+    """リクエスト予算を 入力/出力(生成上限)/thinking/安全余白 に分けた構成で返す（TASK-046）。
 
-    日本語混在のプロンプトは文字数よりトーク数が大きくなりやすいため、概算係数は
-    安全側（0.8トークン/字）を取る。生成上限は思考onの残余を含む値を受け取る前提。
+    日本語混在プロンプトは文字数よりトーク数が大きくなりやすいため、概算係数は
+    安全側を取る。thinking on では思考トークンが生成上限を消費して本文を削るため、
+    thinking 分を別枠の余白として確保する。`effective_limit`（実効コンテキスト上限）
+    を渡すと、収まる余地（headroom）と超過量を別々に測定できる。
     """
     prompt_chars = sum(len(str(message.get("content", ""))) for message in messages)
     generation = (
@@ -135,11 +165,36 @@ def request_token_estimate(
         if isinstance(num_predict, int) and not isinstance(num_predict, bool)
         else 512
     )
-    return (
-        math.ceil(prompt_chars * CONTEXT_TOKENS_PER_CHAR)
-        + int(generation)
-        + CONTEXT_MARGIN_TOKENS
+    input_tokens = math.ceil(prompt_chars * CONTEXT_TOKENS_PER_CHAR)
+    thinking_tokens = THINKING_MARGIN_TOKENS if thinking_enabled else 0
+    total = input_tokens + int(generation) + thinking_tokens + CONTEXT_MARGIN_TOKENS
+    breakdown: dict[str, object] = {
+        "input_tokens_estimate": input_tokens,
+        "generation_limit_tokens": int(generation),
+        "thinking_margin_tokens": thinking_tokens,
+        "safety_margin_tokens": CONTEXT_MARGIN_TOKENS,
+        "total_needed_tokens": total,
+    }
+    if isinstance(effective_limit, int) and not isinstance(effective_limit, bool):
+        breakdown["effective_context_limit"] = effective_limit
+        breakdown["headroom_tokens"] = int(effective_limit) - total
+        breakdown["overflow_tokens"] = max(0, total - int(effective_limit))
+    return breakdown
+
+
+def request_token_estimate(
+    messages: list[dict[str, object]], num_predict: object, *, thinking: bool = False
+) -> int:
+    """送信プロンプトの実測文字数と生成上限から、必要なコンテキストトーク数を概算する。
+
+    日本語混在のプロンプトは文字数よりトーク数が大きくなりやすいため、概算係数は
+    安全側を取る。生成上限は思考onの残余を含む値を受け取る前提。
+    thinking on の場合は思考消費分の別枠余白（`THINKING_MARGIN_TOKENS`）も加える。
+    """
+    breakdown = context_budget_breakdown(
+        messages, num_predict, thinking_enabled=thinking
     )
+    return int(breakdown["total_needed_tokens"])
 
 
 def fit_dynamic_context(
@@ -149,17 +204,30 @@ def fit_dynamic_context(
     ceiling: int | None = None,
     shrink_ratio: int = CONTEXT_SHRINK_RATIO,
     min_ctx: int = CONTEXT_MIN_CTX,
+    thinking: bool = False,
 ) -> tuple[dict[str, object], int | None, bool]:
     """送信オプションの `num_ctx` を実測必要量へ合わせる（ゲームと評価ハーネスで共用）。
 
-    必要量は `request_token_estimate`（プロンプト実測文字数＋生成上限＋余白）。過大割り当て
-    （設定値が必要量の `shrink_ratio` 倍以上）のみ縮小し、必要量不足は `ceiling`
+    必要量は `request_token_estimate`（プロンプト実測文字数＋生成上限＋余白＋thinking分）。
+    過大割り当て（設定値が必要量の `shrink_ratio` 倍以上）のみ縮小し、必要量不足は `ceiling`
     （プレイヤーの `max_num_ctx` 等）まで拡張する。`ceiling` 未指定時は拡張しない。
     """
     requested_ctx = options.get("num_ctx")
     if not isinstance(requested_ctx, int) or isinstance(requested_ctx, bool):
         return options, None, False
-    needed = request_token_estimate(messages, options.get("num_predict"))
+    needed = request_token_estimate(messages, options.get("num_predict"), thinking=thinking)
+    # TASK-046: `ceiling`（実効コンテキスト上限・max_num_ctx）を超えるnum_ctxは、
+    # 過大割り当ての判定にかかわらず上限へ縮小する（上限を超えるリクエストを
+    # 生成しない完了条件の担保）。入力は発言履歴予算の圧縮で上限内に収める。
+    if (
+        isinstance(ceiling, int)
+        and not isinstance(ceiling, bool)
+        and ceiling > 0
+        and requested_ctx > ceiling
+    ):
+        fitted_options = dict(options)
+        fitted_options["num_ctx"] = max(min_ctx, min(needed, ceiling))
+        return fitted_options, needed, True
     limit = (
         ceiling
         if isinstance(ceiling, int) and not isinstance(ceiling, bool)
@@ -224,6 +292,10 @@ SOFT_DISCUSSION_ISSUES: frozenset[str] = frozenset(
     }
 )
 
+# TASK-048: 論点の再掲・同一発言の反復は `NOVELTY_MEASURED_ISSUES`（discussion_novelty）で
+# 「低新規性」として計測する（誘導しない）。publish / append では本文をそのまま公開し、
+# 再生成も文の除去も行わない。legacy_repair のみ旧挙動（重複文の除去→意味的再要求）を使う。
+
 LEDGER_REPAIR_ISSUES: frozenset[str] = frozenset(
     {
         "external_game_memory",
@@ -231,6 +303,8 @@ LEDGER_REPAIR_ISSUES: frozenset[str] = frozenset(
         "unverified_dead_role",
         "dead_player_question",
         "dead_player_action_target",
+        # TASK-048: 旧挙動（legacy_repair）でのみ台帳修復対象。既定ポリシーでは
+        # 台帳修復・再生成せず、新規性計測だけ行う。
         "repeated_discussion_topic",
         "contradictory_past_vote",
         "contradictory_past_action",
@@ -461,6 +535,7 @@ class OllamaActions(ActionPolicy):
         event_callback: Callable[[dict[str, object]], None] | None = None,
         discussion_claim_mode: str = "legacy",
         context_strategy: str = "hybrid_retrieval",
+        novelty_policy: str | None = None,
     ) -> None:
         if discussion_claim_mode not in {"legacy", "candidates", "all"}:
             raise ValueError(
@@ -489,12 +564,97 @@ class OllamaActions(ActionPolicy):
             if options is not None
             else getattr(state, "question_hint_mode", DEFAULT_QUESTION_HINT_MODE)
         )
+        # TASK-048: 低新規性時の処理ポリシー。既定 publish（そのまま公開・再生成しない）。
+        # append は短い任意の追記要求のみ（既存本文は保持）、legacy_repair は旧挙動。
+        self.novelty_policy = normalize_novelty_policy(
+            novelty_policy
+            if novelty_policy is not None
+            else (
+                options.get("novelty_policy")
+                if options is not None
+                else getattr(state, "novelty_policy", DEFAULT_NOVELTY_POLICY)
+            )
+        )
         self._rng = random.Random(state.seed if seed is None else seed)
         self.traces: list[ActionTrace] = []
         self._seer_info_used_day: dict[str, int] = {}
+        # TASK-048: 直近の議論本文の新規性計測結果（呼び出し側が同じ本文を再計測しないため）
+        self._last_novelty: NoveltyResult | None = None
         # TASK-034: モデル別の議論本文メトリクス・形式弱モデル判定。
         self._discussion_metrics: dict[str, ModelDiscussionMetrics] = {}
         self._discussion_format_weak_models: set[str] = set()
+        # TASK-046: モデル別の実効コンテキスト上限（env・Modelfile・/api/ps・設定の単一値解決）。
+        # 初回リクエスト時に1回だけ解決してキャッシュし、解決イベントを記録する。
+        self._context_budgets: dict[str, EffectiveContextResolution] = {}
+
+    def _resolve_context_budget(
+        self,
+        actor: Player,
+        action: str | None = None,
+        started_at: float | None = None,
+    ) -> EffectiveContextResolution:
+        """プロセスenv・Modelfile・Ollama API実効値・プレイヤー/CLI設定から、
+        実効コンテキスト予算の採用値を1つの値として解決する（TASK-046、モデル別キャッシュ）。
+
+        由来別名称で解釈を明確化する（レビュー指摘）: `configured`（設定由来）・
+        `server_observed`（サーバー観測値）・送信値（`effective_requested_num_ctx`）。
+        旧名称 `effective_context_limit` は採用値 `limit` の互換表記として記録する。
+        採用値がサーバー側観測値を超える場合は conflict を記録し、設定値と実効値の
+        境界の曖昧さをログで検証可能にする。発言内容・口調には干渉しない。
+        """
+        model = actor.model
+        cached = self._context_budgets.get(model)
+        if cached is not None:
+            return cached
+        options, _num_predict_source, _thinking, _thinking_source = self._options_for(
+            actor, "discussion"
+        )
+        env_value, env_key = process_env_context()
+        modelfile_value: object = None
+        ps_value: object = None
+        if callable(getattr(self.client, "context_diagnostics", None)):
+            diagnostics = self.client.context_diagnostics(model)
+            if isinstance(diagnostics, dict):
+                modelfile_value = diagnostics.get("modelfile_num_ctx")
+                ps_value = diagnostics.get("ollama_ps_context")
+        resolved = resolve_effective_context_limit(
+            {
+                "player_setting": options.get("num_ctx") if options else None,
+                "cli_setting": (
+                    self.options.get("num_ctx") if self.options else None
+                ),
+                "api_ps_loaded": ps_value,
+                "process_env": env_value,
+                "modelfile": modelfile_value,
+            }
+        )
+        self._context_budgets[model] = resolved
+        # 初回解決時に必ず記録する（呼び出し元がactionを持たない経路でも、
+        # genericな action名で解決イベントを残す）。
+        self._emit(
+            "effective_context_resolution",
+            action if action is not None else "context_resolution",
+            actor,
+            started_at if started_at is not None else time.perf_counter(),
+                effective_context_limit=resolved.limit,
+                context_budget_source=resolved.source,
+                context_budget_candidates=resolved.candidates,
+                context_limit_conflict=resolved.conflict,
+                # 由来別の名称でログの解釈を明確化する（TASK-046レビュー指摘）:
+                # configured=設定由来 / server_observed=サーバー観測値 / limit=採用単一値。
+                configured_context_limit=resolved.configured,
+                configured_context_source=resolved.configured_source,
+                server_observed_context_limit=resolved.server_observed,
+                server_observed_context_source=resolved.server_observed_source,
+                process_env_key=env_key,
+                note=(
+                    "設定値がサーバー観測値（/api/ps・env・Modelfile）を超えるため、"
+                    "実機でnum_ctxが上書きされるか再確認が必要"
+                    if resolved.conflict
+                    else ""
+                ),
+            )
+        return resolved
 
     def _record_discussion_body_metrics(
         self,
@@ -644,6 +804,16 @@ class OllamaActions(ActionPolicy):
                 free_form_priority=free_form_priority,
                 question_hint_mode=self.question_hint_mode,
             )
+        # TASK-046: 実効上限・圧縮段階を診断に記録し、「プロンプト総量」と「必須証拠の
+        # 欠落」を別々に検証できるようにする（発言内容・口調の制約は行わない）。
+        if prompt_ctx.diagnostics is not None:
+            resolved = self._resolve_context_budget(actor)
+            prompt_ctx.diagnostics["effective_context_limit"] = resolved.limit
+            prompt_ctx.diagnostics["context_budget_source"] = resolved.source
+            prompt_ctx.diagnostics["context_limit_conflict"] = resolved.conflict
+            prompt_ctx.diagnostics["compression_stage"] = (
+                "evidence_budget_applied" if budget is not None else "full"
+            )
         return prompt_ctx
 
     def _question_answer_check(
@@ -688,6 +858,160 @@ class OllamaActions(ActionPolicy):
         self._emit("discussion_question_check", action, actor, started_at, **details)
         return details
 
+    def _novelty_result(
+        self, actor: Player, body: str, history: tuple[Message, ...] | None
+    ) -> NoveltyResult:
+        """出力後の本文を新規性で計測する（観測のみ・再生成や書き換えの指示ではない）。
+
+        既出論点台帳（`state.topic_ledger`）と本人のこれまでの立場
+        （`state.own_stances_for`）を照合し、新規証拠・反証・立場変更・質問への応答・
+        新論点と、新シグナルのない連呼を区別する。
+        """
+        extracted = extract_discussion_body(body) or body
+        messages = (
+            tuple(message for message in history if message.speaker != "system")
+            if history is not None
+            else tuple(self.state.conversation_log)
+        )
+        current_day_history = PromptBuilder.current_day_messages(messages)
+        previous_message = current_day_history[-1] if current_day_history else None
+        question_answered = bool(
+            previous_message is not None
+            and previous_message.speaker != actor.name
+            and extracted.strip()
+            and not is_pass_body(extracted)
+            and PromptBuilder._is_directed_to_player(
+                actor, previous_message, current_day_history
+            )
+            and answers_previous_question(extracted, previous_message.content)
+        )
+        return classify_novelty(
+            extracted,
+            actor_name=actor.name,
+            player_names=tuple(player.name for player in self.state.players),
+            prior_topics=self.state.topic_ledger.topics_for_day(self.state.day),
+            question_answered=question_answered,
+            own_prior_stances=self.state.own_stances_for(actor.name),
+        )
+
+    def _measure_discussion_novelty(
+        self,
+        action: str,
+        actor: Player,
+        body: str,
+        history: tuple[Message, ...] | None,
+        started_at: float,
+    ) -> dict[str, object]:
+        """公開される本文の新規性を計測して記録する（誘導・再生成は行わない）。"""
+        novelty = self._novelty_result(actor, body, history)
+        self._last_novelty = novelty
+        details: dict[str, object] = {
+            "novelty_primary": novelty.primary,
+            "novelty_classes": list(novelty.classes),
+            "novelty_score": novelty.novelty_score,
+            "novelty_restated_topics": len(novelty.restated_topic_ids),
+            "novelty_legitimate_repetitions": len(novelty.legitimate_repetition_ids),
+            "novelty_new_topics": len(novelty.new_topic_ids),
+            "novelty_topic_sentences": novelty.topic_sentence_count,
+            "novelty_policy": self.novelty_policy,
+            "has_novelty": novelty.has_novelty,
+        }
+        self._emit("discussion_novelty_measured", action, actor, started_at, **details)
+        return details
+
+    def _novelty_append_prompt(
+        self, actor: Player, existing_body: str, recent_messages: tuple[Message, ...] | None
+    ) -> str:
+        """既存本文をそのまま公開した上で、任意の短い追記だけ求める短いプロンプト。"""
+        summary, _ = self.state.topic_summary_for(actor.name, self.state.day)
+        history = (
+            recent_messages
+            if recent_messages is not None
+            else tuple(self.state.conversation_log)
+        )
+        recent_speech = [
+            f"{message.speaker}: {message.content[:160]}"
+            for message in PromptBuilder.current_day_messages(history)[-2:]
+        ]
+        return (
+            "[Optional Addition Request]\n"
+            "Your statement below is published as-is; do not rewrite or shorten it.\n"
+            f"Topics already raised today:\n{summary or '(none recorded yet)'}\n"
+            "If you want to add anything, write 1-3 sentences in your own words about a point "
+            "not yet raised (a new reason, a counter-argument, a question, or a changed position). "
+            "If you have nothing to add, output exactly 'Pass'. Do not repeat the statement below "
+            "and do not include meta-talk about the system.\n\n"
+            "[Your published statement (unchanged)]\n"
+            f"{existing_body}\n\n"
+            "[Recent speech]\n"
+            + ("\n".join(recent_speech) or "(none)")
+            + "\n"
+            + language_directive(actor.response_language)
+        )
+
+    def _novelty_append_request(
+        self,
+        actor: Player,
+        existing_body: str,
+        recent_messages: tuple[Message, ...] | None,
+        started_at: float,
+    ) -> str | None:
+        """低新規性の本文に短い追記だけを求め、追加が得られなければ None（元本文を公開）。"""
+        messages = [
+            {"role": "system", "content": PromptBuilder.build_system_prompt(actor)},
+            {
+                "role": "user",
+                "content": self._novelty_append_prompt(
+                    actor, existing_body, recent_messages
+                ),
+            },
+        ]
+        try:
+            response = self._chat(
+                actor,
+                messages,
+                action="discussion_novelty_append",
+                started_at=started_at,
+                request_number=1,
+                request_reason="novelty_append",
+                budget_key="discussion",
+                retry_budget_fit=True,
+            )
+        except OllamaError as error:
+            self._emit(
+                "llm_action_parse_failed",
+                "discussion_novelty_append",
+                actor,
+                started_at,
+                reason=self._transport_failure_reason(error),
+                will_retry=False,
+            )
+            return None
+        addition = self._strip_meta_echo(
+            extract_discussion_body(response.content) or response.content
+        ).strip()
+        if not addition or is_pass_body(addition):
+            return None
+        existing_normalized = re.sub(r"[\W_]+", "", existing_body, flags=re.UNICODE)
+        addition_normalized = re.sub(r"[\W_]+", "", addition, flags=re.UNICODE)
+        if (
+            len(addition_normalized) >= 20
+            and SequenceMatcher(None, addition_normalized, existing_normalized).ratio()
+            >= 0.82
+        ):
+            # 追記が既存本文と実質同じなら重複を増やさないため元本文をそのまま公開する
+            return None
+        structured = parse_discussion_output(existing_body)
+        if structured is None:
+            return f"{existing_body}\n{addition}"
+        blocks: list[str] = [f"[CO] {structured.claim}"]
+        if structured.result:
+            blocks.append(f"[RESULT] {structured.result}")
+        blocks.append(f"[BODY] {structured.body} {addition}".strip())
+        if structured.reasoning:
+            blocks.append(f"[REASONING] {structured.reasoning}")
+        return "\n".join(blocks)
+
     def discuss(
         self, player: str, day: int, alive: tuple[str, ...], history: tuple[Message, ...]
     ) -> str:
@@ -715,6 +1039,8 @@ class OllamaActions(ActionPolicy):
             context_diagnostics=prompt_ctx.diagnostics,
         )
         self._question_answer_check("discussion", actor, body, history, started_at)
+        # TASK-048: 公開本文の新規性を計測する（誘導せず、観測だけ残す）
+        self._measure_discussion_novelty("discussion", actor, body, history, started_at)
         return body
 
     def should_stage_discussion_claim(self, player: str) -> bool:
@@ -850,6 +1176,10 @@ class OllamaActions(ActionPolicy):
             final_body,
         )
         self._question_answer_check("discussion_body", actor, final_body, history, started_at)
+        # TASK-048: 公開本文の新規性を計測する（誘導せず、観測だけ残す）
+        self._measure_discussion_novelty(
+            "discussion_body", actor, final_body, history, started_at
+        )
         return final_body
 
     def retry_after_secret_leak(
@@ -940,6 +1270,27 @@ class OllamaActions(ActionPolicy):
             },
             {"role": "user", "content": user_prompt},
         ]
+        # TASK-046: 漏洩セーフティ再要求も core-ledger圧縮（CO・判定・投票・死亡・
+        # 直近発言・未回答質問・反証を保持）であり、圧縮段階を記録する。
+        self._emit(
+            "context_compression_stage",
+            "discussion_safety_retry",
+            actor,
+            started_at,
+            compression_stage="core_ledger",
+            compression_reason="secret_leak_safety_retry",
+            protected_evidence=[
+                "public_claims",
+                "vote_ledger",
+                "confirmed_deaths",
+                "private_seer_results",
+                "recent_speeches",
+                "unanswered_question_to_actor",
+                "recent_counter_arguments",
+            ],
+            dropped_scope="speech_history_beyond_recent_and_ledger",
+            request_number=1,
+        )
         try:
             response = self._chat(
                 actor,
@@ -1471,6 +1822,41 @@ class OllamaActions(ActionPolicy):
                 thinking_off=thinking_off_retry,
                 retry_cap=timeout_retry,
             )
+            # TASK-046: 軽再試行の短縮プロンプト（core-ledger圧縮）では、保持した証拠
+            # （公開CO・占い判定・投票・死亡・直近発言・本人への未回答質問・直近反証）と
+            # 圧縮段階を記録し、プロンプト総量と証拠欠落を別々に検証できるようにする。
+            if (
+                is_light_retry
+                and action in {"discussion", "discussion_body"}
+                and not keeps_round_context
+            ):
+                self._emit(
+                    "context_compression_stage",
+                    action,
+                    actor,
+                    started_at,
+                    compression_stage="core_ledger",
+                    compression_reason=(
+                        "timeout_retry"
+                        if timeout_retry
+                        else (
+                            "generation_retry"
+                            if thinking_off_retry
+                            else "semantic_retry"
+                        )
+                    ),
+                    protected_evidence=[
+                        "public_claims",
+                        "vote_ledger",
+                        "confirmed_deaths",
+                        "private_seer_results",
+                        "recent_speeches",
+                        "unanswered_question_to_actor",
+                        "recent_counter_arguments",
+                    ],
+                    dropped_scope="speech_history_beyond_recent_and_ledger",
+                    request_number=attempt + 1,
+                )
             messages = [
                 {"role": "system", "content": prompt_ctx.system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -1686,6 +2072,74 @@ class OllamaActions(ActionPolicy):
                 # 同じ失敗を毎ターン繰り返さないため、このモデルの思考行動をoffへ落とす。
                 self._record_thinking_budget_exhausted(
                     actor, action, started_at, metadata
+                )
+            # TASK-048: 論点の再掲・同一発言の反復は「低新規性」として計測し、再生成しない。
+            # publish（既定）はそのまま公開、append は既存本文を保持した短い任意の追記だけ、
+            # legacy_repair のみ旧挙動（重複文の除去→意味的再要求）を通す。
+            if (
+                action in {"discussion", "discussion_body"}
+                and response_text
+                and response_issue in NOVELTY_MEASURED_ISSUES
+                and self.novelty_policy != NOVELTY_POLICY_LEGACY_REPAIR
+            ):
+                low_novelty_reason = response_issue
+                novelty = self._novelty_result(actor, response_text, recent_messages)
+                if not novelty.has_novelty and self.novelty_policy == NOVELTY_POLICY_APPEND:
+                    appended = self._novelty_append_request(
+                        actor, response_text, recent_messages, started_at
+                    )
+                    if appended is not None:
+                        merged_novelty = self._novelty_result(
+                            actor, appended, recent_messages
+                        )
+                        self._last_novelty = merged_novelty
+                        response_text = appended
+                        self._emit(
+                            "discussion_novelty_appended",
+                            action,
+                            actor,
+                            started_at,
+                            reason=low_novelty_reason,
+                            novelty_primary=merged_novelty.primary,
+                            novelty_score=merged_novelty.novelty_score,
+                            body_preserved=True,
+                            regeneration_avoided=True,
+                        )
+                    else:
+                        self._emit(
+                            "llm_discussion_low_novelty_kept",
+                            action,
+                            actor,
+                            started_at,
+                            reason=low_novelty_reason,
+                            novelty_primary=novelty.primary,
+                            novelty_score=novelty.novelty_score,
+                            body_preserved=True,
+                            regeneration_avoided=True,
+                            append_declined=True,
+                        )
+                else:
+                    self._emit(
+                        "llm_discussion_low_novelty_kept",
+                        action,
+                        actor,
+                        started_at,
+                        reason=low_novelty_reason,
+                        novelty_primary=novelty.primary,
+                        novelty_classes=list(novelty.classes),
+                        novelty_score=novelty.novelty_score,
+                        novelty_restated_topics=len(novelty.restated_topic_ids),
+                        novelty_legitimate_repetitions=len(
+                            novelty.legitimate_repetition_ids
+                        ),
+                        body_preserved=True,
+                        regeneration_avoided=True,
+                    )
+                # 低新規性は失敗として扱わない（本文保持・再要求を作らない）
+                response_issue = None
+                uses_seer_info = self._references_seer_result(actor, response_text)
+                holds_human_seer_result = self._holds_human_seer_result(
+                    action, actor, response_text
                 )
             if (
                 attempt == 0
@@ -2527,6 +2981,35 @@ class OllamaActions(ActionPolicy):
             f"{message.speaker}: {message.content[:240]}"
             for message in current_day_history[-3:]
         ]
+        # TASK-046: core-ledger圧縮（再要求の短縮プロンプト）では、次ターンの回答に
+        # 必要不可欠な「本人への未回答質問」と「直近の反証」を必ず保持する。
+        # 議論本文の論点・口調は制約せず、提示する事実を増やすだけの変更。
+        unanswered_question: str | None = None
+        for message in reversed(current_day_history[-8:]):
+            if message.speaker == actor.name:
+                continue
+            content = message.content if isinstance(message.content, str) else ""
+            is_question = any(
+                cue in content
+                for cue in ("?", "？", "なぜ", "理由は", "質問", "確認", "教えて", "聞かせて")
+            )
+            if is_question and PromptBuilder._is_directed_to_player(
+                actor, message, current_day_history
+            ):
+                unanswered_question = f"{message.speaker}: {content[:200]}"
+                break
+        counter_arguments = [
+            f"{message.speaker}: {message.content[:160]}"
+            for message in current_day_history[-6:]
+            if message.speaker != actor.name
+            and isinstance(message.content, str)
+            and any(
+                cue in message.content
+                for cue in (
+                    "反証", "反論", "違う", "誤り", "矛盾", "counter", "disagree", "contradict"
+                )
+            )
+        ][-2:]
         private_seer_results = (
             [
                 f"{target}: {'Werewolf' if result == 'wolf' else 'Human'}"
@@ -2581,7 +3064,17 @@ class OllamaActions(ActionPolicy):
             "Faking claims is an option for wolves/madmen, not mandatory.\n"
             f"[Public Claims & Results] {'; '.join(public_claims_text) or 'None'}.\n"
             f"[Recent Speech (Unverified)] {'; '.join(recent_speech) or 'None'}.\n"
-            "[Information Classification] Public speech and CO claims are unverified; do not treat them as confirmed facts.\n"
+            + (
+                f"[Unanswered Question To You] {unanswered_question}\n"
+                if unanswered_question
+                else ""
+            )
+            + (
+                f"[Recent Counter-arguments (Unverified)] {'; '.join(counter_arguments)}.\n"
+                if counter_arguments
+                else ""
+            )
+            + "[Information Classification] Public speech and CO claims are unverified; do not treat them as confirmed facts.\n"
             "Do not use past games, training memories, or real-world info; rely strictly on this game's records. "
             "State 'Not in record, cannot determine' for unrecorded matters. Ask living players, not dead players.\n"
             + (
@@ -4237,18 +4730,21 @@ class OllamaActions(ActionPolicy):
         options: dict[str, object],
         messages: list[dict[str, object]],
         actor: Player,
+        *,
+        thinking: bool = False,
     ) -> tuple[dict[str, object], int | None, bool]:
         """必要なコンテキストだけ確保する動的num_ctx（TASK-036）。
 
-        実測プロンプトサイズ + 生成上限（思考トークンの残余を含む）+ 余白を必要量とし、
-        必要量の2倍以上の過大割り当てだけを縮小する。逆に必要量不足の場合は、プレイヤー
-        設定の `max_num_ctx` まで拡張する（設定の上限を超えない）。概算は日本語混在では
-        大きめ（安全側）になる。
+        実測プロンプトサイズ + 生成上限（思考トークンの残余を含む）+ 余白 + thinking分
+        （TASK-046）を必要量とし、必要量の2倍以上の過大割り当てだけを縮小する。逆に必要量
+        不足の場合は、プレイヤー設定の `max_num_ctx` まで拡張する（設定の上限を超えない）。
+        概算は日本語混在では大きめ（安全側）になる。
         """
         return fit_dynamic_context(
             options,
             messages,
             ceiling=actor.max_num_ctx,
+            thinking=thinking,
         )
 
     def _dynamic_evidence_budget(
@@ -4265,13 +4761,17 @@ class OllamaActions(ActionPolicy):
         """
         if not self._dynamic_context_enabled() or prompt_ctx.diagnostics is None:
             return None
-        options, _num_predict_source, _thinking, _thinking_source = self._options_for(
-            actor, budget_key
+        options, _num_predict_source, thinking_enabled, _thinking_source = (
+            self._options_for(actor, budget_key)
         )
         allocatable = options.get("num_ctx") if options else None
         if not isinstance(allocatable, int) or isinstance(allocatable, bool):
+            # TASK-046: num_ctx未指定（サーバー側設定・既定値に委ねる）では、解決済み
+            # 実効コンテキスト上限を割り当てとして発言履歴予算の逆算に使う。
+            allocatable = self._resolve_context_budget(actor).limit
+        if not isinstance(allocatable, int) or isinstance(allocatable, bool):
             return None
-        generation = options.get("num_predict")
+        generation = options.get("num_predict") if options else None
         if not isinstance(generation, int) or isinstance(generation, bool):
             generation = DEFAULT_ACTION_NUM_PREDICT.get(
                 normalize_action_budget_key(budget_key), 512
@@ -4280,7 +4780,12 @@ class OllamaActions(ActionPolicy):
         evidence_chars = int(diagnostics.get("evidence_char_count") or 0)
         raw_chars = len(prompt_ctx.system_prompt) + len(prompt_ctx.user_prompt)
         fixed_tokens = math.ceil(max(0, raw_chars - evidence_chars) * CONTEXT_TOKENS_PER_CHAR)
-        available_input_tokens = int(allocatable) - int(generation) - CONTEXT_MARGIN_TOKENS
+        # TASK-046: thinking on のリクエストは思考消費分を別枠で差し引き、本文が
+        # 空・切り詰めされる入力を削る（発言の自由度は削らない：履歴の優先除去のみ）。
+        thinking_reserve = THINKING_MARGIN_TOKENS if thinking_enabled else 0
+        available_input_tokens = (
+            int(allocatable) - int(generation) - CONTEXT_MARGIN_TOKENS - thinking_reserve
+        )
         budget = int(
             (available_input_tokens - fixed_tokens) / CONTEXT_TOKENS_PER_CHAR
         )
@@ -4317,6 +4822,7 @@ class OllamaActions(ActionPolicy):
         messages: list[dict[str, object]],
         *,
         respect_explicit_num_ctx: bool = False,
+        effective_limit: int | None = None,
     ) -> tuple[dict[str, object], str, bool, bool]:
         """タイムアウト・秘密漏洩の再要求で、送信済みの短いプロンプトに見合う上限へ絞る。
 
@@ -4324,6 +4830,7 @@ class OllamaActions(ActionPolicy):
         タイムアウトや数分の応答時間を作る（TASK-035）。本文だけ求める再要求では
         上限を `RETRY_NUM_PREDICT_LIMIT` に、コンテキストを実際のプロンプトサイズに見合う値へ
         縮小する。`override_player_num_ctx`（CLIで明示指定した比較実験）では尊重する。
+        TASK-046: 解決済み実効上限 `effective_limit` を超えるnum_ctxは再試行でも送らない。
         """
         fitted = dict(options)
         num_predict_applied = False
@@ -4352,6 +4859,13 @@ class OllamaActions(ActionPolicy):
                 + RETRY_NUM_PREDICT_LIMIT
                 + RETRY_NUM_CTX_MARGIN_TOKENS,
             )
+            if isinstance(effective_limit, int) and not isinstance(effective_limit, bool):
+                fitted_ctx = min(fitted_ctx, int(effective_limit))
+                if requested_ctx > int(effective_limit):
+                    # 実効上限を超える設定値の再送は打ち切り（超過分の証拠を落とさないため
+                    # 入力も上限内に圧縮済み）。
+                    fitted["num_ctx"] = fitted_ctx
+                    num_ctx_applied = True
             # 設定値を大幅に上回る割り当てだけを縮小し、わずかな差は設定どおり維持する。
             if requested_ctx >= fitted_ctx * 2:
                 fitted["num_ctx"] = fitted_ctx
@@ -4788,8 +5302,11 @@ class OllamaActions(ActionPolicy):
         override_player_num_ctx = bool(
             self.options and self.options.get("override_player_num_ctx")
         )
+        # TASK-046: env・Modelfile・/api/ps・設定から実効コンテキスト予算の採用値を
+        # 単一値として解決（モデル別キャッシュ・初回のみeffective_context_resolutionイベント記録）。
+        context_resolution = self._resolve_context_budget(actor, action, started_at)
         # TASK-036: 動的コンテキスト。過大割り当てを実測サイズへ縮小し、不足時は
-        # max_num_ctx まで拡張する。タイムアウト・漏洩の再要求（retry_budget_fit）では
+        # max_num_ctxまで拡張する。タイムアウト・漏洩の再要求（retry_budget_fit）では
         # 既に要求サイズへ絞るため、ここでは適用しない。CLIの明示上書きでは尊重する。
         num_ctx_before_dynamic_fit = options.get("num_ctx") if options else None
         dynamic_context_applied = False
@@ -4800,7 +5317,12 @@ class OllamaActions(ActionPolicy):
             and not retry_budget_fit
         ):
             options, context_needed_tokens, dynamic_context_applied = (
-                self._fit_request_context(options or {}, messages, actor)
+                self._fit_request_context(
+                    options or {},
+                    messages,
+                    actor,
+                    thinking=bool(thinking_enabled),
+                )
             )
         num_ctx_before_fit = options.get("num_ctx") if options else None
         retry_num_predict_applied = False
@@ -4812,6 +5334,7 @@ class OllamaActions(ActionPolicy):
                     num_predict_source,
                     messages,
                     respect_explicit_num_ctx=override_player_num_ctx,
+                    effective_limit=context_resolution.limit,
                 )
             )
         original_timeout = getattr(self.client, "timeout", None)
@@ -4914,6 +5437,22 @@ class OllamaActions(ActionPolicy):
                 thinking_source=thinking_label,
                 max_retries=max_retries,
                 context_diagnostics=context_diagnostics,
+                # TASK-046: 実効コンテキスト上限の単一値解決と、入力/出力/thinking/余白の
+                # 予算構成分解をリクエストごとに記録する（何を落としたかの検証基盤）。
+                effective_context_limit=context_resolution.limit,
+                context_budget_source=context_resolution.source,
+                context_limit_conflict=context_resolution.conflict,
+                # 由来別名称（TASK-046レビュー指摘）: 設定由来 / サーバー観測値 / 実際に送る値。
+                # effective_requested_num_ctx は fit・再要求fit適用後の送信num_ctx（requested_num_ctxと同値）。
+                configured_context_limit=context_resolution.configured,
+                server_observed_context_limit=context_resolution.server_observed,
+                effective_requested_num_ctx=request_options.get("num_ctx"),
+                context_budget_breakdown=context_budget_breakdown(
+                    messages,
+                    request_options.get("num_predict"),
+                    thinking_enabled=bool(thinking_value),
+                    effective_limit=context_resolution.limit,
+                ),
             )
 
         emit_request_configuration(

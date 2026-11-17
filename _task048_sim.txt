@@ -1,0 +1,63 @@
+--- novelty_policy=legacy_repair ---
+  policy: legacy_repair
+  winner: werewolf
+  day: 3
+  requests: 100
+  bodies: 42
+  ledger_repairs: 16
+  repair_reasons: {'repeated_discussion_topic': 16}
+  regenerations: 22
+  body_preserved_rate: 1.0
+  fallbacks: 0
+  novelty_measurements: 42
+  novelty_present_rate: 0.619
+  novelty_classes: {'new_evidence': 2, 'question_answer': 10, 'refutation': 7, 'new_topic': 5, 'no_signal': 5, 'restatement': 11, 'position_change': 2}
+  restated_topics_total: 23
+  legitimate_repetitions_total: 0
+  low_novelty_kept: 0
+  novelty_appends: 0
+  topic_summary_chars_avg: 709.4
+  topic_ledger: {'topic_records_total': 15, 'topic_records_created': 15, 'topic_restatements_observed': 24, 'topic_legitimate_repetitions_observed': 1, 'topic_kind_counts': {'question': 5, 'stance': 3, 'claim': 3, 'vote_proposal': 4, 'answer': 0}}
+  speech_samples: ['Player 2さんの今日の投票の理由を確認したい。', '私はPlayer 1さんへの投票を提案する。理由は直近の発言の整合性です。', 'Player 1さんのCOは公開判定と矛盾している。別の可能性を確認したい。', 'Player 1さんは信頼できる。私は前の疑いを変更する。', 'Player 1さんの現在の投票意思と、直前の発言の根拠を確認したい。', '理由は直近の発言の整合性です。']
+--- novelty_policy=publish ---
+  policy: publish
+  winner: werewolf
+  day: 3
+  requests: 85
+  bodies: 42
+  ledger_repairs: 0
+  repair_reasons: {}
+  regenerations: 8
+  body_preserved_rate: 1.0
+  fallbacks: 0
+  novelty_measurements: 42
+  novelty_present_rate: 0.762
+  novelty_classes: {'new_evidence': 2, 'question_answer': 10, 'refutation': 8, 'new_topic': 4, 'no_signal': 3, 'position_change': 8, 'restatement': 7}
+  restated_topics_total: 36
+  legitimate_repetitions_total: 5
+  low_novelty_kept: 34
+  novelty_appends: 0
+  topic_summary_chars_avg: 732.3
+  topic_ledger: {'topic_records_total': 16, 'topic_records_created': 16, 'topic_restatements_observed': 31, 'topic_legitimate_repetitions_observed': 13, 'topic_kind_counts': {'question': 5, 'stance': 5, 'claim': 3, 'vote_proposal': 3, 'answer': 0}}
+  speech_samples: ['Player 2さんの今日の投票の理由を確認したい。', '私はPlayer 1さんへの投票を提案する。理由は直近の発言の整合性です。', 'Player 1さんのCOは公開判定と矛盾している。別の可能性を確認したい。', 'Player 1さんは信頼できる。私は前の疑いを変更する。', 'Player 3さんの今日の投票の理由を確認したい。', 'Player 1さんの今日の投票の理由を確認したい。']
+--- novelty_policy=append ---
+  policy: append
+  winner: werewolf
+  day: 3
+  requests: 100
+  bodies: 42
+  ledger_repairs: 0
+  repair_reasons: {}
+  regenerations: 6
+  body_preserved_rate: 1.0
+  fallbacks: 0
+  novelty_measurements: 42
+  novelty_present_rate: 0.81
+  novelty_classes: {'new_evidence': 2, 'question_answer': 9, 'refutation': 9, 'new_topic': 5, 'restatement': 7, 'no_signal': 1, 'position_change': 9}
+  restated_topics_total: 38
+  legitimate_repetitions_total: 20
+  low_novelty_kept: 22
+  novelty_appends: 11
+  topic_summary_chars_avg: 760.9
+  topic_ledger: {'topic_records_total': 14, 'topic_records_created': 14, 'topic_restatements_observed': 35, 'topic_legitimate_repetitions_observed': 26, 'topic_kind_counts': {'question': 4, 'stance': 4, 'claim': 2, 'vote_proposal': 4, 'answer': 0}}
+  speech_samples: ['Player 2さんの今日の投票の理由を確認したい。', '私はPlayer 1さんへの投票を提案する。理由は直近の発言の整合性です。', 'Player 1さんのCOは公開判定と矛盾している。別の可能性を確認したい。', 'Player 1さんは信頼できる。私は前の疑いを変更する。', 'Player 3さんの今日の投票の理由を確認したい。', 'Player 1さんの今日の投票の理由を確認したい。']

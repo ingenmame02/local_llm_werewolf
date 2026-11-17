@@ -1,0 +1,24 @@
+winner: werewolf | day: 3 | requests: 103
+hypothesis metrics: {'hypothesis_count': 14, 'hypothesis_duplicates_suppressed': 26, 'hypothesis_stance_changes': 0, 'hypothesis_dead_references_suppressed': 8, 'hypothesis_private_references_suppressed': 0, 'hypothesis_contradictions': 0, 'hypothesis_status_counts': {'open': 6, 'contested': 0, 'historical': 8, 'superseded': 0}}
+public hypotheses: 14 | private-only: 0
+contradictions: Counter()
+integrity alerts: Counter()
+unverified_hypothesis_as_fact alerts: 0
+context_selected events: 42
+hypothesis ledger chars avg: 624.4
+continuity memo chars avg: 1419.5
+claim ledger chars avg: 245.6
+inference ledger chars avg: 161.8
+required evidence retention all 1.0: True
+memo reuses ids only: True
+dead-target hypotheses: 8
+unresolved questions referencing dead players: 1
+annotated as unanswerable: 0
+ledger+inference+hypotheses+memo chars now: 4112
+legacy claim-ledger+inference+memo chars: 2984
+user_prompt chars now: 18203
+memo ids-only saving: 1417 chars
+claim-ledger dedup saving: 45 chars
+inference summary saving: 17 chars
+hypothesis ledger added: 988 chars
+net change: 491 chars saved

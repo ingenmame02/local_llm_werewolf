@@ -44,9 +44,14 @@ from werewolf import (
     parse_thinking_by_action_pairs,
 )
 from werewolf.self_consistency import SelfConsistencyGuard
+from werewolf.engine import UNVERIFIED_HYPOTHESIS_AS_FACT
 from werewolf.discussion_format import (
     DEFAULT_QUESTION_HINT_MODE,
     normalize_question_hint_mode,
+)
+from werewolf.discussion_novelty import (
+    DEFAULT_NOVELTY_POLICY,
+    normalize_novelty_policy,
 )
 
 # フェーズ表示用ラベル
@@ -135,6 +140,8 @@ class GameLogger:
         self._sequence = 0
         self._private_sequence = 0
         self._model_stats: dict[str, dict[str, Any]] = {}
+        # TASK-048: 新規性計測（クラス別）と低新規性処理の別カウント
+        self._novelty_class_counts: dict[str, int] = {}
         self._ledger_metrics: dict[str, int | float] = {
             "discussion_claim_calls": 0,
             "llm_requests_sent": 0,
@@ -150,6 +157,15 @@ class GameLogger:
             "question_answered": 0,
             "question_answer_forced": 0,
             "ledger_repairs": 0,
+            # TASK-048: 再生成（意味的再要求の試行）・低新規性処理・新規性計測
+            "discussion_regenerations": 0,
+            "novelty_measurements": 0,
+            "novelty_present": 0,
+            "novelty_restated_topics": 0,
+            "novelty_legitimate_repetitions": 0,
+            "low_novelty_kept": 0,
+            "novelty_appends": 0,
+            "discussion_elapsed_seconds": 0.0,
             "duplicate_claims_suppressed": 0,
             "public_claim_updates": 0,
             "secret_leaks_detected": 0,
@@ -205,6 +221,12 @@ class GameLogger:
                 self._ledger_metrics["discussion_bodies_preserved"] += int(
                     bool(diagnostic_record.get("content_preserved"))
                 )
+                # TASK-048: 議論1ターンの待ち時間（再生成・追記要求の遅延を測る基準）
+                self._ledger_metrics["discussion_elapsed_seconds"] = round(
+                    float(self._ledger_metrics["discussion_elapsed_seconds"])
+                    + float(diagnostic_record.get("elapsed_seconds", 0.0)),
+                    3,
+                )
             self._ledger_metrics["llm_elapsed_seconds"] = round(
                 float(self._ledger_metrics["llm_elapsed_seconds"])
                 + float(diagnostic_record.get("elapsed_seconds", 0.0)),
@@ -224,6 +246,36 @@ class GameLogger:
                 self._ledger_metrics["question_answer_forced"] += 1
         if event_type == "ledger_repair":
             self._ledger_metrics["ledger_repairs"] += 1
+        # TASK-048: 新規性の計測と低新規性処理（再生成回避回数）を別指標で積む
+        if event_type == "discussion_novelty_measured":
+            self._ledger_metrics["novelty_measurements"] += 1
+            if bool(diagnostic_record.get("has_novelty")):
+                self._ledger_metrics["novelty_present"] += 1
+            self._ledger_metrics["novelty_restated_topics"] += int(
+                diagnostic_record.get("novelty_restated_topics") or 0
+            )
+            self._ledger_metrics["novelty_legitimate_repetitions"] += int(
+                diagnostic_record.get("novelty_legitimate_repetitions") or 0
+            )
+            primary = diagnostic_record.get("novelty_primary")
+            if isinstance(primary, str):
+                self._novelty_class_counts[primary] = (
+                    self._novelty_class_counts.get(primary, 0) + 1
+                )
+                if isinstance(model, str):
+                    stats = self._model_stats.setdefault(model, self._new_model_stats())
+                    counts = stats.setdefault("novelty_primary_counts", {})
+                    counts[primary] = counts.get(primary, 0) + 1
+        if event_type == "llm_discussion_low_novelty_kept":
+            self._ledger_metrics["low_novelty_kept"] += 1
+        if event_type == "discussion_novelty_appended":
+            self._ledger_metrics["novelty_appends"] += 1
+        if (
+            event_type == "llm_action_parse_failed"
+            and diagnostic_record.get("will_retry") is True
+            and action in {"discussion", "discussion_body"}
+        ):
+            self._ledger_metrics["discussion_regenerations"] += 1
         if event_type == "duplicate_claim_suppressed":
             self._ledger_metrics["duplicate_claims_suppressed"] += 1
         if event_type in {
@@ -371,6 +423,8 @@ class GameLogger:
             "context_strategy_counts": {},
             "secret_leak_count": 0,
             "secret_leak_actions": {},
+            # TASK-048: モデル別の新規性計測（primaryクラス別）と低新規性処理
+            "novelty_primary_counts": {},
             # 思考生成非対応と判明して think=off へ切り替えたモデルの数
             "thinking_capability_fallbacks": 0,
             # 思考が生成上限を消費して切り詰め、think=offへ自動切替した回数
@@ -493,8 +547,50 @@ class GameLogger:
                     asdict(fact) for fact in state.fact_ledger.model_inferences
                 ],
             },
+            # TASK-047: 未確定解釈台帳（公開仮説のみ）と矛盾・抑制カウントを評価ログへ残す
+            "hypothesis_ledger": state.hypothesis_ledger.serialize_public(),
+            # TASK-048: 既出論点台帳（要約・連呼・正当な繰り返し）を評価ログへ残す
+            "topic_ledger": state.topic_ledger.serialize(),
+            "unverified_hypothesis_as_fact_alerts": sum(
+                alert.category == UNVERIFIED_HYPOTHESIS_AS_FACT
+                for alert in state.integrity_alerts
+            ),
             "ledger_metrics": {
                 **self._ledger_metrics,
+                **state.hypothesis_ledger.metrics(),
+                **state.topic_ledger.metrics(),
+                "novelty_class_counts": dict(self._novelty_class_counts),
+                # TASK-048: 新規性・修復・再生成・待ち時間の比較指標（old/new A/Bに使う）
+                "novelty_rate": round(
+                    int(self._ledger_metrics["novelty_present"])
+                    / max(1, int(self._ledger_metrics["novelty_measurements"])),
+                    4,
+                ),
+                "restated_topics_per_body": round(
+                    int(self._ledger_metrics["novelty_restated_topics"])
+                    / max(1, int(self._ledger_metrics["novelty_measurements"])),
+                    4,
+                ),
+                "legitimate_repetitions_per_body": round(
+                    int(self._ledger_metrics["novelty_legitimate_repetitions"])
+                    / max(1, int(self._ledger_metrics["novelty_measurements"])),
+                    4,
+                ),
+                "ledger_repair_rate": round(
+                    int(self._ledger_metrics["ledger_repairs"])
+                    / max(1, int(self._ledger_metrics["discussion_bodies"])),
+                    4,
+                ),
+                "regeneration_rate": round(
+                    int(self._ledger_metrics["discussion_regenerations"])
+                    / max(1, int(self._ledger_metrics["discussion_bodies"])),
+                    4,
+                ),
+                "avg_discussion_seconds": round(
+                    float(self._ledger_metrics["discussion_elapsed_seconds"])
+                    / max(1, int(self._ledger_metrics["discussion_bodies"])),
+                    3,
+                ),
                 "retry_rate": round(
                     int(self._ledger_metrics["retries"])
                     / max(1, int(self._ledger_metrics["completed_actions"])),
@@ -591,6 +687,8 @@ class GameLogger:
                     asdict(fact) for fact in state.fact_ledger.model_inferences
                 ],
             },
+            # 私的仮説（推理メモ由来）も含めた完全な台帳
+            "hypothesis_ledger": state.hypothesis_ledger.serialize(),
             "player_action_memories": {
                 player: [
                     SelfConsistencyGuard.serialize(memory)
@@ -660,6 +758,11 @@ def run_cli_game(args: argparse.Namespace) -> int:
         getattr(args, "question_hint_mode", DEFAULT_QUESTION_HINT_MODE)
     )
     options["question_hint_mode"] = question_hint_mode
+    # TASK-048: 低新規性時の処理（既定 publish=そのまま公開・再生成しない）
+    novelty_policy = normalize_novelty_policy(
+        getattr(args, "novelty_policy", DEFAULT_NOVELTY_POLICY)
+    )
+    options["novelty_policy"] = novelty_policy
     if args.thinking in {"on", "off"}:
         options["thinking"] = args.thinking == "on"
     for key, value in action_num_predict.items():
@@ -678,6 +781,8 @@ def run_cli_game(args: argparse.Namespace) -> int:
     state = create_game(seed=args.seed, config_path=Path(args.models_file), **kwargs)
     # TASK-038: engine側の本文診断も同じ強制度を使う（state経由で参照される）
     state.question_hint_mode = question_hint_mode
+    # TASK-048: 台帳・新規性計測も同じポリシーを使う（state経由で参照される）
+    state.novelty_policy = novelty_policy
 
     meta = {
         "mode": args.mode,
@@ -698,6 +803,8 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "default_thinking_by_action": dict(DEFAULT_THINKING_BY_ACTION),
         "dynamic_context": bool(getattr(args, "dynamic_context", True)),
         "question_hint_mode": question_hint_mode,
+        # TASK-048: 低新規性時の処理ポリシー（publish/append/legacy_repair）をログへ残す
+        "novelty_policy": novelty_policy,
         "base_url": args.base_url,
         "show_private": args.show_private,
         "response_language": getattr(args, "language", None),
@@ -755,6 +862,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "none": "none（質問欄・回答指示なし・完全中立の証拠のみ）",
     }
     print(f"質問ヒントモード: {question_hint_mode_labels[question_hint_mode]}")
+    novelty_policy_labels = {
+        "publish": "publish（低新規性でも本文をそのまま公開・再生成も文の除去もしない）",
+        "append": "append（本文を保持し、未論点への短い任意の追記要求を1回だけ送る）",
+        "legacy_repair": "legacy_repair（旧挙動: 重複文の除去→1回の意味的再要求）",
+    }
+    print(f"低新規性ポリシー: {novelty_policy_labels[novelty_policy]}")
     print("player設定の行動別num_predict:")
     for player in state.players:
         per_action = (
@@ -867,6 +980,14 @@ def run_cli_game(args: argparse.Namespace) -> int:
                     f"→必要量概算={event.get('context_needed_tokens', '不明')}"
                     f", 優先元={event.get('num_ctx_setting_source', '不明')})"
                 )
+            if event.get("effective_context_limit") is not None:
+                # TASK-046: env・Modelfile・/api/ps・設定から解決した実効上限の単一値を表示する。
+                retry_fit_note += (
+                    f" (実効上限={event.get('effective_context_limit')}"
+                    f", 解決元={event.get('context_budget_source', '不明')}"
+                    + (", 設定値>サーバー観測値(不一致)" if event.get("context_limit_conflict") else "")
+                    + ")"
+                )
             print(
                 f"{prefix} LLM要求 #{request_number} [{request_reason}] ({tool_label}): API要求num_ctx={requested_context}, "
                 f"Modelfile PARAMETER num_ctx={modelfile_context}, "
@@ -901,6 +1022,28 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 f"num_predict<={event.get('num_predict')}・発言予算{event.get('evidence_ratio')}で送信します",
                 flush=True,
             )
+        elif event_type == "effective_context_resolution":
+            # TASK-046: env・Modelfile・/api/ps・設定から解決した単一値を表示する。
+            # 設定由来・サーバー観測値・採用値を別々に示し、解釈の曖昧さを解消する。
+            print(
+                f"{prefix} 実効コンテキスト上限を解決: 採用={event.get('effective_context_limit', '未設定')} "
+                f"(解決元={event.get('context_budget_source', '不明')}, "
+                f"設定={event.get('configured_context_limit', '未設定')}, "
+                f"サーバー観測={event.get('server_observed_context_limit', '未設定')})"
+                + (
+                    " — 設定値がサーバー観測値（/api/ps・env・Modelfile）を超える不一致あり"
+                    if event.get("context_limit_conflict")
+                    else ""
+                ),
+                flush=True,
+            )
+        elif event_type == "context_compression_stage":
+            # TASK-046: 再要求のcore-ledger圧縮で保持した証拠を表示する（発言の自由度は維持）。
+            print(
+                f"{prefix} コンテキスト圧縮 [{event.get('compression_reason', 'retry')}]: "
+                "公開CO・占い判定・投票・死亡・直近発言・本人への未回答質問・直近反証を保持",
+                flush=True,
+            )
         elif event_type == "ledger_repair":
             reason = event.get("reason")
             if reason == "meta_instruction_echo":
@@ -910,9 +1053,31 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 )
             elif reason == "repeated_discussion_topic":
                 print(
-                    f"{prefix} 当日の議論で重複した文を本文から除去しました（メタ定型文は挿しません）",
+                    f"{prefix} 当日の議論で重複した文を本文から除去しました（メタ定型文は挿しません・legacy_repairのみ）",
                     flush=True,
                 )
+        elif event_type == "discussion_novelty_measured":
+            # TASK-048: 出力後の本文を 新規証拠/反証/立場変更/質問への応答 などで計測する
+            print(
+                f"{prefix} 新規性計測 [{event.get('novelty_primary', 'unknown')}]: "
+                f"score={event.get('novelty_score')}, 新論点={event.get('novelty_new_topics')}, "
+                f"連呼={event.get('novelty_restated_topics')}, "
+                f"正当な再確認={event.get('novelty_legitimate_repetitions')}",
+                flush=True,
+            )
+        elif event_type == "llm_discussion_low_novelty_kept":
+            print(
+                f"{prefix} 低新規性 [{event.get('reason', 'repeated_discussion_topic')}]: "
+                "本文をそのまま公開しました（再生成・文の除去なし）"
+                + ("（追記要求は拒否/失敗）" if event.get("append_declined") else ""),
+                flush=True,
+            )
+        elif event_type == "discussion_novelty_appended":
+            print(
+                f"{prefix} 低新規性 [{event.get('reason', 'repeated_discussion_topic')}]: "
+                "既存本文を保持し、未論点への短い追記だけを追加しました（全文再生成なし）",
+                flush=True,
+            )
         elif event_type == "llm_action_completed":
             retries = int(event["total_retries"])
             fallback = "有" if event["fallback_used"] else "無"
@@ -1248,6 +1413,18 @@ def build_parser() -> argparse.ArgumentParser:
             "regenerates for answer format. strict: legacy behavior (answer must "
             "appear in the first sentence, one semantic retry). none: no question "
             "section or answer instruction at all (fully neutral evidence)."
+        ),
+    )
+    parser.add_argument(
+        "--novelty-policy",
+        choices=["publish", "append", "legacy_repair"],
+        default="publish",
+        help=(
+            "What to do when a discussion body adds no new point (measured, not forced). "
+            "publish (default): keep and publish the body as-is, no regeneration and no "
+            "sentence removal. append: keep the body and send one short optional "
+            "addition request only. legacy_repair: old behavior (remove repeated "
+            "sentences, then one semantic retry) for A/B comparison."
         ),
     )
     parser.add_argument(

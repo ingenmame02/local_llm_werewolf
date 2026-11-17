@@ -357,6 +357,7 @@ class OllamaClient:
         process_env_context = os.environ.get("OLLAMA_CONTEXT_LENGTH")
         diagnostics: dict[str, object] = {
             "process_ollama_context_length_env": process_env_context,
+            "process_ollama_num_ctx_env": os.environ.get("OLLAMA_NUM_CTX"),
             "process_ollama_num_parallel_env": os.environ.get("OLLAMA_NUM_PARALLEL"),
             "modelfile_num_ctx": None,
             "modelfile_num_ctx_error": None,
