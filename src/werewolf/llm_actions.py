@@ -35,6 +35,7 @@ from .discussion_format import (
     QUESTION_HINT_STRICT,
     answers_previous_question,
     extract_discussion_body,
+    extract_reasoning_memo,
     has_discussion_output_markers,
     is_pass_body,
     normalize_question_hint_mode,
@@ -90,7 +91,10 @@ RETRY_NUM_PREDICT_LIMIT = 1024
 RETRY_NUM_PREDICT_SOURCE = "retry_generation_cap"
 RETRY_NUM_CTX_SOURCE = "retry_context_fit"
 # 日本語-heavyのプロンプト文字数からトークンを概算する係数と、ツール往復・余白の余裕。
-RETRY_NUM_CTX_TOKENS_PER_CHAR = 0.8
+# TASK-046: game_22754212a062 で実測 prompt_eval_count/送信文字数 = avg 0.33
+# （min 0.25 / max 0.39, n=63）だった。0.8 は約2.4倍の過大概算で、動的発言履歴予算を
+# 下限まで潰し、直近の発言が削除される直接原因になった。安全側の 0.5 を使う。
+RETRY_NUM_CTX_TOKENS_PER_CHAR = 0.5
 RETRY_NUM_CTX_MARGIN_TOKENS = 1024
 RETRY_NUM_CTX_MIN_FIT = 2048
 
@@ -104,7 +108,9 @@ CONTEXT_MARGIN_TOKENS = 512
 CONTEXT_MIN_CTX = 2048
 CONTEXT_SHRINK_RATIO = 2
 # 発言履歴（CONVERSATION_EVIDENCE相当）の文字数予算の下限・上限。
-CONTEXT_EVIDENCE_MIN_CHARS = 600
+# TASK-046: 600字は直近の議論数件しか残さなかった（game_22754212a062 では42回のうち
+# 40回が下限に潰れ、Day1 6発言→2件だけ保持）。議論の断裂を防ぐため下限を引き上げる。
+CONTEXT_EVIDENCE_MIN_CHARS = 2000
 CONTEXT_EVIDENCE_MAX_CHARS = 12000
 DYNAMIC_CONTEXT_SOURCE = "dynamic_context_fit"
 # タイムアウト observed モデルの議論・人狼相談では、思考off・生成上限・発言予算を
@@ -806,6 +812,10 @@ class OllamaActions(ActionPolicy):
         # TASK-034: 本文抽出＋重大度診断＋段階的処理。
         # 本文が存在する場合はパスへ置換せず情報を保持。空または致命的違反のみ安全フォールバック。
         extracted = extract_discussion_body(body)
+        # モデル推理メモの抽出・保存
+        reasoning_memo = extract_reasoning_memo(body)
+        if reasoning_memo:
+            self.state.store_model_reasoning_memo(player, reasoning_memo)
         previous_message = round_transcript[-1] if round_transcript else None
         diagnosis = diagnose_discussion_body(
             extracted,

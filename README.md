@@ -110,6 +110,7 @@ ollama serve
 | `--context-strategy {...}` | `hybrid_retrieval` | 議論に渡す履歴の構成（後述） |
 | `--question-hint-mode {strict,soft,none}` | `soft` | 直前の質問への回答指示の強さ。`soft` は観測のみ／`strict` は旧来（1文目ルール＋1回再生成）／`none` は質問欄も指示も出しません |
 | `--language {English,Japanese}` | 設定／日本語 | 応答言語 |
+| `--personality {…profiles…,free}` | 設定そのまま | 全プレイヤーの個性プロファイルを上書き。`free` は自由発言モード（話し方の preset なし） |
 | `--log-dir DIR` | `logs` | JSONL ログの出力先 |
 | `--base-url URL` | `http://localhost:11434` | Ollama API のベース URL |
 | `--show-private` | off | 秘密情報を端末に表示し、管理者ログも生成 |
@@ -146,7 +147,7 @@ ollama serve
 | `timeout` | このプレイヤーだけのリクエスト時間上限（秒） |
 | `num_predict` / `num_predict_by_action` | 生成上限（全体 / 行動別） |
 | `thinking` / `thinking_by_action` | 思考生成（全体 / 行動別） |
-| `personality_profile` | 議論の話し方の傾向（`balanced` `analytical` `questioning` `assertive` `cautious` `consensus` `intuitive`） |
+| `personality_profile` | 議論の話し方の傾向（`balanced` `analytical` `questioning` `assertive` `cautious` `consensus` `intuitive`）。`null` / `"free"` / `"none"` は自由発言モード（preset 適用なし） |
 | `context_strategy` | このプレイヤーだけのコンテキスト戦略 |
 | `claim_coaching` | CO の先頭形式案内を強調（既定 `false`。議論の自由度・CO 保留・パスは制限しません） |
 | `temperature` / `top_p` / `top_k` / `repeat_penalty` | プレイヤー別サンプリング（許容範囲 0–2 / 0–1 / 0–400 / 0–2） |
@@ -168,7 +169,26 @@ ollama serve
 - 真占い師が未公開の判定を口にした応答は CO 行を決定的に補完して受理し、再試行とフォールバックを避けます（修復文は応答言語で書き、本文を保持します）。
 - 昼議論プロンプトには確定ルール・ゲーム台帳とは別に「人狼セオリーカード」を含めます（対抗 CO のない初日単独 CO の評価、狂人を占うと人間が出る＝人間判定は村人の確定ではない、等）。
 - 個性（`personality_profile`）は昼の議論本文だけに影響し、CO の判定や対象選択には影響しません。議論の質・事実整合性・質問回答・形式指示より優先度が低く、追加の説明や質問を強制しません。
+- 自由発言モード（`personality_profile` を `null` / `"free"` / `"none"` にするか `--personality free`）は個性 preset を一切適用しません。口調・構成・文量・注目点をモデル自身の判断に任せ、`[Expression Freedom]` ブロックで「preset がない」ことを明示します。昼議論の `[BODY]` も文量・構成の固定指示を外します。役職の目的・勝敗条件・行動制約・確定事実・出力形式（CO/結果行）・秘匿情報の禁は preset 適用時と同一です。 preset を適用しない設定ファイルは `config/players_free.json`（`--models-file config/players_free.json`）です。
 - `--discussion-claim-mode candidates`（占い師・CO 公開済みプレイヤーのみ）/ `all`（全員）は二段階 CO の比較用です。CO 専用リクエストが増えるため呼び出し回数・所要時間が増える可能性があります。同一シードで各モードを実行し、ログの `discussion_claim_mode` と `ledger_metrics`（CO 呼び出し、実送信・再試行、重複 CO、台帳修復、本文保持、質問未回答、処理時間）を比較してください。
+## 推理メモ（【推理メモ】 / [REASONING]）
+
+昼議論の応答に任意の私用推理メモ欄を追加します。モデルは毎ターン自分の推理を構造化して記録し、次のターンで自身の分析を発展させることができます。
+
+```text
+【CO】なし
+【推理メモ】Player 3が怪しい。Player 1と同じ発言パターン。Player 4がPlayer 1をかばっている。次はPlayer 3に投票意向を問う。
+【本文】Player 3の発言パターンが気になります。投票意向を教えてください。
+```
+
+- `【推理メモ】`（日本語） / `[REASONING]`（英語）は**任意**です。書かない場合も従来通り動作します。
+- 推理メモは本人だけの情報です。公開本文（`【本文】` / `[BODY]`）には含めず、公開会話履歴にも登録しません。
+- 内容の推奨: 誰を疑うかと根拠、他者の気になる発言、誰が誰をかばっているか、今後の方針（質問・投票先）。
+- 次のターンのプロンプトに `[YOUR_PREVIOUS_REASONING_MEMO]` / `【あなたの以前の推理メモ】` として直近5ターン分の自分のメモが返され、一貫性の維持と分析の発展に使えます。
+- システム由来の `CONTINUITY_MEMO`（公開事実・投票・CO台帳由来）とモデルが自分で書いた推理メモは別々に保持されます。
+- ベンチマークの `--reasoning-memory on/off/both` はシステム由来メモの有無を比較します。モデルが書く推理メモは `reasoning_memory_enabled` が `true` の場合に有効になります。
+
+
 
 ## コンテキスト戦略
 
@@ -222,6 +242,7 @@ python scripts/evaluate_models.py   # 絞り込みなし = 全モデル
 
 - `--models` はモデル名・プレイヤー名の部分一致（大文字小文字無視）で評価対象を絞り込みます。プロンプトは常に 8 人分の名前を使うため、絞り込みしてもゲーム状況は同じです。
 - 主なオプション: `--models-file` / `--output` / `--personality` / `--rounds` / `--timeout` / `--temperature` / `--context-length` / `--max-context-length` / `--no-dynamic-context` / `--num-predict` / `--num-predict-by-action` / `--thinking` / `--thinking-by-action` / `--base-url`
+- `--personality free` は個性 preset を廃した自由発言モードです。同じモデル・同じシード・同じラウンド数で preset 適用時（`--personality analytical` 等）と別出力先へ比較し、`summary.json` の `personality_override` / `personality_profiles` で条件を区別します。
 - 文量の変更効果は出力文字数ではなく、`done_reason` 別（空応答・思考のみ・`done_reason=length`）、生成トークン数（`eval_count`）、生成上限の実解決と出所（`action_budget_key` / `num_predict_source` / `num_predict_by_attempt`）、解析成功率、具体性（`specific_rate`）、実送信回数（`request_attempts`）、処理時間、フォールバック率で比較します。
 - `summary.json` に `models_filter`・`selected_models`・モデル別の `by_action`・思考 on/off 送信数・`thinking_affordable_num_predict` を記録します。`generation_truncated` が多いモデルは上限増の候補、タイムアウトが多いモデルは上限据え置き候補として分けて判定します。
 - Seer CO 比較では CO 成立率・結果公開率・ゲーム内 CO 公開率・フォールバック率を出力します。

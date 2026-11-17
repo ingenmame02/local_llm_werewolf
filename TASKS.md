@@ -1831,8 +1831,145 @@ Day1の初ターンは公開情報が0件なのに、モデルが「昨日の発
   空応答フォールバックが`Pass`にならない、相談フォールバックの応答言語化。
 - `python -m pytest -q` 32件 green。実機試合はローカルLLM負荷のため本タスクでは未実行。
 
+## TASK-044 追加実装 — 個性プロファイルの制限を廃した自由発言モード
+
+状態：完了（LL不使用テストで検証。実機試合はローカルLLM負荷のため本タスクでは未実行）
+
+### 背景
+
+`config/players.json` の `personality_profile` は昼議論のシステムプロンプトへ「話し方の傾向」の
+preset を注入し、全プレイヤーの口調・注目点・議論姿勢を揃えていました。モデル本来の口調・構成・
+推理の方向をそのまま出すモード（個性制限なし）が必要になった。
+
+### 実装要件
+
+- `personality_profile` に `free` を受け、preset を適用しない自由発言モードを追加する
+  （別名 `none` / `null` / `off` / `natural` / `custom`、JSONの `null` も自由扱い）。
+- 自由発言モードでは `[Personality Profile]` ブロックを出さず、代わりに `[Expression Freedom]`
+  ブロックで「preset が適用されていない」ことを明示する。
+- 昼議論の `[BODY]` の文量・構成の固定指示（3-5文）も外し、文量と構成をモデルの判断に任せる。
+- 役職の目的・勝敗条件・行動制約・確定事実・台帳・出力形式（CO/結果行）・秘匿情報の禁は
+  preset 適用時と完全に同一のままにする。
+- プレイヤー別設定（JSON）と CLI の全体上書き（`--personality free`）の両方で選べるようにする。
+- 評価スクリプトの `--personality` でも `free` を選べるようにし、ログに上書き値と適用値を残す。
+
+### 実装
+
+- `src/werewolf/config.py`: `FREE_PERSONALITY_PROFILE` / `PERSONALITY_PROFILE_ALIASES` /
+  `PERSONALITY_CHOICE_KEYS` / `normalize_personality_profile()` / `is_free_personality()` を追加し、
+  `load_player_configs()` と `PlayerConfig.__post_init__()` の个性検証を一本化した。
+- `src/werewolf/models.py`: `Player.__post_init__()` で個性を正規化し、別名や `None` を `free` に解決する。
+- `src/werewolf/prompts.py`: `FREE_PERSONALITY_SYSTEM_BLOCK` を追加して `build_system_prompt()` を分岐し、
+  `_discussion_body_line()` を新設して `[BODY]` の文量・構成指示を自由モードで自由度へ置き換えた。
+- `src/werewolf/setup.py`: `create_game(personality_profile=...)` を追加し、設定上書きを
+  `dataclasses.replace` に統合した（`response_language` と同じ経路）。
+- `src/werewolf/cli.py`: `--personality`（choices に `free` を含む）を追加し、ログ meta へ
+  `personality_override` と実際に適用された `personality_profiles` を記録した。
+- `scripts/evaluate_models.py`: `--personality` の choices に `free` を追加した。
+- `config/players_free.json`: 8プレイヤー全員 `personality_profile: "free"` の preset を追加
+  （モデル・生成上限・思考・サンプリングは `config/players.json` と同じ）。
+
+### 検証
+
+- `tests/test_free_personality_mode.py`（LL不使用、11件）: 個性の正規化（別名・`None`・不正値の拒否）、
+  `PlayerConfig` とローダーの検証、free のシステムプロンプトに preset が出ず `[Expression Freedom]` が入る、
+  preset 部分以外は同一、`[BODY]` の文量指示だけが差異（台帳・秘匿情報・出力形式は同一）、狼相談の相方名と
+  公開議論の秘匿禁の維持、上書きが他の生成設定を保持、`config/players_free.json` の全員 `free`、
+  CLI parser の受理と不正値の拒否。
+- `python -m pytest -q` 50件 green、`python -m compileall -q src scripts tests` 成功、
+  `git diff --check` 成功、CLI / 評価スクリプトの `--help` に `--personality {…,free}` を確認。
+- mock 実行確認: `python src/werewolf/cli.py --mode mock --seed 42 --personality free` と
+  `python src/werewolf/cli.py --mode mock --seed 7 --models-file config/players_free.json`。
+  ログの `game_init` に `personality_override: "free"` と全プレイヤーの `personality_profiles` が記録された。
+
+### 使用例
+
+```powershell
+# 設定ファイル側で自由発言モード
+python src/werewolf/cli.py --mode ollama --models-file config/players_free.json --seed 1001 --timeout 180 --language Japanese
+
+# 現行設定のまま CLI で全プレイヤーの個性を自由発言モードへ上書き
+python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 1001 --timeout 180 --personality free --language Japanese
+
+# preset 適用時との比較（別出力先で同じシード・ラウンド数）
+python scripts/evaluate_models.py --seed 1001 --rounds 3 --personality free --output evaluation-results/task044-free
+python scripts/evaluate_models.py --seed 1001 --rounds 3 --personality analytical --output evaluation-results/task044-analytical
+```
+
+## TASK-045 追加実装 — モデルが毎ターン書く推理メモ（【推理メモ】 / [REASONING]）
+
+状態：完了（LL不使用テスト50件 green・compileall・head_llm.py/head_prompts.py 構文確認済み。実機試合はローカルLLM負荷のため本タスクでは未実行）
+
+### 背景
+
+既存の推理メモ（TASK-033の`CONTINUITY_MEMO`）は公開事実・投票・CO台帳からゲームエンジンが決定的に生成するもので、モデル自身の「誰を疑うか、気になる発言、防御行動、今後の方針」を明示的に記録する欄がなかった。モデルが毎ターン自分の推理を構造化して書き、次ターンに自分の分析を発展させられることで、議論の深化・一貫性向上・疑いの継承が期待できる。
+
+### 実装要件
+
+- `【推理メモ】`（日本語）/ `[REASONING]`（英語）マーカーを議論応答の任意欄として追加する（`【CO】`→`【結果】`→`【推理メモ】`→`【本文】`の順）。
+- 推理メモは公開本文から除外し、公開会話履歴へ登録しない。
+- `ReasoningMemo`に`model_written_memo`（直近1件）と`model_memo_history`（直近5件）を追加し、`GameState.store_model_reasoning_memo()`で保存する。
+- 次のターンのプロンプトに`[YOUR_PREVIOUS_REASONING_MEMO]`/`【あなたの以前の推理メモ】`として本人の過去メモを返す。
+- プロンプトに`[REASONING_MEMO_GUIDANCE]`/`【推理メモの指針】`ブロックを追加し、記述内容を誘導する。
+- ソフト実装（強制しない）: 書かない場合も従来動作を維持し、解析・フォールバックに影響しない。
+- 秘匿情報漏えい検出（`SecretLeakGuard`）・秘密漏えい再要求・CO解析・台帳は推理メモを公開情報として扱わない。
+
+### 実装
+
+- `src/werewolf/models.py`: `ReasoningMemo`に`model_written_memo: str`/`model_memo_history: list[str]`/`MODEL_MEMO_HISTORY_LIMIT: int = 5`を追加。`GameState.store_model_reasoning_memo(player_name, reasoning_text)`メソッドを追加。
+- `src/werewolf/discussion_format.py`: `REASONING_MARKER`/`REASONING_MARKER_EN`定数を追加。`has_discussion_output_markers()`で推理メモマーカーを検出。`extract_discussion_body()`で推理メモ行を公開本文から除外。`extract_reasoning_memo(content)`関数を新設（マーカー直後から次マーカーまでを抽出）。`DiscussionOutput`に`reasoning: str`フィールド追加。`parse_discussion_output()`の正規表現に`(?P<reasoning>...)`ブロックを追加（`【結果】`と`【本文】`の間、任意）。
+- `src/werewolf/engine.py`: 議論ループの両経路（discussion_body・structured output）で推理メモを抽出し`store_model_reasoning_memo()`に保存。
+- `src/werewolf/llm_actions.py`: `discuss_body()`で`extract_reasoning_memo(body)`を本文抽出直後に実行し保存。
+- `src/werewolf/prompts.py`: `output_format_instruction`に`[REASONING]`欄案内を追加。`[REASONING_MEMO_GUIDANCE]`ブロックを追加。`_reasoning_memo_text()`に`own_memo_block`（`[YOUR_PREVIOUS_REASONING_MEMO]`）を追加。`ReasoningMemo`インポートとKeyError安全（`.get()` + fallback）を追加。
+- `head_llm.py`: `discuss_body()`で推理メモ抽出・保存追加。`extract_reasoning_memo`インポート追加。
+- `head_prompts.py`: `output_format_instruction`に`【推理メモ】`欄案内追加。`【推理メモの指針】`ブロック追加。`_reasoning_memo_text()`に`【あなたの以前の推理メモ】`追加。`ReasoningMemo`インポートとKeyError安全追加。
+
+### 検証
+
+- `python -m pytest -q` 50件 green（既存テスト全て維持）。
+- `compileall` と `py_compile`（head_llm.py, head_prompts.py）構文確認成功。
+- 機能確認:
+  - `extract_reasoning_memo('[CO] None\n[REASONING] I suspect Player 3\n[BODY] Hello')` → `'I suspect Player 3'`
+  - `parse_discussion_output`が`DiscussionOutput(reasoning='I suspect Player 3')`を返す
+  - `extract_reasoning_memo`なし→`None`（従来互換）
+  - `【推理メモ】`日本語マーカー動作確認
+  - `GameState.store_model_reasoning_memo()`で`model_written_memo`と`model_memo_history`が保存される
+
+### 使用例
+
+モデルが推理メモを書く場合の応答例（Ollamaモードで`reasoning_memory_enabled=true`のとき有効）:
+
+```text
+【CO】占い師
+【結果】対象=Player 2 判定=人狼
+【推理メモ】初夜の占い結果。Player 2が人狼。Player 4のCOと結果が自分の判定と矛盾するので対抗COを疑う。今夜Player 3を占う。
+【本文】私は占い師です。Player 2は人狼です。Player 2への投票を提案します。
+```
+
+推理メモなし（従来動作）:
+
+```text
+【CO】なし
+【本文】Player 2の発言が気になります。Player 3の意見も聞きたいです。
+```
+
+### 公開・非公開の扱い
+
+| 項目 | 公開 | 非公開 |
+|---|---|---|
+| `【本文】` の議論本文 | ○（公開会話へ登録） | × |
+| `【推理メモ】` の内容 | × | ○（本人のプロンプトにのみ返す） |
+| `【CO】`・`【結果】` | ○（台帳に公開主張として登録） | × |
+| `model_memo_history`（直近5件） | × | ○（本人限定） |
+
+### 既知の制約・今後の拡張
+
+- 推理メモはモデルの自由記述であり、構造化された疑いスコアや投票意向の機械的抽出は現状行っていません。
+- ベンチマークの`--reasoning-memory on/off`はシステム由来メモの比較であり、モデルが書く推理メモの有無（`model_written_memo`が空か否か）の独立条件比較は未実装です。
+- 将来: 推理メモからの疑いランキング抽出、他プレイヤーへの部分的公開（観戦モード）、推理メモの矛盾検出。
+
 $env:OLLAMA_NUM_PARALLEL="1"
 $env:OLLAMA_KEEP_ALIVE = "5m"
 ollama serve
 
-python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 1001 --timeout 180 --temperature 0.7 --question-hint-mode none --show-private --language Japanese 
+python src/werewolf/cli.py --mode ollama --models-file config/players.json --seed 1001 --timeout 180 --temperature 0.7 --question-hint-mode none --show-private --language Japanese --personality free

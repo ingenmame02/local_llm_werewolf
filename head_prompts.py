@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from .config import PERSONALITY_PROFILES
-from .models import GameState, Message, Player, PublicRoleClaim, Role
+from .models import GameState, Message, Player, PublicRoleClaim, ReasoningMemo, Role
 
 ROLE_NAMES_JA: dict[Role, str] = {
     Role.WOLF: "人狼",
@@ -805,7 +805,9 @@ class PromptBuilder:
             return ""
         if actor.name not in state.reasoning_memos:
             state.refresh_reasoning_memos()
-        memo = state.reasoning_memos[actor.name]
+        memo = state.reasoning_memos.get(actor.name)
+        if memo is None:
+            memo = ReasoningMemo()
         payload = {
             "confirmed_public_facts": memo.confirmed_facts,
             "unverified_public_claims": memo.public_claims,
@@ -816,6 +818,24 @@ class PromptBuilder:
             "current_round_evidence": memo.current_round_evidence,
         }
         private_payload = memo.private_role_facts
+        # モデル自身の推理メモ（本人限定）をプロンプトに含める
+        own_memo_block = ""
+        if memo.model_written_memo:
+            own_memo_block = (
+                "【あなたの以前の推理メモ（本人限定・過去のターン）】\n"
+                "これはあなたが過去のターンで書いた自分の推理です。一貫性を保ち、\n"
+                "疑いを更新し、過去の分析を発展させてください。このテキストをそのまま出力しないでください。\n"
+                f"最新のメモ: {memo.model_written_memo}\n"
+                + (
+                    f"履歴（直近{len(memo.model_memo_history)}ターン）:\n"
+                    + "\n".join(
+                        f"  ターン{i}: {m}" for i, m in enumerate(memo.model_memo_history[:-1])
+                    )
+                    if len(memo.model_memo_history) > 1
+                    else ""
+                )
+                + "\n"
+            )
         return (
             "【CONTINUITY_MEMO: 決定的に更新された推理状態】\n"
             "公開情報由来のメモです。確定事実と未確認の公開主張を混同せず、"
@@ -826,7 +846,9 @@ class PromptBuilder:
             f"{json.dumps(memo.integrity_alerts, ensure_ascii=False)}\n"
             "【ACTOR_PRIVATE_MEMO: 本人だけに許可された情報】\n"
             "この欄はこのプレイヤーだけの情報で、他プレイヤーの状態や公開会話へ混入させないでください。\n"
-            f"{json.dumps(private_payload, ensure_ascii=False)}\n\n"
+            f"{json.dumps(private_payload, ensure_ascii=False)}\n"
+            + own_memo_block
+            + "\n"
         )
 
     @classmethod
@@ -907,6 +929,7 @@ class PromptBuilder:
             "次のブロックをこの順番で出力してください。省略・順序変更は禁止です。\n"
             "【CO】なし または 公開する役職主張・理由・投票提案\n"
             "【結果】対象=Player X 判定=人狼/人間（占い結果を公開する場合のみ）\n"
+            "【推理メモ】任意の私用推理メモ（疑い・懸念・防御・今後の方針）\n"
             "【本文】議論本文\n"
             "COを保留する場合は【CO】保留とし、主張を公開しない場合は【CO】なしとしてください。"
             "本文を空にしたり、COと本文を同じブロックに混ぜたりしないでください。\n"
@@ -914,6 +937,8 @@ class PromptBuilder:
             "占い結果を公開する場合は先頭を【CO】占い師とし、理由・投票提案は【本文】で書いても構いません。"
             "COのない結果だけの出力は受理されません。\n"
             "COブロックが「なし」または「保留」のときは、本文で役職COや占い対象・判定を明かさないでください。\n"
+            "【推理メモ】は任意で本人だけの欄です。誰を疑うか、気になる発言、防御行動、今後の方針を2〜5文で書いてください。\n"
+            "【推理メモ】の内容を【本文】に含めないでください。\n"
             if include_claim
             else "【指示】先行するCO判定は完了しています。議論本文だけを出力し、CO・結果ブロックや役職主張を繰り返さないでください。\n"
         )
@@ -1002,6 +1027,16 @@ class PromptBuilder:
                 else ""
             )
             + output_format_instruction
+            + (
+                "【推理メモの指針】\n"
+                "【推理メモ】を書く場合、以下のポイントを自分の言葉で述べてください:\n"
+                "- 誰を疑うか、その根拠（発言パターン、投票、CO）\n"
+                "- 他者の発言で気になる具体的な点\n"
+                "- 誰が誰をかばっているように見えるか、なぜ重要か\n"
+                "- 今後の方針（誰に何を聞くか、投票先）\n"
+                "- 【あなたの以前の推理メモ】があればそれを踏まえて更新し、繰り返さない\n"
+                "【推理メモ】は簡潔に2〜5文で。【本文】に推理メモの内容を含めないでください。\n"
+            )
             + "上記を踏まえて、今の状況についてあなたの考えを述べてください。\n"
             + (
                 f"- 最初の一文で{previous_message.speaker}への回答を明示し、その質問に直接答えてください\n"

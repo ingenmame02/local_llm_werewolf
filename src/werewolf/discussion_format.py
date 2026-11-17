@@ -8,9 +8,11 @@ from .models import Message
 CO_MARKER = "【CO】"
 RESULT_MARKER = "【結果】"
 BODY_MARKER = "【本文】"
+REASONING_MARKER = "【推理メモ】"
 CO_MARKER_EN = "[CO]"
 RESULT_MARKER_EN = "[RESULT]"
 BODY_MARKER_EN = "[BODY]"
+REASONING_MARKER_EN = "[REASONING]"
 
 ValidationSeverity = Literal["fatal", "repairable", "warning", "ok"]
 
@@ -78,6 +80,7 @@ class DiscussionOutput:
     claim: str
     body: str
     result: str = ""
+    reasoning: str = ""
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,7 @@ def extract_discussion_body(content: str | None) -> str | None:
 
     - 思考タグ（`<think>`…`</think>`）を除去する
     - `【CO】` / `[CO]` / `【結果】` / `[RESULT]` 行は役職主張として分離し、本文から除外する
+    - `【推理メモ】` / `[REASONING]` 行は本人限定の推理メモとして本文から除外する
     - `【本文】` / `[BODY]` マーカーがあればその中身を優先する
     - JSON・見出し・箇条書きがなくても自然文をそのまま返す
     - 空本文・Noneは None を返す（「パス」は有効な発言としてそのまま返す）
@@ -177,12 +181,50 @@ def extract_discussion_body(content: str | None) -> str | None:
         line.strip()
         for line in text.splitlines()
         if line.strip()
-        and not re.match(r"^(?:【(?:CO|結果)】|\[(?:CO|RESULT)\])", line.strip(), re.IGNORECASE)
+        and not re.match(
+            r"^(?:【(?:CO|結果|推理メモ)】|\[(?:CO|RESULT|REASONING)\])",
+            line.strip(),
+            re.IGNORECASE,
+        )
     ]
     body = " ".join(kept_lines).strip()
     if not body:
         return None
     return body
+def extract_reasoning_memo(content: str | None) -> str | None:
+    """モデル出力から推理メモを抽出する（本人限定・公開本文には含めない）。
+
+    `【推理メモ】` / `[REASONING]` マーカーの直後から次マーカーまたは文末までを
+    取り出す。マーカーが存在しない場合は None を返す。
+    """
+    if content is None or not isinstance(content, str) or not content:
+        return None
+    text = _THINK_BLOCK.sub("", content)
+    text = _UNCLOSED_THINK_BLOCK.sub("", text)
+    marker_match = re.search(
+        r"(?:【推理メモ】|\[REASONING\])\s*",
+        text,
+        re.IGNORECASE,
+    )
+    if marker_match is None:
+        return None
+    remaining = text[marker_match.end():]
+    # 次のマーカー行（CO, RESULT, BODY）までを推理メモとして取り出す
+    next_marker = re.search(
+        r"^(?:【(?:CO|結果|本文)】|\[(?:CO|RESULT|BODY)\])",
+        remaining,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if next_marker is not None:
+        memo_text = remaining[:next_marker.start()]
+    else:
+        memo_text = remaining
+    memo = memo_text.strip()
+    if not memo:
+        return None
+    return memo
+
+
 
 
 def is_pass_body(body: str | None) -> bool:
@@ -231,12 +273,12 @@ def has_discussion_output_markers(content: str | None) -> bool:
     if content is None or not isinstance(content, str) or not content:
         return False
     return bool(
-        re.search(r"【(?:CO|結果|本文)】|\[(?:CO|RESULT|BODY)\]", content, re.IGNORECASE)
+        re.search(r"【(?:CO|結果|本文|推理メモ)】|\[(?:CO|RESULT|BODY|REASONING)\]", content, re.IGNORECASE)
     )
 
 
 def parse_discussion_output(content: str | None) -> DiscussionOutput | None:
-    """`【CO】` / `[CO]`（+任意の`【結果】` / `[RESULT]`）+`【本文】` / `[BODY]`の構造化応答を解析する。"""
+    """`【CO】` / `[CO]`（+任意の`【結果】` / `[RESULT]` + 任意の`【推理メモ】` / `[REASONING]`）+`【本文】` / `[BODY]`の構造化応答を解析する。"""
     if content is None or not isinstance(content, str) or not content:
         return None
     if not has_discussion_output_markers(content):
@@ -244,9 +286,11 @@ def parse_discussion_output(content: str | None) -> DiscussionOutput | None:
     co_count = len(re.findall(r"【CO】|\[CO\]", content, re.IGNORECASE))
     body_count = len(re.findall(r"【本文】|\[BODY\]", content, re.IGNORECASE))
     result_count = len(re.findall(r"【結果】|\[RESULT\]", content, re.IGNORECASE))
-    if co_count != 1 or body_count > 1 or result_count > 1:
+    reasoning_count = len(re.findall(r"【推理メモ】|\[REASONING\]", content, re.IGNORECASE))
+    if co_count != 1 or body_count > 1 or result_count > 1 or reasoning_count > 1:
         return None
     has_result = result_count > 0
+    has_reasoning = reasoning_count > 0
     has_body = body_count > 0
     if not has_result and not has_body:
         return None
@@ -255,6 +299,7 @@ def parse_discussion_output(content: str | None) -> DiscussionOutput | None:
     match = re.fullmatch(
         r"\s*(?:【CO】|\[CO\])[ \t]*(?P<claim>.*?)[ \t]*"
         r"(?:\r?\n[ \t]*(?:【結果】|\[RESULT\])[ \t]*(?P<result>.*?)[ \t]*)?"
+        r"(?:\r?\n[ \t]*(?:【推理メモ】|\[REASONING\])[ \t]*(?P<reasoning>.*?)[ \t]*)?"
         r"(?:\r?\n[ \t]*(?:【本文】|\[BODY\])[ \t]*(?P<body>.*?)[ \t]*)?",
         content,
         flags=re.DOTALL | re.IGNORECASE,
@@ -263,13 +308,16 @@ def parse_discussion_output(content: str | None) -> DiscussionOutput | None:
         return None
     claim = normalize_claim_field(match.group("claim"))
     result = (match.group("result") or "").strip()
+    reasoning = (match.group("reasoning") or "").strip()
     body = (match.group("body") or "").strip()
     if not claim:
         return None
     if has_body and not body:
         return None
     # 未公開を表す [RESULT] 値は「結果なし」へ正規化する（公開判定の語はそのまま）。
-    return DiscussionOutput(claim=claim, body=body, result=normalize_result_field(result))
+    return DiscussionOutput(
+        claim=claim, body=body, result=normalize_result_field(result), reasoning=reasoning
+    )
 
 
 def parse_discussion_claim(content: str | None) -> DiscussionClaim | None:

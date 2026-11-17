@@ -1,0 +1,145 @@
+{
+  "players": [
+    {
+      "name": "Player 1",
+      "model": "werewolf-calm3-22b-8k",
+      "num_ctx": 12288,
+      "max_num_ctx": 16384,
+      "recommended_num_ctx": 12288,
+      "personality_profile": "free",
+      "num_predict": 1536,
+      "num_predict_by_action": {
+        "discussion": 2560,
+        "wolf_discussion": 1280,
+        "attack": 640,
+        "seer": 640,
+        "vote": 768,
+        "co_correction": 640
+      },
+      "thinking_by_action": {
+        "discussion": false,
+        "wolf_discussion": false
+      },
+      "response_language": "日本語"
+    },
+    {
+      "name": "Player 2",
+      "model": "werewolf-muse-glimmer-8k",
+      "num_ctx": 12288,
+      "personality_profile": "free",
+      "num_predict": 4096,
+      "num_predict_by_action": {
+        "discussion": 3584,
+        "wolf_discussion": 1536,
+        "attack": 1024,
+        "seer": 1024,
+        "vote": 1024,
+        "co_correction": 640
+      },
+      "response_language": "日本語"
+    },
+    {
+      "name": "Player 3",
+      "model": "werewolf-mistral-small-8k",
+      "num_ctx": 12288,
+      "personality_profile": "free",
+      "num_predict": 1024,
+      "temperature": 0.25,
+      "top_p": 0.9,
+      "top_k": 20,
+      "num_predict_by_action": {
+        "discussion": 2048,
+        "wolf_discussion": 1024,
+        "attack": 640,
+        "seer": 640,
+        "vote": 768,
+        "co_correction": 640
+      },
+      "thinking_by_action": {
+        "discussion": false,
+        "wolf_discussion": false
+      },
+      "response_language": "日本語"
+    },
+    {
+      "name": "Player 4",
+      "model": "werewolf-glm-4.7-flash-8k",
+      "num_ctx": 12288,
+      "personality_profile": "free",
+      "num_predict": 1024,
+      "num_predict_by_action": {
+        "discussion": 2560,
+        "wolf_discussion": 1536,
+        "attack": 1024,
+        "seer": 1024,
+        "vote": 1024,
+        "co_correction": 640
+      },
+      "response_language": "日本語"
+    },
+    {
+      "name": "Player 5",
+      "model": "werewolf-qwen3.8-8k",
+      "num_ctx": 12288,
+      "personality_profile": "free",
+      "num_predict": 1024,
+      "num_predict_by_action": {
+        "discussion": 2560,
+        "wolf_discussion": 1536,
+        "attack": 768,
+        "seer": 768,
+        "vote": 768,
+        "co_correction": 640
+      },
+      "response_language": "日本語"
+    },
+    {
+      "name": "Player 6",
+      "model": "werewolf-deepseek-r1-8k",
+      "num_ctx": 12288,
+      "personality_profile": "free",
+      "num_predict": 2048,
+      "num_predict_by_action": {
+        "discussion": 4096,
+        "wolf_discussion": 2048,
+        "attack": 1024,
+        "seer": 1024,
+        "vote": 1024,
+        "co_correction": 640
+      },
+      "response_language": "日本語"
+    },
+    {
+      "name": "Player 7",
+      "model": "werewolf-gpt-oss-20b-8k",
+      "num_ctx": 12288,
+      "personality_profile": "free",
+      "num_predict": 1536,
+      "num_predict_by_action": {
+        "discussion": 3072,
+        "wolf_discussion": 1536,
+        "attack": 768,
+        "seer": 768,
+        "vote": 1024,
+        "co_correction": 1024
+      },
+      "response_language": "日本語"
+    },
+    {
+      "name": "Player 8",
+      "model": "werewolf-gemma4-8k",
+      "num_ctx": 12288,
+      "personality_profile": "free",
+      "num_predict": 4096,
+      "num_predict_by_action": {
+        "discussion": 4096,
+        "wolf_discussion": 2048,
+        "attack": 1024,
+        "seer": 1024,
+        "vote": 1024,
+        "co_correction": 640
+      },
+      "response_language": "日本語"
+    }
+  ]
+}

@@ -24,6 +24,7 @@ from werewolf import (
     ACTION_BUDGET_KEYS,
     DEFAULT_ACTION_NUM_PREDICT,
     DEFAULT_THINKING_BY_ACTION,
+    PERSONALITY_CHOICE_KEYS,
     THINKING_DEFAULT_LABELS,
     ActionPolicy,
     GameEngine,
@@ -631,6 +632,15 @@ def run_cli_game(args: argparse.Namespace) -> int:
     print(f"モード: {args.mode}")
     print(f"シード値: {args.seed}")
     print(f"プレイヤー設定: {args.models_file}")
+    # TASK-044: --personality で全プレイヤーの個性プロファイルを上書きできる
+    # （free は自由発言モード: 話し方の preset を適用しない）。
+    personality_override = getattr(args, "personality", None)
+    if personality_override is not None:
+        free_mode = personality_override == "free"
+        print(
+            f"個性プロファイル上書き: {personality_override}"
+            + ("（自由発言モード・preset なし）" if free_mode else "")
+        )
     print(f"ログ保存先: {log_dir / f'game_{game_id}.jsonl'}")
 
     action_num_predict = parse_action_num_predict_pairs(args.num_predict_by_action)
@@ -659,9 +669,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
 
     # ゲーム初期化
     # TASK-038: --language引数が指定されている場合はresponse_languageを上書き
+    # TASK-044: --personality引数が指定されている場合はpersonality_profileを上書き
     kwargs = {}
     if getattr(args, "language", None) is not None:
         kwargs["response_language"] = args.language
+    if personality_override is not None:
+        kwargs["personality_profile"] = personality_override
     state = create_game(seed=args.seed, config_path=Path(args.models_file), **kwargs)
     # TASK-038: engine側の本文診断も同じ強制度を使う（state経由で参照される）
     state.question_hint_mode = question_hint_mode
@@ -688,6 +701,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "base_url": args.base_url,
         "show_private": args.show_private,
         "response_language": getattr(args, "language", None),
+        # TASK-044: 个性の上書きと、実際に各プレイヤーへ適用されたプロファイルを残す
+        # （free は自由発言モード。ログで個性とモデル・役職を区別できる）。
+        "personality_override": personality_override,
+        "personality_profiles": {
+            player.name: player.personality_profile for player in state.players
+        },
     }
     print(f"行動別生成上限（規定）: {' / '.join(ACTION_BUDGET_DEFAULT_LABELS.values())}")
     print(
@@ -1314,6 +1333,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Language for player responses (English or Japanese)",
     ),
+    parser.add_argument(
+        "--personality",
+        choices=list(PERSONALITY_CHOICE_KEYS),
+        default=None,
+        help=(
+            "Override the configured personality profile for every player. "
+            "Use 'free' for free-expression mode (no preset speaking style; "
+            "tone, structure and focus are left to each model)."
+        ),
+    )
     parser.add_argument(
         "--log-dir",
         type=Path,

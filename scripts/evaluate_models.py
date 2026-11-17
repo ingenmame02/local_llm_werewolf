@@ -38,7 +38,7 @@ from werewolf import (
     Message,
     OllamaClient,
     OllamaError,
-    PERSONALITY_PROFILES,
+    PERSONALITY_CHOICE_KEYS,
     Player,
     PromptBuilder,
     PromptContext,
@@ -1168,11 +1168,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--personality",
-        choices=tuple(PERSONALITY_PROFILES),
+        choices=list(PERSONALITY_CHOICE_KEYS),
         default=None,
         help=(
             "Override configured personality for selected models. Use the same model "
-            "filters and multiple rounds to compare personalities."
+            "filters and multiple rounds to compare personalities. 'free' disables the "
+            "preset speaking style entirely (free-expression mode)."
         ),
     )
     parser.add_argument(

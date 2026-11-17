@@ -28,6 +28,7 @@ from .config import (
 )
 from .discussion_format import (
     extract_discussion_body,
+    extract_reasoning_memo,
     has_discussion_output_markers,
     parse_discussion_claim,
     parse_discussion_output,
@@ -520,6 +521,10 @@ class OllamaActions(ActionPolicy):
         # TASK-034: 本文抽出＋重大度診断＋段階的処理。
         # 本文が存在する場合はパスへ置換せず情報を保持。空または致命的違反のみ安全フォールバック。
         extracted = extract_discussion_body(body)
+        # モデル推理メモの抽出・保存
+        reasoning_memo = extract_reasoning_memo(body)
+        if reasoning_memo:
+            self.state.store_model_reasoning_memo(player, reasoning_memo)
         previous_message = round_transcript[-1] if round_transcript else None
         diagnosis = diagnose_discussion_body(
             extracted,

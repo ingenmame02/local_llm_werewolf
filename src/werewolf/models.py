@@ -6,7 +6,7 @@ from enum import Enum
 from .config import (
     ACTION_BUDGET_KEYS,
     GENERATION_SAMPLING_BOUNDS,
-    PERSONALITY_PROFILES,
+    normalize_personality_profile,
 )
 
 
@@ -103,14 +103,11 @@ class Player:
             raise ValueError("Player num_predict must be a positive integer.")
         if not isinstance(self.response_language, str) or not self.response_language.strip():
             raise ValueError("Player response_language cannot be empty.")
-        if (
-            not isinstance(self.personality_profile, str)
-            or self.personality_profile not in PERSONALITY_PROFILES
-        ):
-            raise ValueError(
-                "Player personality_profile must be one of "
-                f"{', '.join(PERSONALITY_PROFILES)}."
-            )
+        # TASK-044: 個性プロファイルは free（自由発言モード）も受け、正規化したキーへ直す。
+        # 別名（none/off/null相当）や None は free に解決される。
+        self.personality_profile = normalize_personality_profile(
+            self.personality_profile, "Player personality_profile"
+        )
         if not isinstance(self.claim_coaching, bool):
             raise ValueError("Player claim_coaching must be a boolean.")
         if self.num_predict_by_action is not None:
@@ -236,6 +233,11 @@ class ReasoningMemo:
     current_round_evidence: list[str] = field(default_factory=list)
     integrity_alerts: list[str] = field(default_factory=list)
     updates: list[str] = field(default_factory=list)
+    # モデルが毎ターン書く推理メモ（誰を疑うか、気になる発言、防御行動、今後の方針）
+    model_written_memo: str = ""
+    # 過去ターン分のモデル推理メモ履歴（直近N分だけ保持）
+    model_memo_history: list[str] = field(default_factory=list)
+    MODEL_MEMO_HISTORY_LIMIT: int = 5
 
 
 @dataclass
@@ -671,6 +673,19 @@ class GameState:
                 **current_parts,
                 updates=updates or ["No change since previous turn"],
             )
+
+    def store_model_reasoning_memo(self, player_name: str, reasoning_text: str) -> None:
+        """モデルが書いた推理メモを保存し、履歴へ追加する（本人限定・公開本文には含めない）。"""
+        if not isinstance(reasoning_text, str) or not reasoning_text.strip():
+            return
+        memo = self.reasoning_memos.get(player_name)
+        if memo is None:
+            memo = ReasoningMemo()
+            self.reasoning_memos[player_name] = memo
+        memo.model_written_memo = reasoning_text.strip()
+        memo.model_memo_history.append(reasoning_text.strip())
+        if len(memo.model_memo_history) > memo.MODEL_MEMO_HISTORY_LIMIT:
+            memo.model_memo_history = memo.model_memo_history[-memo.MODEL_MEMO_HISTORY_LIMIT:]
 
     def snapshot_ledgers(
         self, boundary: str, action: str, actor: str

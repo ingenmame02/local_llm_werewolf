@@ -26,6 +26,52 @@ PERSONALITY_PROFILES: dict[str, str] = {
     "intuitive": "発言や投票の目立つ変化を仮説として示し、観察した根拠を添える。",
 }
 
+# TASK-044: 個性プロファイルの制限を廃する「自由発言モード」。
+# 話し方の preset を一切適用せず、口調・構成・注目点をモデル自身の判断に任せる。
+# 役職の目的・勝敗条件・行動制約・確定事実・出力形式はこれまで通り適用する。
+FREE_PERSONALITY_PROFILE = "free"
+
+# 設定ファイル・CLIで自由モードを指す別名。JSONの null も自由扱いにする。
+PERSONALITY_PROFILE_ALIASES: dict[str, str] = {
+    "": FREE_PERSONALITY_PROFILE,
+    "free": FREE_PERSONALITY_PROFILE,
+    "none": FREE_PERSONALITY_PROFILE,
+    "null": FREE_PERSONALITY_PROFILE,
+    "off": FREE_PERSONALITY_PROFILE,
+    "no_personality": FREE_PERSONALITY_PROFILE,
+    "natural": FREE_PERSONALITY_PROFILE,
+    "custom": FREE_PERSONALITY_PROFILE,
+}
+
+# CLI・評価スクリプトの choices に使うキー（既定プロファイル + 自由モード）。
+PERSONALITY_CHOICE_KEYS: tuple[str, ...] = (*PERSONALITY_PROFILES, FREE_PERSONALITY_PROFILE)
+
+
+def normalize_personality_profile(value: object, label: str) -> str:
+    """Validate a personality profile and return its canonical key.
+
+    ``None`` / ``""`` / aliases (``none``, ``off``, ``natural``, ...) resolve to
+    the free mode ``free``, which applies no speaking-style preset at all.
+    """
+    if value is None:
+        return FREE_PERSONALITY_PROFILE
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in PERSONALITY_PROFILES:
+            return normalized
+        if normalized in PERSONALITY_PROFILE_ALIASES:
+            return PERSONALITY_PROFILE_ALIASES[normalized]
+    raise ValueError(
+        f"{label} must be one of {', '.join(PERSONALITY_CHOICE_KEYS)} "
+        "(use null or 'none' for the free expression mode)."
+    )
+
+
+def is_free_personality(profile: object) -> bool:
+    """True when no speaking-style preset is applied to this player."""
+    return isinstance(profile, str) and profile.strip().casefold() == FREE_PERSONALITY_PROFILE
+
+
 # TASK-043: プレイヤー別の生成サンプリング設定。幻覚・案内文の模倣を起こすモデルは
 # temperature を下げて安定させ、全体設定（CLI）よりプレイヤー設定を優先する。
 GENERATION_SAMPLING_KEYS: tuple[str, ...] = (
@@ -234,6 +280,12 @@ class PlayerConfig:
     repeat_penalty: float | None = None
 
     def __post_init__(self) -> None:
+        # TASK-044: 個性プロファイルはここで検証する（自由モード free を含む）。
+        # frozen なので値の正規化はせず、不正値は ValueError だけ返す
+        # （load_player_configs と Player側で正規化する）。
+        normalize_personality_profile(
+            self.personality_profile, f"Player {self.name} personality_profile"
+        )
         # TASK-043: プレイヤー別の生成サンプリングはここで範囲検証する
         # （JSONローダー以外から直接作られた設定も同じ基準を通す）。frozenなので
         # 値の正規化はせず、範囲外はValueErrorだけ返す。
@@ -322,14 +374,10 @@ def load_player_configs(
             raise ValueError(f"Player name at index {index} must be a non-empty string.")
         if not isinstance(model, str) or not model.strip():
             raise ValueError(f"Player model at index {index} must be a non-empty string.")
-        if (
-            not isinstance(personality_profile, str)
-            or personality_profile not in PERSONALITY_PROFILES
-        ):
-            raise ValueError(
-                f"Player personality_profile at index {index} must be one of "
-                f"{', '.join(PERSONALITY_PROFILES)}."
-            )
+        personality_profile = normalize_personality_profile(
+            personality_profile,
+            f"Player personality_profile at index {index}",
+        )
         if num_ctx is not None and (
             not isinstance(num_ctx, int) or isinstance(num_ctx, bool) or num_ctx <= 0
         ):

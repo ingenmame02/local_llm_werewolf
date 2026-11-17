@@ -28,6 +28,7 @@ from .discussion_format import (
     DiscussionBodyDiagnosis,
     answers_previous_question,
     extract_discussion_body,
+    extract_reasoning_memo,
     find_repeated_topic,
     is_pass_body,
     normalize_question_hint_mode,
@@ -1107,6 +1108,11 @@ class GameEngine:
                         self._append_discussion_message(Message(player.name, body))
                         self._record_model_inference(player.name, body)
                         self._record_public_speech_memory(player, body)
+                    # モデル推理メモの抽出・保存（discussion_bodyパス）
+                    raw_body_for_reasoning = body
+                    reasoning_memo = extract_reasoning_memo(raw_body_for_reasoning)
+                    if reasoning_memo:
+                        self.state.store_model_reasoning_memo(player.name, reasoning_memo)
                 else:
                     self.state.snapshot_ledgers("before", "discussion", player.name)
                     content = self.actions.discuss(
@@ -1249,6 +1255,14 @@ class GameEngine:
                             )
                             self._record_model_inference(player.name, body)
                             self._record_public_speech_memory(player, body)
+                    # モデル推理メモの抽出・保存（structured outputパス）
+                    reasoning_memo = None
+                    if structured_output is not None and structured_output.reasoning:
+                        reasoning_memo = structured_output.reasoning
+                    else:
+                        reasoning_memo = extract_reasoning_memo(content)
+                    if reasoning_memo:
+                        self.state.store_model_reasoning_memo(player.name, reasoning_memo)
                 if self.state.reasoning_memory_enabled:
                     self.state.refresh_reasoning_memos()
         self.state.phase = Phase.VOTING
