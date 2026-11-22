@@ -395,7 +395,11 @@ class DiscussionTopicLedger:
         }
 
     def summarize_for(
-        self, actor_name: str, day: int, max_lines: int = SUMMARY_MAX_LINES
+        self,
+        actor_name: str,
+        day: int,
+        max_lines: int = SUMMARY_MAX_LINES,
+        dead_names: frozenset[str] = frozenset(),
     ) -> tuple[str, dict[str, object]]:
         """既出論点の要約（観測のみ・論点や口調の強制しない）を1ブロックだけ作る。"""
         topics = self.topics_for_day(day)
@@ -412,7 +416,8 @@ class DiscussionTopicLedger:
         lines = [
             "- Topics already raised today (observation only, not a rule):",
             "Nothing here forces your topic, conclusion or tone. You may restate a point "
-            "with a new reason, change position, ask something else, or pass.",
+            "with a new reason, change position, ask something else, or pass. The Day/Turn "
+            "shown is when the topic was raised, not a newer fact.",
         ]
         recent = topics[-max_lines:]
         for record in reversed(recent):
@@ -429,6 +434,13 @@ class DiscussionTopicLedger:
                 parts.append(f"raised {record.seen}x")
             if other_speakers:
                 parts.append("also " + ", ".join(other_speakers))
+            if dead_names and record.subject and record.subject in dead_names:
+                parts.append("[historical_only: dead player]")
+            elif dead_names and (
+                (record.kind == "question" and any(name in record.text for name in dead_names))
+                or (record.speaker in dead_names)
+            ):
+                parts.append("[historical_only: cannot answer]")
             lines.append("- " + "; ".join(parts))
         omitted = len(topics) - len(recent)
         if omitted > 0:

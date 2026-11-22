@@ -53,6 +53,32 @@ from werewolf.discussion_novelty import (
     DEFAULT_NOVELTY_POLICY,
     normalize_novelty_policy,
 )
+from werewolf.leak_gate_policy import (
+    DEFAULT_LEAK_GUARD_POLICY,
+    LeakGuardProfiles,
+    normalize_leak_guard_policy,
+)
+# TASK-055: 役職主張と役職由来情報のプロヴェナンス分離
+from werewolf.role_provenance import (
+    ALLOW_BLUFF_ROLE_CLAIM_DEFAULT,
+    RoleProvenanceLedger,
+    bluff_role_claim_policy_label,
+    normalize_allow_bluff_role_claim,
+)
+# TASK-056: Day内イベントの時系列明示と未来参照の観測（本文は書き換えない）
+from werewolf.day_timeline import (
+    DAY_TIMELINE_POLICY_DEFAULT,
+    FUTURE_REFERENCE_CATEGORIES,
+    day_timeline_policy_label,
+    normalize_day_timeline_policy,
+)
+# TASK-057: プロンプト契約の簡素化（重複した制約・本文再掲を1箇所に集め、optional 節だけを
+# 段階的に落とす）。ログ側ではセクション別字数・重複制約数・削除段階を比較できるようにする。
+from werewolf.prompt_contract import (
+    PROMPT_CONTRACT_POLICY_DEFAULT,
+    prompt_contract_policy_label,
+    normalize_prompt_contract_policy,
+)
 
 # フェーズ表示用ラベル
 PHASE_NAMES_JA = {
@@ -168,9 +194,56 @@ class GameLogger:
             "discussion_elapsed_seconds": 0.0,
             "duplicate_claims_suppressed": 0,
             "public_claim_updates": 0,
+            # TASK-055: 役職CO・占い結果申告の計上（中立。エンジン照合の真偽は数えない）
+            "role_claims_recorded": 0,
+            "verdict_lines_self_reported": 0,
+            "role_claims_disallowed": 0,
             "secret_leaks_detected": 0,
+            # TASK-054: ゲート分類の観測（soft/observe は公開したまま計上する）
+            "secret_leak_hard": 0,
+            "secret_leak_notes": 0,
+            "secret_leak_memo_only_notes": 0,
+            "secret_leak_false_positives_avoided": 0,
+            "secret_leak_sentence_repairs": 0,
+            "secret_leak_regenerations": 0,
+            "secret_leak_redactions": 0,
+            "secret_leak_retry_seconds": 0.0,
+            "secret_leak_body_char_total": 0,
+            "secret_leak_body_char_kept": 0,
+            "secret_leak_repaired_char_kept": 0,
             "llm_elapsed_seconds": 0.0,
             "discussion_context_selections": 0,
+            # TASK-056: 発言時点の時系列検査（future_event_reference と根拠追跡率）
+            "timeline_reference_checks": 0,
+            "future_event_references": 0,
+            "timeline_attributed_references": 0,
+            "timeline_unresolvable_references": 0,
+            "day_timeline_chars_total": 0,
+            "day_timeline_lines_total": 0,
+            "day_timeline_sections": 0,
+            "evidence_char_count_total": 0,
+            # TASK-057: プロンプト総量・core/optional字数・参照化による節約・重複制約数・
+            # 削除段階（A/B比較で「何を落として何が減ったか」を追跡する）
+            "prompt_requests_contracted": 0,
+            "prompt_user_char_total": 0,
+            "prompt_user_char_max": 0,
+            "prompt_core_char_total": 0,
+            "prompt_optional_char_total": 0,
+            "prompt_dedup_saved_chars_total": 0,
+            "prompt_dedup_references": 0,
+            "prompt_duplicate_constraint_total": 0,
+            "prompt_optional_removed_chars_total": 0,
+            # プロンプト構築回数と段階試行回数（段階除去で無駄な再構築をしていないかの確認用）
+            "prompt_build_calls_total": 0,
+            "contract_stage_attempts_total": 0,
+            "contract_stage1_removals": 0,
+            "contract_stage2_removals": 0,
+            "contract_stage3_removals": 0,
+            "contract_stage4_removals": 0,
+        }
+        # TASK-056: 未来参照カテゴリ別の指摘数（公開本文は修正していない観測値）
+        self._timeline_category_counts: dict[str, int] = {
+            category: 0 for category in FUTURE_REFERENCE_CATEGORIES
         }
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -285,8 +358,101 @@ class GameLogger:
             "seer_result_corrected",
         }:
             self._ledger_metrics["public_claim_updates"] += 1
+            # TASK-055: 公開されたCO行・結果行を中立に計上する（すべて本人申告）。
+            self._ledger_metrics["role_claims_recorded"] += 1
+            if diagnostic_record.get("target") and diagnostic_record.get("claimed_result"):
+                self._ledger_metrics["verdict_lines_self_reported"] += 1
+        if event_type == "role_claim_disallowed":
+            # TASK-055: allow_bluff_role_claim=False の設定で受理しなかった行
+            self._ledger_metrics["role_claims_disallowed"] += 1
+        # TASK-056: 公開発言に添えた時系列検査を集計する（観測専用で本文は修正されない）
+        if (
+            event_type == "discussion_message"
+            and bool(diagnostic_record.get("timeline_observed"))
+        ):
+            self._ledger_metrics["timeline_reference_checks"] += 1
+            findings = int(diagnostic_record.get("future_event_reference_count") or 0)
+            self._ledger_metrics["future_event_references"] += findings
+            self._ledger_metrics["timeline_attributed_references"] += int(
+                diagnostic_record.get("attributed_references_observed") or 0
+            )
+            self._ledger_metrics["timeline_unresolvable_references"] += int(
+                diagnostic_record.get("unresolvable_references") or 0
+            )
+            categories = diagnostic_record.get("future_event_reference_categories")
+            if isinstance(categories, dict):
+                for category in FUTURE_REFERENCE_CATEGORIES:
+                    count = int(categories.get(category) or 0)
+                    if count:
+                        self._timeline_category_counts[category] = (
+                            self._timeline_category_counts.get(category, 0) + count
+                        )
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["timeline_reference_checks"] += 1
+                stats["timeline_future_references"] += findings
         if event_type == "discussion_context_selected":
             self._ledger_metrics["discussion_context_selections"] += 1
+            # TASK-056: 時系列欄と発言履歴の文字数を積む。新しい節を増やしながら全体量を
+            # 減らせているか（ヘッダ縮約の削減分）をA/Bで検証するための基準になる。
+            timeline_chars = diagnostic_record.get("day_timeline_chars")
+            if isinstance(timeline_chars, int) and not isinstance(timeline_chars, bool):
+                self._ledger_metrics["day_timeline_chars_total"] += max(
+                    0, int(timeline_chars)
+                )
+                self._ledger_metrics["day_timeline_sections"] += 1
+                timeline_lines = diagnostic_record.get("day_timeline_lines")
+                if (
+                    isinstance(timeline_lines, int)
+                    and not isinstance(timeline_lines, bool)
+                ):
+                    self._ledger_metrics["day_timeline_lines_total"] += max(
+                        0, int(timeline_lines)
+                    )
+            evidence_chars = diagnostic_record.get("evidence_char_count")
+            if isinstance(evidence_chars, int) and not isinstance(
+                evidence_chars, bool
+            ):
+                self._ledger_metrics["evidence_char_count_total"] += max(
+                    0, int(evidence_chars)
+                )
+            # TASK-057: プロンプト契約の診断を集計する（同じ制約・発言本文の再掲が減ったか、
+            # core を保ったまま総量が減ったかをログ側で比較できるようにする）。
+            user_chars = diagnostic_record.get("prompt_user_char_count")
+            if isinstance(user_chars, int) and not isinstance(user_chars, bool):
+                self._ledger_metrics["prompt_requests_contracted"] += 1
+                self._ledger_metrics["prompt_user_char_total"] += max(
+                    0, int(user_chars)
+                )
+                if int(user_chars) > int(self._ledger_metrics["prompt_user_char_max"]):
+                    self._ledger_metrics["prompt_user_char_max"] = max(
+                        0, int(user_chars)
+                    )
+            for key, metric in (
+                ("prompt_core_chars", "prompt_core_char_total"),
+                ("prompt_optional_chars", "prompt_optional_char_total"),
+                ("dedup_saved_chars", "prompt_dedup_saved_chars_total"),
+                (
+                    "prompt_duplicate_constraint_count",
+                    "prompt_duplicate_constraint_total",
+                ),
+                ("optional_removed_chars", "prompt_optional_removed_chars_total"),
+                ("prompt_build_calls", "prompt_build_calls_total"),
+                ("contract_stage_attempts", "contract_stage_attempts_total"),
+            ):
+                value = diagnostic_record.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    self._ledger_metrics[metric] += max(0, int(value))
+            dedup_refs = diagnostic_record.get("dedup_reference_count")
+            if isinstance(dedup_refs, int) and not isinstance(dedup_refs, bool):
+                self._ledger_metrics["prompt_dedup_references"] += max(0, int(dedup_refs))
+            removal_stage = diagnostic_record.get("contract_removal_stage")
+            if isinstance(removal_stage, int) and not isinstance(removal_stage, bool):
+                limited = min(max(0, int(removal_stage)), 4)
+                if limited > 0:
+                    key = f"contract_stage{limited}_removals"
+                    if key in self._ledger_metrics:
+                        self._ledger_metrics[key] += 1
             if isinstance(model, str):
                 stats = self._model_stats.setdefault(
                     model, self._new_model_stats()
@@ -295,16 +461,124 @@ class GameLogger:
                 if isinstance(strategy, str):
                     strategies = stats["context_strategy_counts"]
                     strategies[strategy] = strategies.get(strategy, 0) + 1
+                header_style = diagnostic_record.get("evidence_header_style")
+                if isinstance(header_style, str):
+                    styles = stats["evidence_header_styles"]
+                    styles[header_style] = styles.get(header_style, 0) + 1
+                # TASK-057: モデル別の契約診断（送信プロンプト量と削減の実績）
+                model_user_chars = diagnostic_record.get("prompt_user_char_count")
+                if isinstance(model_user_chars, int) and not isinstance(
+                    model_user_chars, bool
+                ):
+                    stats["prompt_user_char_total"] += max(0, int(model_user_chars))
+                    if int(model_user_chars) > int(stats["prompt_user_char_max"]):
+                        stats["prompt_user_char_max"] = max(0, int(model_user_chars))
+                for key, metric in (
+                    ("prompt_core_chars", "prompt_core_char_total"),
+                    ("prompt_optional_chars", "prompt_optional_char_total"),
+                    ("dedup_saved_chars", "prompt_dedup_saved_chars_total"),
+                    (
+                        "prompt_duplicate_constraint_count",
+                        "prompt_duplicate_constraint_total",
+                    ),
+                ):
+                    value = diagnostic_record.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        stats[metric] += max(0, int(value))
+                model_stage = diagnostic_record.get("contract_removal_stage")
+                if isinstance(model_stage, int) and not isinstance(model_stage, bool):
+                    limited = min(max(0, int(model_stage)), 4)
+                    stage_counts = stats["contract_removal_stage_counts"]
+                    stage_key = f"stage{limited}"
+                    stage_counts[stage_key] = int(stage_counts.get(stage_key, 0)) + 1
         if event_type == "secret_role_leak_detected":
+            # TASK-054: hardゲート（本当に秘匿情報を出した場合）だけを数える。
             self._ledger_metrics["secret_leaks_detected"] += 1
+            self._ledger_metrics["secret_leak_hard"] += 1
             if isinstance(model, str):
                 stats = self._model_stats.setdefault(
                     model, self._new_model_stats()
                 )
                 stats["secret_leak_count"] += 1
+                stats["leak_hard_count"] += 1
                 leak_actions = stats["secret_leak_actions"]
                 if isinstance(action, str):
                     leak_actions[action] = leak_actions.get(action, 0) + 1
+                self._count_leak_rules(stats, diagnostic_record.get("detection_rules"))
+                self._record_guard_strength(stats, diagnostic_record.get("guard_strength"))
+                memo_rules = diagnostic_record.get("memo_region_rules")
+                if isinstance(memo_rules, (list, tuple)) and memo_rules:
+                    stats["leak_memo_only_count"] += 1
+                    self._ledger_metrics["secret_leak_memo_only_notes"] += 1
+        # TASK-054: soft / observe 指摘は本文をそのまま公開する（旧来はここで再生成していた）。
+        # legacy_strict なら遮断されたはずの件数は誤検出自動回避として別指標に積む。
+        if event_type == "secret_leak_note":
+            self._ledger_metrics["secret_leak_notes"] += 1
+            if bool(diagnostic_record.get("false_positive_avoided")):
+                self._ledger_metrics["secret_leak_false_positives_avoided"] += 1
+            body_chars = int(diagnostic_record.get("body_char_count") or 0)
+            kept_chars = int(diagnostic_record.get("kept_char_count") or 0)
+            self._ledger_metrics["secret_leak_body_char_total"] += body_chars
+            self._ledger_metrics["secret_leak_body_char_kept"] += kept_chars
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["leak_soft_note_count"] += 1
+                if bool(diagnostic_record.get("false_positive_avoided")):
+                    stats["leak_false_positive_avoided"] += 1
+                stats["leak_body_char_total"] += body_chars
+                stats["leak_body_char_kept"] += kept_chars
+                self._count_leak_rules(stats, diagnostic_record.get("note_rules"))
+                self._record_guard_strength(stats, diagnostic_record.get("guard_strength"))
+                memo_rules = diagnostic_record.get("memo_region_rules")
+                if isinstance(memo_rules, (list, tuple)) and memo_rules:
+                    stats["leak_memo_only_count"] += 1
+                    self._ledger_metrics["secret_leak_memo_only_notes"] += 1
+        # TASK-054実装案3: 漏洩文だけを選んだ補正（全文再生成を回避できた件数）。
+        if event_type == "secret_leak_sentence_repair":
+            self._ledger_metrics["secret_leak_sentence_repairs"] += 1
+            body_chars = int(diagnostic_record.get("body_char_count") or 0)
+            kept_chars = int(diagnostic_record.get("kept_char_count") or 0)
+            self._ledger_metrics["secret_leak_body_char_total"] += body_chars
+            self._ledger_metrics["secret_leak_body_char_kept"] += kept_chars
+            self._ledger_metrics["secret_leak_repaired_char_kept"] += kept_chars
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["leak_sentence_repairs"] += 1
+                stats["leak_body_char_total"] += body_chars
+                stats["leak_body_char_kept"] += kept_chars
+                rules: list[object] = []
+                for key in ("replaced_rules", "dropped_rules"):
+                    value = diagnostic_record.get(key)
+                    if isinstance(value, (list, tuple)):
+                        rules.extend(value)
+                self._count_leak_rules(stats, rules)
+                self._record_guard_strength(stats, diagnostic_record.get("guard_strength"))
+        # TASK-054: 実際に再要求・削句へ回った負荷（モデル別の待ち時間比較に使う）。
+        if event_type == "secret_leak_regeneration":
+            self._ledger_metrics["secret_leak_regenerations"] += 1
+            outcome = diagnostic_record.get("outcome")
+            if isinstance(outcome, str) and "redacted" in outcome:
+                self._ledger_metrics["secret_leak_redactions"] += 1
+            retry_seconds = float(diagnostic_record.get("retry_seconds") or 0.0)
+            self._ledger_metrics["secret_leak_retry_seconds"] = round(
+                float(self._ledger_metrics["secret_leak_retry_seconds"]) + retry_seconds, 3
+            )
+            body_chars = int(diagnostic_record.get("body_char_count") or 0)
+            kept_chars = int(diagnostic_record.get("kept_char_count") or 0)
+            self._ledger_metrics["secret_leak_body_char_total"] += body_chars
+            self._ledger_metrics["secret_leak_body_char_kept"] += kept_chars
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["leak_regenerations"] += 1
+                if isinstance(outcome, str) and "redacted" in outcome:
+                    stats["leak_redactions"] += 1
+                stats["leak_retry_seconds"] = round(
+                    float(stats["leak_retry_seconds"]) + retry_seconds, 3
+                )
+                stats["leak_body_char_total"] += body_chars
+                stats["leak_body_char_kept"] += kept_chars
+                self._count_leak_rules(stats, diagnostic_record.get("hard_rules"))
+                self._record_guard_strength(stats, diagnostic_record.get("guard_strength"))
         if (
             isinstance(model, str)
             and diagnostic_record.get("type") == "llm_action_parse_failed"
@@ -319,6 +593,59 @@ class GameLogger:
                     stats["empty_response_count"] += 1
                 if reason == "generation_truncated":
                     stats["truncated_count"] += 1
+        # TASK-053: 1送信ごとの生成観測をモデル×アクション別に加算する（空応答率・
+        # thinking消費率・待ち時間・本文長を行動単位で比較するための集計基盤）。
+        if (
+            isinstance(model, str)
+            and diagnostic_record.get("type") == "llm_generation_attempt"
+        ):
+            stats = self._model_stats.setdefault(model, self._new_model_stats())
+            action_key = diagnostic_record.get("action_budget_key") or action
+            if isinstance(action_key, str):
+                entry = self._action_profile_entry(stats, action_key)
+                entry["requests"] += 1
+                request_number = diagnostic_record.get("request_number")
+                if (
+                    isinstance(request_number, int)
+                    and not isinstance(request_number, bool)
+                    and request_number > 1
+                ):
+                    entry["retry_requests"] += 1
+                if bool(diagnostic_record.get("body_empty")):
+                    entry["body_empty_count"] += 1
+                if bool(diagnostic_record.get("thinking_only_response")):
+                    entry["thinking_only_count"] += 1
+                if bool(diagnostic_record.get("thinking_present")):
+                    entry["thinking_present_count"] += 1
+                body_chars = diagnostic_record.get("body_char_count")
+                if isinstance(body_chars, int) and not isinstance(body_chars, bool):
+                    entry["body_char_total"] += max(0, body_chars)
+                    if body_chars > 0:
+                        entry["body_present_count"] += 1
+                request_elapsed = diagnostic_record.get("request_elapsed_seconds")
+                if isinstance(request_elapsed, (int, float)) and not isinstance(
+                    request_elapsed, bool
+                ):
+                    entry["elapsed_seconds_total"] = round(
+                        float(entry["elapsed_seconds_total"]) + float(request_elapsed), 3
+                    )
+                eval_count = diagnostic_record.get("eval_count")
+                if isinstance(eval_count, int) and not isinstance(eval_count, bool):
+                    entry["eval_count_total"] += eval_count
+                if diagnostic_record.get("done_reason") == "length":
+                    entry["truncated_count"] += 1
+                issue = diagnostic_record.get("generation_issue")
+                if isinstance(issue, str):
+                    reasons = entry["failure_reasons"]
+                    reasons[issue] = int(reasons.get(issue, 0)) + 1
+                    if issue == "timeout":
+                        entry["timeout_count"] += 1
+                body_budget = diagnostic_record.get("body_budget")
+                if isinstance(body_budget, dict):
+                    entry["last_body_min_tokens"] = body_budget.get("body_min_tokens")
+                    entry["last_thinking_allowance_tokens"] = body_budget.get(
+                        "thinking_allowance_tokens"
+                    )
         if record.get("type") == "llm_action_completed":
             if isinstance(model, str):
                 stats = self._model_stats.setdefault(
@@ -384,6 +711,19 @@ class GameLogger:
         if isinstance(model, str) and record.get("type") == "thinking_budget_exhausted":
             stats = self._model_stats.setdefault(model, self._new_model_stats())
             stats["thinking_budget_fallbacks"] += 1
+            # TASK-053: 余白拡大で耐えたのか、最終的に thinking off へ切ったのかを
+            # モデル×アクション別に分けて記録する（自由な思考をどこまで保てたかの検証用）。
+            action_key = diagnostic_record.get("action_budget_key") or action
+            if isinstance(action_key, str):
+                entry = self._action_profile_entry(stats, action_key)
+                entry["thinking_budget_exhaustions"] += 1
+                if diagnostic_record.get("thinking_allowance_widened") is True:
+                    entry["thinking_allowance_widenings"] += 1
+                if diagnostic_record.get("thinking_off_switched") is True:
+                    entry["thinking_off_switches"] += 1
+                allowance_tokens = diagnostic_record.get("thinking_allowance_tokens")
+                if isinstance(allowance_tokens, int) and not isinstance(allowance_tokens, bool):
+                    entry["last_thinking_allowance_tokens"] = allowance_tokens
         self._append_to_file(record, self.log_file, private=False)
         if self.private_log_file is not None:
             self._append_to_file(
@@ -423,13 +763,130 @@ class GameLogger:
             "context_strategy_counts": {},
             "secret_leak_count": 0,
             "secret_leak_actions": {},
+            # TASK-054: モデル別の漏洩ガード実績（強度を一律にしないための入力と、
+            # 誤検出率・再要求時間・本文保持率の比較に使う）。
+            "leak_hard_count": 0,
+            "leak_soft_note_count": 0,
+            "leak_memo_only_count": 0,
+            "leak_false_positive_avoided": 0,
+            "leak_sentence_repairs": 0,
+            "leak_regenerations": 0,
+            "leak_redactions": 0,
+            "leak_retry_seconds": 0.0,
+            "leak_body_char_total": 0,
+            "leak_body_char_kept": 0,
+            "leak_rule_counts": {},
+            "leak_guard_strengths": {},
+            "leak_rate": 0.0,
+            "leak_false_positive_rate": 0.0,
+            "leak_body_preservation_rate": 1.0,
             # TASK-048: モデル別の新規性計測（primaryクラス別）と低新規性処理
             "novelty_primary_counts": {},
+            # TASK-056: 発言時点の時系列検査（未来参照の検出・ヘッダ様式の構成比）
+            "timeline_reference_checks": 0,
+            "timeline_future_references": 0,
+            "evidence_header_styles": {},
+            # TASK-057: モデル別のプロンプト契約実績（送信字数・core/optional・削減量・
+            # 削除段階の内訳）。モデルごとに違う命令の受け取り方を比較できる。
+            "prompt_user_char_total": 0,
+            "prompt_user_char_max": 0,
+            "prompt_core_char_total": 0,
+            "prompt_optional_char_total": 0,
+            "prompt_dedup_saved_chars_total": 0,
+            "prompt_duplicate_constraint_total": 0,
+            "contract_removal_stage_counts": {},
             # 思考生成非対応と判明して think=off へ切り替えたモデルの数
             "thinking_capability_fallbacks": 0,
             # 思考が生成上限を消費して切り詰め、think=offへ自動切替した回数
             "thinking_budget_fallbacks": 0,
+            # TASK-053: アクション別（議論・投票・占い…）の生成観測内訳。
+            # モデル別の空応答率・thinking消費率・待ち時間を行動ごとに比較できる。
+            "action_profiles": {},
         }
+
+    @staticmethod
+    def _new_action_profile_stats() -> dict[str, Any]:
+        """TASK-053: モデル×アクション別の送信集計（1送信イベントから加算する）。"""
+        return {
+            "requests": 0,
+            "retry_requests": 0,
+            "body_present_count": 0,
+            "body_empty_count": 0,
+            "thinking_only_count": 0,
+            "truncated_count": 0,
+            "timeout_count": 0,
+            "thinking_present_count": 0,
+            "body_char_total": 0,
+            "eval_count_total": 0,
+            "elapsed_seconds_total": 0.0,
+            "thinking_budget_exhaustions": 0,
+            "thinking_allowance_widenings": 0,
+            "thinking_off_switches": 0,
+            "failure_reasons": {},
+            # 直近の検査値（本文最低予算とモデル別thinking余白の内訳）
+            "last_body_min_tokens": None,
+            "last_thinking_allowance_tokens": None,
+            # finalize で算出する率・平均
+            "empty_response_rate": 0.0,
+            "thinking_only_rate": 0.0,
+            "truncated_rate": 0.0,
+            "thinking_share_rate": 0.0,
+            "retry_request_rate": 0.0,
+            "avg_elapsed_seconds": 0.0,
+            "avg_body_chars": 0.0,
+            "avg_eval_count": 0.0,
+        }
+
+    def _action_profile_entry(
+        self, stats: dict[str, Any], action_key: str
+    ) -> dict[str, Any]:
+        """TASK-053: モデル別statsからアクション別エントリを取得（無ければ作成）。"""
+
+        profiles = stats.setdefault("action_profiles", {})
+        entry = profiles.get(action_key)
+        if not isinstance(entry, dict):
+            entry = self._new_action_profile_stats()
+            profiles[action_key] = entry
+        return entry
+
+    @staticmethod
+    def _count_leak_rules(stats: dict[str, Any], rules: object) -> None:
+        """TASK-054: モデル別の検出ルール内訳を積む（分類精度の比較に使う）。"""
+        if not isinstance(rules, (list, tuple)):
+            return
+        counts = stats.setdefault("leak_rule_counts", {})
+        for rule in rules:
+            if isinstance(rule, str) and rule:
+                counts[rule] = counts.get(rule, 0) + 1
+
+    @staticmethod
+    def _record_guard_strength(stats: dict[str, Any], strength: object) -> None:
+        """TASK-054: そのモデルで実際に使われたガード強度の使用回数を記録する。"""
+        if isinstance(strength, str) and strength:
+            strengths = stats.setdefault("leak_guard_strengths", {})
+            strengths[strength] = strengths.get(strength, 0) + 1
+
+    def _finalize_leak_stats(self, state: GameState) -> None:
+        """TASK-054: モデル別の漏洩率・誤検出率・本文保持率を算出する。"""
+        for stats in self._model_stats.values():
+            actions = int(stats.get("actions", 0)) or 0
+            hard = int(stats.get("leak_hard_count", 0))
+            soft = int(stats.get("leak_soft_note_count", 0))
+            avoided = int(stats.get("leak_false_positive_avoided", 0))
+            total_char = int(stats.get("leak_body_char_total", 0))
+            kept_char = int(stats.get("leak_body_char_kept", 0))
+            stats["leak_rate"] = (
+                round((hard + soft) / actions, 4) if actions else 0.0
+            )
+            stats["leak_false_positive_rate"] = (
+                round(avoided / (hard + soft + avoided), 4)
+                if (hard + soft + avoided)
+                else 0.0
+            )
+            stats["leak_body_preservation_rate"] = (
+                round(min(1.0, kept_char / total_char), 4) if total_char else 1.0
+            )
+            stats["leak_retry_seconds"] = round(float(stats.get("leak_retry_seconds", 0.0)), 3)
 
     def _append_to_file(
         self, record: dict[str, Any], path: Path, private: bool
@@ -465,6 +922,42 @@ class GameLogger:
                 stats["avg_eval_count"] = 0.0
                 stats["avg_input_token_count"] = 0.0
                 stats["avg_eval_duration_ms"] = 0.0
+            # TASK-053: アクション別の空応答率・thinking消費率・平均待ち時間などを算出する
+            # （モデル×アクション別で比較し、本文予算制御の効果と悪化を抑止するための指標）。
+            for entry in stats.get("action_profiles", {}).values():
+                if not isinstance(entry, dict):
+                    continue
+                requests = int(entry.get("requests", 0))
+                if not requests:
+                    continue
+                entry["empty_response_rate"] = round(
+                    int(entry.get("body_empty_count", 0)) / requests, 4
+                )
+                entry["thinking_only_rate"] = round(
+                    int(entry.get("thinking_only_count", 0)) / requests, 4
+                )
+                entry["truncated_rate"] = round(
+                    int(entry.get("truncated_count", 0)) / requests, 4
+                )
+                entry["thinking_share_rate"] = round(
+                    int(entry.get("thinking_present_count", 0)) / requests, 4
+                )
+                entry["retry_request_rate"] = round(
+                    int(entry.get("retry_requests", 0)) / requests, 4
+                )
+                entry["avg_elapsed_seconds"] = round(
+                    float(entry.get("elapsed_seconds_total", 0.0)) / requests, 3
+                )
+                present = int(entry.get("body_present_count", 0))
+                entry["avg_body_chars"] = (
+                    round(int(entry.get("body_char_total", 0)) / present, 1) if present else 0.0
+                )
+                entry["avg_eval_count"] = round(
+                    int(entry.get("eval_count_total", 0)) / requests, 2
+                )
+
+        # TASK-054: モデル別の漏洩率・誤検出率・本文保持率を算出する
+        self._finalize_leak_stats(state)
 
         public_players_data = [
             {
@@ -551,6 +1044,24 @@ class GameLogger:
             "hypothesis_ledger": state.hypothesis_ledger.serialize_public(),
             # TASK-048: 既出論点台帳（要約・連呼・正当な繰り返し）を評価ログへ残す
             "topic_ledger": state.topic_ledger.serialize(),
+            # TASK-055: 役職主張の出所台帳。公開面は全CO行を中立ラベルに揃え、エンジン照合の
+            # 真偽は含まない（serialize_public() に真偽キーがないことはテストで検証する）。
+            "role_provenance": state.role_provenance.serialize_public(),
+            "allow_bluff_role_claim": bool(
+                getattr(state, "allow_bluff_role_claim", ALLOW_BLUFF_ROLE_CLAIM_DEFAULT)
+            ),
+            # TASK-056: 公開イベントの時系列（時点・ID・短い要約のみ。発言本文・占い結果・
+            # 役職など非公開情報は含まれない）。`timeline_policy=off` でも台帳は回るが、
+            # プロンプトへは時系列欄を出さない（A/B比較の基準側）。
+            "public_timeline": state.public_timeline.serialize(),
+            "day_timeline_policy": day_timeline_policy_label(
+                getattr(state, "timeline_policy", DAY_TIMELINE_POLICY_DEFAULT)
+            ),
+            # TASK-057: プロンプト契約のポリシー（simplified/legacy）。同じ履歴でも重複した
+            # 制約文と本文再掲を1箇所にまとめる設定が効いているかをログで判別できるようにする。
+            "prompt_contract_policy": prompt_contract_policy_label(
+                getattr(state, "prompt_contract_policy", PROMPT_CONTRACT_POLICY_DEFAULT)
+            ),
             "unverified_hypothesis_as_fact_alerts": sum(
                 alert.category == UNVERIFIED_HYPOTHESIS_AS_FACT
                 for alert in state.integrity_alerts
@@ -560,6 +1071,69 @@ class GameLogger:
                 **state.hypothesis_ledger.metrics(),
                 **state.topic_ledger.metrics(),
                 "novelty_class_counts": dict(self._novelty_class_counts),
+                # TASK-056: 発言時点の根拠追跡率と未来参照率。検出は観測専用で、公開本文の
+                # 語彙・口調・結論は自動修正していない（body_modified=false で記録）。
+                "future_event_reference_rate": round(
+                    int(self._ledger_metrics["future_event_references"])
+                    / max(1, int(self._ledger_metrics["timeline_reference_checks"])),
+                    4,
+                ),
+                "evidence_grounding_rate_at_speech_time": round(
+                    1.0
+                    - int(self._ledger_metrics["timeline_unresolvable_references"])
+                    / max(1, int(self._ledger_metrics["timeline_attributed_references"])),
+                    4,
+                ),
+                "avg_day_timeline_chars": round(
+                    int(self._ledger_metrics["day_timeline_chars_total"])
+                    / max(1, int(self._ledger_metrics["day_timeline_sections"])),
+                    1,
+                ),
+                "avg_evidence_char_count": round(
+                    int(self._ledger_metrics["evidence_char_count_total"])
+                    / max(1, int(self._ledger_metrics["discussion_context_selections"])),
+                    1,
+                ),
+                "timeline_violation_counts": dict(self._timeline_category_counts),
+                # TASK-057: プロンプト契約の効果（core を保ったまま総量を減らせたか、同じ制約の
+                # 再掲が減ったか、どの段階で何を落としたかをA/B比較できるようにする）
+                "avg_prompt_user_chars": round(
+                    int(self._ledger_metrics["prompt_user_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "max_prompt_user_chars": int(self._ledger_metrics["prompt_user_char_max"]),
+                "avg_prompt_core_chars": round(
+                    int(self._ledger_metrics["prompt_core_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_prompt_optional_chars": round(
+                    int(self._ledger_metrics["prompt_optional_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "dedup_saved_chars_total": int(
+                    self._ledger_metrics["prompt_dedup_saved_chars_total"]
+                ),
+                "dedup_references_total": int(self._ledger_metrics["prompt_dedup_references"]),
+                "duplicate_constraint_total": int(
+                    self._ledger_metrics["prompt_duplicate_constraint_total"]
+                ),
+                "optional_removed_chars_total": int(
+                    self._ledger_metrics["prompt_optional_removed_chars_total"]
+                ),
+                # ローカル側の構築コスト（段階除去の組み直し回数を確かめる指標）
+                "avg_prompt_build_calls": round(
+                    int(self._ledger_metrics["prompt_build_calls_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    2,
+                ),
+                "avg_contract_stage_attempts": round(
+                    int(self._ledger_metrics["contract_stage_attempts_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    2,
+                ),
                 # TASK-048: 新規性・修復・再生成・待ち時間の比較指標（old/new A/Bに使う）
                 "novelty_rate": round(
                     int(self._ledger_metrics["novelty_present"])
@@ -638,6 +1212,53 @@ class GameLogger:
                     ),
                     4,
                 ),
+                # TASK-054: ゲート分類の効率（誤検出を自動回避できた割合・本文保持率・
+                # 再要求に掛かった合計秒）。legacy_strict とのA/B比較で使う。
+                "leak_guard_policy": getattr(
+                    state, "leak_guard_policy", DEFAULT_LEAK_GUARD_POLICY
+                ),
+                "leak_note_rate": round(
+                    int(self._ledger_metrics["secret_leak_notes"])
+                    / max(1, int(self._ledger_metrics["discussion_bodies"])),
+                    4,
+                ),
+                "leak_false_positives_avoided": int(
+                    self._ledger_metrics["secret_leak_false_positives_avoided"]
+                ),
+                "leak_false_positive_avoid_rate": round(
+                    int(self._ledger_metrics["secret_leak_false_positives_avoided"])
+                    / max(
+                        1,
+                        int(self._ledger_metrics["secret_leak_false_positives_avoided"])
+                        + int(self._ledger_metrics["secret_leak_hard"]),
+                    ),
+                    4,
+                ),
+                "leak_sentence_repair_rate": round(
+                    int(self._ledger_metrics["secret_leak_sentence_repairs"])
+                    / max(
+                        1,
+                        int(self._ledger_metrics["secret_leak_sentence_repairs"])
+                        + int(self._ledger_metrics["secret_leak_regenerations"]),
+                    ),
+                    4,
+                ),
+                "leak_body_preservation_rate": round(
+                    min(
+                        1.0,
+                        int(self._ledger_metrics["secret_leak_body_char_kept"])
+                        / max(1, int(self._ledger_metrics["secret_leak_body_char_total"])),
+                    ),
+                    4,
+                ),
+                "leak_retry_seconds": round(
+                    float(self._ledger_metrics["secret_leak_retry_seconds"]), 3
+                ),
+                "leak_retry_seconds_per_body": round(
+                    float(self._ledger_metrics["secret_leak_retry_seconds"])
+                    / max(1, int(self._ledger_metrics["discussion_bodies"])),
+                    3,
+                ),
             },
             "conversation_log": conversation_data,
             "votes": state.votes,
@@ -707,6 +1328,16 @@ class GameLogger:
                 name: asdict(memo)
                 for name, memo in state.reasoning_memos.items()
             },
+            # TASK-054: モデル別の漏洩ガード実績（強度の判断材料・誤検出率・本文保持率）
+            "leak_guard_policy": getattr(
+                state, "leak_guard_policy", DEFAULT_LEAK_GUARD_POLICY
+            ),
+            "leak_guard_profiles": getattr(
+                state, "leak_guard_profiles", LeakGuardProfiles()
+            ).summary(),
+            # TASK-055: 管理者用。エンジンが発行した占い結果（保有者名つき）と各CO行の照合結果を
+            # ここにだけ残す。公開ログ側には真偽キーを含む形では出さない。
+            "role_provenance": state.role_provenance.serialize_admin(),
             "traces": private_traces_data,
         }
         self.append_record(public_summary, private_summary)
@@ -754,6 +1385,9 @@ def run_cli_game(args: argparse.Namespace) -> int:
     if getattr(args, "override_player_num_ctx", False):
         options["override_player_num_ctx"] = True
     options["dynamic_context"] = bool(getattr(args, "dynamic_context", True))
+    # TASK-053: モデル×アクション別の本文予算予約（初回リクエストで thinking 余白と
+    # 本文最低予算を分離）のon/off。既定on、比較ラン用に --no-body-reservation で切れる。
+    options["body_reservation"] = bool(getattr(args, "body_reservation", True))
     question_hint_mode = normalize_question_hint_mode(
         getattr(args, "question_hint_mode", DEFAULT_QUESTION_HINT_MODE)
     )
@@ -763,6 +1397,26 @@ def run_cli_game(args: argparse.Namespace) -> int:
         getattr(args, "novelty_policy", DEFAULT_NOVELTY_POLICY)
     )
     options["novelty_policy"] = novelty_policy
+    # TASK-054: 漏洩ガードのゲート分類（既定 tiered=非公開の真の情報だけ遮断）
+    leak_guard_policy = normalize_leak_guard_policy(
+        getattr(args, "leak_guard_policy", DEFAULT_LEAK_GUARD_POLICY)
+    )
+    options["leak_guard_policy"] = leak_guard_policy
+    # TASK-055: ブラフ役職COの可否（既定は許可。議論の自由を保ち、出所だけを分離する）
+    allow_bluff_role_claim = normalize_allow_bluff_role_claim(
+        getattr(args, "bluff_role_claim", ALLOW_BLUFF_ROLE_CLAIM_DEFAULT)
+    )
+    options["allow_bluff_role_claim"] = allow_bluff_role_claim
+    # TASK-056: 発言時点の時系列明示（既定 explicit。offはA/B比較用の旧挙動）
+    day_timeline_policy = normalize_day_timeline_policy(
+        getattr(args, "day_timeline", DAY_TIMELINE_POLICY_DEFAULT)
+    )
+    options["day_timeline_policy"] = day_timeline_policy
+    # TASK-057: プロンプト契約の簡素化（既定 simplified。legacy は重複した命令文のままの旧挙動）
+    prompt_contract_policy = normalize_prompt_contract_policy(
+        getattr(args, "prompt_contract", PROMPT_CONTRACT_POLICY_DEFAULT)
+    )
+    options["prompt_contract_policy"] = prompt_contract_policy
     if args.thinking in {"on", "off"}:
         options["thinking"] = args.thinking == "on"
     for key, value in action_num_predict.items():
@@ -783,6 +1437,16 @@ def run_cli_game(args: argparse.Namespace) -> int:
     state.question_hint_mode = question_hint_mode
     # TASK-048: 台帳・新規性計測も同じポリシーを使う（state経由で参照される）
     state.novelty_policy = novelty_policy
+    # TASK-054: engine/llm_actions の漏洩ガードも同じゲートポリシーを使う
+    state.leak_guard_policy = leak_guard_policy
+    state.leak_guard_profiles.policy = leak_guard_policy
+    # TASK-055: engine/llm_actions の役職CO受理も同じルール設定を使う
+    state.allow_bluff_role_claim = allow_bluff_role_claim
+    # TASK-056: 発言時点の時系列明示をstateへ反映する（台帳のポリシーも揃う）
+    state.timeline_policy = day_timeline_policy
+    state.public_timeline.policy = day_timeline_policy
+    # TASK-057: プロンプト契約のポリシーをstateへ反映する（llm_actions が state から読む）
+    state.prompt_contract_policy = prompt_contract_policy
 
     meta = {
         "mode": args.mode,
@@ -802,9 +1466,19 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "thinking_by_action": action_thinking,
         "default_thinking_by_action": dict(DEFAULT_THINKING_BY_ACTION),
         "dynamic_context": bool(getattr(args, "dynamic_context", True)),
+        # TASK-053: 本文予算予約の設定値をログへ残す（A/B比較の判別用）
+        "body_reservation": bool(getattr(args, "body_reservation", True)),
         "question_hint_mode": question_hint_mode,
         # TASK-048: 低新規性時の処理ポリシー（publish/append/legacy_repair）をログへ残す
         "novelty_policy": novelty_policy,
+        # TASK-054: 漏洩ガードのゲートポリシー（tiered/legacy_strict）をログへ残す
+        "leak_guard_policy": leak_guard_policy,
+        # TASK-055: ブラフ役職COの可否（allow/deny）をログへ残す（A/B比較の判別用）
+        "allow_bluff_role_claim": bluff_role_claim_policy_label(allow_bluff_role_claim),
+        # TASK-056: 時系列明示のルール（explicit/off）をログへ残す（A/B比較の判別用）
+        "day_timeline_policy": day_timeline_policy,
+        # TASK-057: プロンプト契約の簡素化（simplified/legacy）をログへ残す（A/B比較の判別用）
+        "prompt_contract_policy": prompt_contract_policy,
         "base_url": args.base_url,
         "show_private": args.show_private,
         "response_language": getattr(args, "language", None),
@@ -856,6 +1530,15 @@ def run_cli_game(args: argparse.Namespace) -> int:
             else "off（num_ctxは設定値をそのまま送信）"
         )
     )
+    print(
+        "本文予算予約（TASK-053）: "
+        + (
+            "on（初回リクエストでモデル別のthinking余白と本文最低予算を分離し、"
+            "思考が上限を食い潰しても空応答にしない）"
+            if bool(getattr(args, "body_reservation", True))
+            else "off（num_predictは設定値のまま。比較ラン用）"
+        )
+    )
     question_hint_mode_labels = {
         "strict": "strict（1文目に回答対象・形式違反は1回の意味的再要求）",
         "soft": "soft（質問は観測として提示・回答の強制と再生成なし）",
@@ -868,6 +1551,27 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "legacy_repair": "legacy_repair（旧挙動: 重複文の除去→1回の意味的再要求）",
     }
     print(f"低新規性ポリシー: {novelty_policy_labels[novelty_policy]}")
+    leak_guard_policy_labels = {
+        "tiered": (
+            "tiered（未公開の真の情報だけ遮断。公開済みCO・判定の再言及や他者の役職推測は"
+            "本文そのまま公開。漏洩文だけの中立化を優先し、全文再生成を避ける）"
+        ),
+        "legacy_strict": (
+            "legacy_strict（旧挙動: 推理メモ含む全文照合で1件でも検出すれば全文再生成→削句）"
+        ),
+    }
+    print(f"漏洩ガードポリシー: {leak_guard_policy_labels[leak_guard_policy]}")
+    bluff_role_claim_labels = {
+        True: (
+            "allow（どの役職のCO・対抗COも自由。判定行は本人の申告として記録され、"
+            "エンジンが発行した実際の占い結果とは台帳上で分離する。真偽は公開されない）"
+        ),
+        False: (
+            "deny（実保有者だけがCO・判定を公開できる。非保有者のCO行と結果行は公開前に除去し、"
+            "本文は一字一句そのまま残す。再生成は要求しない）"
+        ),
+    }
+    print(f"ブラフ役職CO（TASK-055）: {bluff_role_claim_labels[allow_bluff_role_claim]}")
     print("player設定の行動別num_predict:")
     for player in state.players:
         per_action = (
@@ -1428,6 +2132,70 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--leak-guard-policy",
+        dest="leak_guard_policy",
+        choices=["tiered", "legacy_strict"],
+        default="tiered",
+        help=(
+            "How the secrecy guard classifies a discussion body before publishing. "
+            "tiered (default): only unpublished true information is withheld; restating "
+            "a published CO or verdict and speculating about other roles stays published, "
+            "and only the leaking sentence is neutralized instead of regenerating the "
+            "whole body. legacy_strict: pre-TASK-054 behavior (scan everything including "
+            "the private reasoning memo, regenerate the whole body on any hit) for "
+            "false-positive and latency comparison."
+        ),
+    )
+    parser.add_argument(
+        "--bluff-role-claim",
+        dest="bluff_role_claim",
+        choices=["allow", "deny"],
+        default="allow",
+        help=(
+            "Whether a player may publish a role CO that they do not actually hold "
+            "(bluff CO) and a divination verdict they do not really have. allow "
+            "(default): any CO and counter-claim stays published; the line is recorded "
+            "as the claimant's own statement and never as an engine-issued result, so "
+            "no one in-game learns who is the real Seer. deny: only the true holder of "
+            "a role may publish its CO or verdict; such lines are dropped before "
+            "publishing while the rest of the body is kept word for word (no "
+            "regeneration). Use this for A/B runs of bluff freedom."
+        ),
+    )
+    # TASK-057: プロンプト契約の簡素化（同じ制約・発言本文の再掲を減らし、不足時は optional だけ落とす）
+    parser.add_argument(
+        "--prompt-contract",
+        dest="prompt_contract",
+        choices=["simplified", "legacy"],
+        default="simplified",
+        help=(
+            "How discussion prompts state constraints and evidence. simplified (default): "
+            "one [BEHAVIOR_CONTRACT] block carries each strong rule once, speech bodies live "
+            "only in [CONVERSATION_EVIDENCE] (other sections refer to them by [ref:sN]), and "
+            "when the allocation is still exceeded only optional blocks are dropped by stage "
+            "(topic digest, hypothesis diff, temporary guidance, derived memo) - core facts, "
+            "the current question, your own action record and your own reasoning memo are never "
+            "dropped, and no tone, topic or conclusion is prescribed. legacy: pre-TASK-057 "
+            "prompts for A/B comparison of prompt size, duplicate constraints and parse failures."
+        ),
+    )
+    # TASK-056: Day内イベントの時系列明示（時点・IDだけを短く示す。offは旧挙動とのA/B比較用）
+    parser.add_argument(
+        "--day-timeline",
+        dest="day_timeline",
+        choices=["explicit", "off"],
+        default="explicit",
+        help=(
+            "Whether day discussion prompts state when each public event happened. "
+            "explicit (default): a short [DAY_TIMELINE] block lists the current point "
+            "(Day / Turn / speech ID), what was already said before you, and which "
+            "events have not happened yet (later speakers, today's vote, tonight's "
+            "night actions) - it fixes no topic, tone or conclusion, and speech bodies "
+            "are never rewritten. off: pre-TASK-056 prompts for A/B comparison of "
+            "future-event references and context size."
+        ),
+    )
+    parser.add_argument(
         "--no-dynamic-context",
         dest="dynamic_context",
         action="store_false",
@@ -1437,6 +2205,19 @@ def build_parser() -> argparse.ArgumentParser:
             "prompt size plus the per-action generation budget (and expanded up to "
             "max_num_ctx when the prompt needs it), and discussion history is budgeted to "
             "the allocated window. Use this flag for fixed-context comparison runs."
+        ),
+    )
+    parser.add_argument(
+        "--no-body-reservation",
+        dest="body_reservation",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable TASK-053 body-budget reservation. By default the first request per "
+            "model x action reserves a separate thinking allowance plus a minimum body budget "
+            "inside num_predict (raised only from measured thinking-only/empty evidence and "
+            "capped per action), so thinking cannot eat the answer. Use this flag for A/B "
+            "comparison runs."
         ),
     )
     parser.add_argument(

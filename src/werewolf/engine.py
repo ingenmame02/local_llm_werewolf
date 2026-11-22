@@ -1,5 +1,6 @@
 import random
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
@@ -36,8 +37,37 @@ from .discussion_format import (
     parse_discussion_output,
     split_sentences,
 )
-from .secret_leak_guard import LeakFinding, SecretLeakGuard
+from .leak_gate_policy import (
+    DEFAULT_LEAK_GUARD_POLICY,
+    GATE_HARD,
+    GATE_OBSERVE,
+    GATE_SOFT,
+    RULE_MEMO_ONLY,
+    STRENGTH_STRICT,
+    LeakGuardProfiles,
+    normalize_leak_guard_policy,
+)
+from .secret_leak_guard import (
+    LeakClassification,
+    LeakFinding,
+    LeakRepair,
+    SecretLeakGuard,
+)
 from .self_consistency import SelfConsistencyGuard
+from .dead_player_resolution import analyze_dead_player_references
+# TASK-055: 役職由来情報（エンジン発行）と公開申告のプロヴェナンスを分離する
+from .role_provenance import (
+    PUBLIC_LINE_LABEL,
+    SOURCE_COMPATIBILITY_TEXT,
+)
+# TASK-056: Day内イベントの時系列台帳と未来参照の観測（検出は観測専用で本文は書き換えない）
+from .day_timeline import (
+    DAY_TIMELINE_POLICY_DEFAULT,
+    DAY_TIMELINE_POLICY_OFF,
+    TurnSnapshot,
+    inspect_public_body,
+    normalize_day_timeline_policy,
+)
 
 _CLAIMED_ROLE_NAMES = {
     "占い師": "seer",
@@ -57,6 +87,8 @@ class _ClaimPublication:
     role_published: bool = False
     result_published: bool = False
     duplicate_suppressed: bool = False
+    # TASK-055: allow_bluff_role_claim=False の設定で受理しなかった行があるか
+    role_claim_disallowed: bool = False
 
 
 # 役職COの自己参照（一人称語）prefix。自分のプレイヤー名でのCOも正当な公開主張
@@ -423,24 +455,20 @@ def diagnose_discussion_body(
             warning = True
             reasons.append(UNVERIFIED_HYPOTHESIS_AS_FACT)
         if _references_dead_player(stripped, dead_names):
-            if _asks_question(stripped) and any(
-                name in stripped for name in dead_names
-            ):
+            living_names = frozenset(
+                player.name for player in state.players if player.is_alive
+            )
+            classifications = analyze_dead_player_references(
+                stripped, dead_names, living_names
+            )
+            has_actionable = any(c.is_actionable_target for c in classifications)
+            has_question = any(c.is_dead_player_question for c in classifications)
+            if has_actionable:
+                reasons.append("dead_player_action_target")
+                repairable = True
+            elif has_question:
                 # 死亡者への質問・回答要求は修復対象
                 reasons.append("dead_player_question")
-                repairable = True
-            elif any(
-                re.search(
-                    rf"{re.escape(name)}[^。！？!?]{{0,16}}"
-                    rf"(?:占|襲|投|指|選|指定|divine|attack|vote|target|choose)"
-                    rf"|(?:占|襲|投|指|選|指定|divine|attack|vote|target|choose)"
-                    rf"[^。！？!?]{{0,16}}{re.escape(name)}",
-                    stripped,
-                    re.IGNORECASE,
-                )
-                for name in dead_names
-            ):
-                reasons.append("dead_player_action_target")
                 repairable = True
             else:
                 warning = True
@@ -566,6 +594,7 @@ class GameEngine:
         content: str,
         findings: tuple[LeakFinding, ...],
         attempt: int,
+        classification: LeakClassification | None = None,
     ) -> None:
         speech_id = sum(
             message.speaker != "system"
@@ -583,26 +612,155 @@ class GameEngine:
         phase_labels = {
             Phase.DAY_DISCUSSION: "昼・議論",
         }
+        event: dict[str, object] = {
+            "type": "secret_role_leak_detected",
+            "day": self.state.day,
+            "phase": self.state.phase.value,
+            "phase_label": phase_labels.get(
+                self.state.phase, self.state.phase.value
+            ),
+            "player": player.name,
+            "model": player.model,
+            "action": action,
+            "speech_id": speech_id,
+            "leak_categories": sorted({finding.category for finding in findings}),
+            "detection_rules": sorted({finding.rule_id for finding in findings}),
+            "content_sha256": SecretLeakGuard.content_hash(content),
+            "safety_retry": attempt,
+            "private": False,
+            "elapsed_seconds": 0.0,
+        }
+        if classification is not None:
+            # 秘匿内容は書かず、ゲート・ルール・公開事実ID・位置だけを残す（公開ログsafe）。
+            event.update(
+                {
+                    "guard_policy": classification.policy,
+                    "guard_strength": classification.strength,
+                    "leak_gates": [finding.gate for finding in findings],
+                    "leak_regions": [finding.region for finding in findings],
+                    "detection_spans": [
+                        [finding.char_start, finding.char_end] for finding in findings
+                    ],
+                    "sentence_sha256": [
+                        SecretLeakGuard.content_hash(finding.evidence)
+                        for finding in findings
+                    ],
+                    "published_fact_ids": list(classification.fact_ids)[:12],
+                    "soft_note_rules": sorted(set(classification.soft_rules)),
+                    "observe_rules": sorted(set(classification.observe_rules)),
+                    "memo_region_rules": list(classification.memo_rules),
+                    "legacy_hard_rules": list(classification.legacy_hard_rules),
+                    "false_positive_avoided": classification.false_positives_avoided,
+                }
+            )
+        self.event_callback(event)
+
+    def _leak_guard_context(self) -> tuple[str, LeakGuardProfiles]:
+        """TASK-054: ガードポリシーとモデル別プロファイル（強度の算出元）を返す。"""
+        policy = normalize_leak_guard_policy(
+            getattr(self.state, "leak_guard_policy", DEFAULT_LEAK_GUARD_POLICY)
+        )
+        profiles = getattr(self.state, "leak_guard_profiles", None)
+        if not isinstance(profiles, LeakGuardProfiles):
+            profiles = LeakGuardProfiles(policy=policy)
+            self.state.leak_guard_profiles = profiles
+        profiles.policy = policy
+        return policy, profiles
+
+    def _emit_leak_observation(
+        self,
+        player: Player,
+        action: str,
+        classification: LeakClassification,
+        *,
+        body_char_count: int,
+        kept_char_count: int,
+        regeneration_avoided: bool = True,
+    ) -> None:
+        """soft / observe 指摘を「本文を公開したまま観測」する（遮断も削句もしない）。
+
+        legacy_strict なら遮断されていたはずの指摘を保持できた件数は、ログ比較で
+        そのまま誤検出自動回避として計測できる（TASK-054の完了条件）。
+        """
+        if self.event_callback is None:
+            return
+        notes = [*classification.soft, *classification.observe]
+        phase_labels = {Phase.DAY_DISCUSSION: "昼・議論"}
         self.event_callback(
             {
-                "type": "secret_role_leak_detected",
+                "type": "secret_leak_note",
                 "day": self.state.day,
                 "phase": self.state.phase.value,
-                "phase_label": phase_labels.get(
-                    self.state.phase, self.state.phase.value
-                ),
+                "phase_label": phase_labels.get(self.state.phase, self.state.phase.value),
                 "player": player.name,
                 "model": player.model,
                 "action": action,
-                "speech_id": speech_id,
-                "leak_categories": sorted({finding.category for finding in findings}),
-                "detection_rules": sorted({finding.rule_id for finding in findings}),
-                "content_sha256": SecretLeakGuard.content_hash(content),
-                "safety_retry": attempt,
+                "guard_policy": classification.policy,
+                "guard_strength": classification.strength,
+                "note_rules": sorted({finding.rule_id for finding in notes}),
+                "note_gates": [finding.gate for finding in notes],
+                "note_categories": sorted({finding.category for finding in notes}),
+                "published_fact_ids": list(
+                    dict.fromkeys(fid for finding in notes for fid in finding.fact_ids)
+                )[:12],
+                "memo_region_rules": list(classification.memo_rules),
+                "legacy_hard_rules": list(classification.legacy_hard_rules),
+                "false_positive_avoided": classification.false_positives_avoided,
+                "body_char_count": body_char_count,
+                "kept_char_count": kept_char_count,
+                "regeneration_avoided": regeneration_avoided,
                 "private": False,
                 "elapsed_seconds": 0.0,
             }
         )
+
+    def _emit_leak_repair(
+        self,
+        player: Player,
+        action: str,
+        classification: LeakClassification,
+        repair: LeakRepair,
+        *,
+        retry_seconds: float = 0.0,
+        regeneration_avoided: bool = True,
+    ) -> None:
+        """TASK-054実装案3: 漏洩文だけを選んだ補正記録（全文再生成を避けられたか残す）。"""
+        if self.event_callback is None:
+            return
+        phase_labels = {Phase.DAY_DISCUSSION: "昼・議論"}
+        self.event_callback(
+            {
+                "type": "secret_leak_sentence_repair",
+                "day": self.state.day,
+                "phase": self.state.phase.value,
+                "phase_label": phase_labels.get(self.state.phase, self.state.phase.value),
+                "player": player.name,
+                "model": player.model,
+                "action": action,
+                "guard_policy": classification.policy,
+                "guard_strength": classification.strength,
+                "replaced_rules": list(repair.replaced_rules),
+                "dropped_rules": list(repair.dropped_rules),
+                "edit_count": repair.edit_count,
+                "body_char_count": repair.original_char_count,
+                "kept_char_count": repair.kept_char_count,
+                "body_preservation_ratio": repair.preserved_ratio,
+                "regeneration_avoided": regeneration_avoided,
+                "retry_seconds": round(retry_seconds, 3),
+                # 秘匿内容は公開しない。置換後の本文ハッシュと位置だけを残す
+                # （私的ログの元応答contentから対応を取れる）。
+                "repaired_content_sha256": SecretLeakGuard.content_hash(repair.text),
+                "edit_spans": [
+                    [finding.char_start, finding.char_end]
+                    for finding in (*classification.hard, *classification.soft)
+                    if finding.char_start >= 0
+                ],
+                "published_fact_ids": list(classification.fact_ids)[:12],
+                "private": False,
+                "elapsed_seconds": 0.0,
+            }
+        )
+
 
     def _authorized_public_results(
         self, player_name: str, claim: str, result: str
@@ -673,9 +831,12 @@ class GameEngine:
         allowed_public_results: frozenset[tuple[str, str]] = frozenset(),
     ) -> str:
         player = next(player for player in self.state.players if player.name == player_name)
+        policy, profiles = self._leak_guard_context()
+        strength = profiles.strength_for(player.model)
+        body_char_count = len(content.strip())
 
-        def findings_for(text: str) -> tuple[LeakFinding, ...]:
-            return SecretLeakGuard.inspect(
+        def classify(text: str) -> LeakClassification:
+            return SecretLeakGuard.classify(
                 text,
                 player,
                 self.state,
@@ -684,24 +845,45 @@ class GameEngine:
                     or SecretLeakGuard.allows_public_claim(text, player)
                 ),
                 allowed_public_results=allowed_public_results,
+                guard_policy=policy,
+                guard_strength=strength,
             )
 
-        findings = findings_for(content)
-        if not findings:
+        classification = classify(content)
+        hard = classification.hard
+        if not hard:
+            # 警告・観測のみのときは本文をそのまま公開する（旧来はここで全文再生成していた）。
+            if classification.soft or classification.observe or classification.memo_rules:
+                self._emit_leak_observation(
+                    player,
+                    action,
+                    classification,
+                    body_char_count=body_char_count,
+                    kept_char_count=body_char_count,
+                )
+                profiles.observe(
+                    player.model,
+                    gate=GATE_SOFT if classification.soft else GATE_OBSERVE,
+                    rule_ids=tuple(
+                        dict.fromkeys(
+                            (
+                                *classification.soft_rules,
+                                *classification.observe_rules,
+                                *classification.memo_rules,
+                            )
+                        )
+                    ),
+                    body_char_count=body_char_count,
+                    kept_char_count=body_char_count,
+                )
             return content
         # 真占い師が未公開の占い結果に言及した場合は、安全再生成ではなく決定的な
         # CO補完で直して情報を保持する（TASK-039）。再生成だと本文が消失し、三人称の
         # 自己参照だけの発言が公開されていた（`game_20da533bc4a6` Player 1）。
-        completion = self._complete_seer_claim_for_publish(player, content, findings)
+        completion = self._complete_seer_claim_for_publish(player, content, hard)
         if completion is not None:
             completed, authorized = completion
-            if not SecretLeakGuard.inspect(
-                completed,
-                player,
-                self.state,
-                allowed_public_claim=True,
-                allowed_public_results=authorized,
-            ):
+            if not classify(completed).hard:
                 target, result = next(iter(authorized))
                 if self.event_callback is not None:
                     self.event_callback(
@@ -714,34 +896,119 @@ class GameEngine:
                             "action": action,
                             "target": target,
                             "result": result,
+                            "guard_policy": classification.policy,
+                            "guard_strength": classification.strength,
                             "private": False,
                             "elapsed_seconds": 0.0,
                         }
                     )
                 return completed
-        self._record_secret_leak(player, action, content, findings, 0)
+
+        self._record_secret_leak(
+            player, action, content, hard, 0, classification=classification
+        )
+
+        # TASK-054実装案3: 本文全体を定型文へ置換せず、漏洩を含む文だけを選んで中立化する。
+        # 本文保持率が閾値以上なら再生成不要（モデルの論旨・口調はそのまま残る）。
+        repair = SecretLeakGuard.repair_public_text(
+            content,
+            classification,
+            player,
+            repair_soft=(strength == STRENGTH_STRICT),
+        )
+        if repair.applied and repair.body_preservable and repair.text.strip():
+            if not classify(repair.text).hard:
+                self._emit_leak_repair(player, action, classification, repair)
+                profiles.observe(
+                    player.model,
+                    gate=GATE_HARD,
+                    rule_ids=tuple((*repair.replaced_rules, *repair.dropped_rules)),
+                    repaired=True,
+                    regenerated=False,
+                    body_char_count=repair.original_char_count,
+                    kept_char_count=repair.kept_char_count,
+                )
+                return repair.text
 
         retry = getattr(self.actions, "retry_after_secret_leak", None)
         if allow_retry and callable(retry):
-            candidate = retry(
-                player_name,
-                self.state.day,
-                tuple(self.state.alive_players),
-                history,
-                tuple(sorted({finding.category for finding in findings})),
-            )
+            retained_body = repair.text if (repair.applied and repair.text.strip()) else None
+            leak_categories = tuple(sorted({finding.category for finding in hard}))
+            rule_ids = tuple(dict.fromkeys(finding.rule_id for finding in hard))
+            started_at = time.perf_counter()
+            try:
+                candidate = retry(
+                    player_name,
+                    self.state.day,
+                    tuple(self.state.alive_players),
+                    history,
+                    leak_categories,
+                    rule_ids=rule_ids,
+                    retained_body=retained_body,
+                )
+            except TypeError:  # 旧シグネチャの実装（モック・後方互換）
+                candidate = retry(
+                    player_name,
+                    self.state.day,
+                    tuple(self.state.alive_players),
+                    history,
+                    leak_categories,
+                )
+            retry_seconds = round(time.perf_counter() - started_at, 3)
             if isinstance(candidate, str) and candidate.strip():
-                retry_findings = findings_for(candidate)
-                if not retry_findings:
+                retry_classification = classify(candidate)
+                if not retry_classification.hard:
+                    self._emit_leak_regeneration(
+                        player,
+                        action,
+                        classification,
+                        retry_seconds=retry_seconds,
+                        body_char_count=body_char_count,
+                        kept_char_count=len(candidate.strip()),
+                        outcome="regenerated",
+                    )
+                    profiles.observe(
+                        player.model,
+                        gate=GATE_HARD,
+                        rule_ids=rule_ids,
+                        regenerated=True,
+                        retry_seconds=retry_seconds,
+                        body_char_count=body_char_count,
+                        kept_char_count=len(candidate.strip()),
+                    )
                     return candidate.strip()
                 self._record_secret_leak(
-                    player, action, candidate, retry_findings, 1
+                    player,
+                    action,
+                    candidate,
+                    retry_classification.hard,
+                    1,
+                    classification=retry_classification,
                 )
                 sanitized, _ = SecretLeakGuard.redact(
                     candidate,
                     player,
                     self.state,
                     allowed_public_results=allowed_public_results,
+                )
+                self._emit_leak_regeneration(
+                    player,
+                    action,
+                    classification,
+                    retry_seconds=retry_seconds,
+                    body_char_count=body_char_count,
+                    kept_char_count=len(sanitized.strip()),
+                    outcome="redacted_after_retry",
+                )
+                profiles.observe(
+                    player.model,
+                    gate=GATE_HARD,
+                    rule_ids=rule_ids,
+                    regenerated=True,
+                    redacted=True,
+                    retry_seconds=retry_seconds,
+                    body_char_count=body_char_count,
+                    kept_char_count=len(sanitized.strip()),
                 )
                 return sanitized
 
@@ -751,7 +1018,65 @@ class GameEngine:
             self.state,
             allowed_public_results=allowed_public_results,
         )
+        self._emit_leak_regeneration(
+            player,
+            action,
+            classification,
+            retry_seconds=0.0,
+            body_char_count=body_char_count,
+            kept_char_count=len(sanitized.strip()),
+            outcome="redacted_without_retry",
+        )
+        profiles.observe(
+            player.model,
+            gate=GATE_HARD,
+            rule_ids=tuple(dict.fromkeys(finding.rule_id for finding in hard)),
+            redacted=True,
+            regenerated=False,
+            body_char_count=body_char_count,
+            kept_char_count=len(sanitized.strip()),
+        )
         return sanitized
+
+    def _emit_leak_regeneration(
+        self,
+        player: Player,
+        action: str,
+        classification: LeakClassification,
+        *,
+        retry_seconds: float,
+        body_char_count: int,
+        kept_char_count: int,
+        outcome: str,
+    ) -> None:
+        """TASK-054: 実際に再要求・削句へ回った場合の負荷をモデル別に記録する。"""
+        if self.event_callback is None:
+            return
+        phase_labels = {Phase.DAY_DISCUSSION: "昼・議論"}
+        self.event_callback(
+            {
+                "type": "secret_leak_regeneration",
+                "day": self.state.day,
+                "phase": self.state.phase.value,
+                "phase_label": phase_labels.get(self.state.phase, self.state.phase.value),
+                "player": player.name,
+                "model": player.model,
+                "action": action,
+                "guard_policy": classification.policy,
+                "guard_strength": classification.strength,
+                "hard_rules": sorted(set(classification.hard_rules)),
+                "outcome": outcome,
+                "retry_seconds": round(retry_seconds, 3),
+                "body_char_count": body_char_count,
+                "kept_char_count": kept_char_count,
+                "body_preservation_ratio": (
+                    round(kept_char_count / body_char_count, 4) if body_char_count else 1.0
+                ),
+                "regeneration_avoided": False,
+                "private": False,
+                "elapsed_seconds": 0.0,
+            }
+        )
 
     def run(self) -> GameState:
         self.check_winner()
@@ -872,6 +1197,14 @@ class GameEngine:
             return
         target_player = self._player(target)
         result = "wolf" if target_player.role is Role.WOLF else "human"
+        # TASK-055: エンジンが発行した占い結果だけを RoleEvidence として登録する。
+        # 昼に公開された申告行とは別台帳であり、このIDを持つ情報が本物の判定である。
+        evidence_id = self.state.role_provenance.record_engine_divination(
+            owner=seer.name,
+            day=self.state.day,
+            target=target,
+            result=result,
+        )
         self.state.seer_results[target] = result
         self.state.seer_result_history.append((self.state.day, target, result))
         self.state.fact_ledger.confirmed_facts.append(
@@ -881,6 +1214,7 @@ class GameEngine:
                 description=f"{target}: {result}",
                 visibility="seer",
                 actor=seer.name,
+                evidence_id=evidence_id,
             )
         )
         self._record_action_memory(
@@ -912,11 +1246,17 @@ class GameEngine:
             self.state.conversation_log.append(
                 Message("system", f"{victim} was attacked during the night.")
             )
+            # TASK-056: 公開された死亡を時系列台帳へ登録する（議論ターン外なので turn=0）
+            self.state.public_timeline.record_death(
+                day=self.state.day, name=victim, executed=False
+            )
         self.check_winner()
         if self.state.winner is None:
             self.state.conversation_log.append(
                 Message("system", f"Day {self.state.day} begins.")
             )
+            # TASK-056: 日の開始を時系列台帳へ登録する（この時点から議論イベントが始まる）
+            self.state.public_timeline.record_day_start(self.state.day)
             self.state.phase = Phase.DAY_DISCUSSION
 
     def run_discussion(self) -> None:
@@ -1032,20 +1372,22 @@ class GameEngine:
                                 public_claim,
                                 claim_text=decision.claim,
                             )
-                            self._record_action_memory(
-                                player=player,
-                                action_type="claim",
-                                day=self.state.day,
-                                phase=self.state.phase.value,
-                                summary=public_claim,
-                                reasoning_summary=self._reason_from_text(
-                                    public_claim
-                                ),
-                                evidence=[
-                                    f"public-claim-day-{self.state.day}-"
-                                    f"{player.name}"
-                                ],
-                            )
+                            # TASK-055: 設定で不受理にしたCOを自分の行動履歴へは残さない
+                            if not publication.role_claim_disallowed:
+                                self._record_action_memory(
+                                    player=player,
+                                    action_type="claim",
+                                    day=self.state.day,
+                                    phase=self.state.phase.value,
+                                    summary=public_claim,
+                                    reasoning_summary=self._reason_from_text(
+                                        public_claim
+                                    ),
+                                    evidence=[
+                                        f"public-claim-day-{self.state.day}-"
+                                        f"{player.name}"
+                                    ],
+                                )
                             public_lines = []
                             if publication.role_published:
                                 public_lines.append(decision.claim)
@@ -1224,7 +1566,10 @@ class GameEngine:
                         publication = self._record_public_role_claim(
                             player.name, content
                         )
-                        if extract_public_role_claim(content, player.name) is not None:
+                        if (
+                            extract_public_role_claim(content, player.name) is not None
+                            and not publication.role_claim_disallowed
+                        ):
                             self._record_action_memory(
                                 player=player,
                                 action_type="claim",
@@ -1237,8 +1582,12 @@ class GameEngine:
                                     f"{player.name}"
                                 ],
                             )
+                        # TASK-055: ブラフCOを許可しない設定では、CO・結果行だけを除去して
+                        # 公開する（それ以外の本文は一字一句そのまま残し、再生成も要求しない）。
                         body = (
-                            self._remove_duplicate_claim(content, player.name)
+                            self._strip_role_claim_text(content, player.name)
+                            if publication.role_claim_disallowed
+                            else self._remove_duplicate_claim(content, player.name)
                             if publication.duplicate_suppressed
                             else content
                         )
@@ -1280,20 +1629,22 @@ class GameEngine:
                                 "\n".join(claim_parts),
                                 claim_text=structured_output.claim,
                             )
-                            self._record_action_memory(
-                                player=player,
-                                action_type="claim",
-                                day=self.state.day,
-                                phase=self.state.phase.value,
-                                summary="\n".join(claim_parts),
-                                reasoning_summary=self._reason_from_text(
-                                    "\n".join(claim_parts)
-                                ),
-                                evidence=[
-                                    f"public-claim-day-{self.state.day}-"
-                                    f"{player.name}"
-                                ],
-                            )
+                            # TASK-055: 設定で不受理にしたCOを自分の行動履歴へは残さない
+                            if not publication.role_claim_disallowed:
+                                self._record_action_memory(
+                                    player=player,
+                                    action_type="claim",
+                                    day=self.state.day,
+                                    phase=self.state.phase.value,
+                                    summary="\n".join(claim_parts),
+                                    reasoning_summary=self._reason_from_text(
+                                        "\n".join(claim_parts)
+                                    ),
+                                    evidence=[
+                                        f"public-claim-day-{self.state.day}-"
+                                        f"{player.name}"
+                                    ],
+                                )
                         body = structured_output.body
                         if publication.duplicate_suppressed:
                             body = self._remove_duplicate_claim(body, player.name)
@@ -1422,6 +1773,8 @@ class GameEngine:
         self.state.conversation_log.append(
             Message("system", f"{executed} was voted out.")
         )
+        # TASK-056: 処刑を時系列台帳へ登録する（この時点以降の発言だけが依拠できる）
+        self.state.public_timeline.record_death(day=day, name=executed, executed=True)
         self.check_winner()
         if self.state.winner is None:
             self.state.day += 1
@@ -1483,6 +1836,36 @@ class GameEngine:
         )
         if claimed_role is None:
             return _ClaimPublication()
+
+        # TASK-055実装案2: allow_bluff_role_claim=False の設定では、保有していない役職のCOを
+        # 台帳へ登録しない。本文や他の発言はそのまま残し、公開イベントにも試みた役職を
+        # 載せない（真偽が他プレイヤーへ漏れないようにするため）。
+        actor = next(
+            (player for player in self.state.players if player.name == speaker),
+            None,
+        )
+        if (
+            actor is not None
+            and not getattr(self.state, "allow_bluff_role_claim", True)
+            and claimed_role != actor.role.value
+        ):
+            self.state.role_provenance.record_disallowed_claim(
+                day=self.state.day,
+                claimant=speaker,
+                claimed_role=claimed_role,
+                source=SOURCE_COMPATIBILITY_TEXT,
+                discussion_turn=self.state.discussion_turn,
+            )
+            self._emit_public_claim(
+                "role_claim_disallowed",
+                day=self.state.day,
+                discussion_turn=self.state.discussion_turn,
+                claimant=speaker,
+                body_preserved=True,
+                role_line_dropped=True,
+                interpretation=PUBLIC_LINE_LABEL,
+            )
+            return _ClaimPublication(role_claim_disallowed=True)
 
         names = tuple(player.name for player in self.state.players)
         ledger_claim = self.state.claim_ledger.public_claims.get(speaker)
@@ -1554,6 +1937,10 @@ class GameEngine:
             re.IGNORECASE,
         )
         if role_published:
+            # TASK-055: この行は「そのプレイヤーが公に語った主張」であることを明示する。
+            # エンジンが発行した占い結果のIDは付けない（公開すると真偽が漏れるため、
+            # 対応関係は role_provenance 台帳（管理者ログ）だけが持つ）。
+            claim_ref = f"[claim:{len(self.state.public_role_claims) + 1}]"
             self.state.public_role_claims.append(
                 PublicRoleClaim(
                     day=self.state.day,
@@ -1567,10 +1954,21 @@ class GameEngine:
                         else None
                     ),
                     vote_proposal=vote_match.group(1).strip() if vote_match else None,
+                    source=SOURCE_COMPATIBILITY_TEXT,
+                    evidence_ids=(claim_ref,),
                 )
             )
             self.state.fact_ledger.public_claims.append(
                 self.state.public_role_claims[-1]
+            )
+            self.state.role_provenance.record_claim(
+                claim_ref=claim_ref,
+                day=self.state.day,
+                claimant=speaker,
+                claimed_role=claimed_role,
+                source=SOURCE_COMPATIBILITY_TEXT,
+                actor_role=actor.role.value if actor is not None else None,
+                discussion_turn=self.state.discussion_turn,
             )
             self._emit_public_claim(
                 "claim_role_corrected"
@@ -1580,6 +1978,8 @@ class GameEngine:
                 claimant=speaker,
                 claimed_role=claimed_role,
                 source="text_compatibility",
+                claim_ref=claim_ref,
+                interpretation=PUBLIC_LINE_LABEL,
             )
 
         if claimed_role != Role.SEER.value:
@@ -1650,6 +2050,12 @@ class GameEngine:
         if ledger_claim is not None:
             ledger_claim.latest_published_day = self.state.day
             ledger_claim.latest_published_turn = self.state.discussion_turn
+        # TASK-055実装案3: 結果行は「そのプレイヤーの申告」としてだけ登録する。CO自体は
+        # 削除せず、エンジンが発行した判定（RoleEvidence）との一致可否は管理者台帳にのみ残す。
+        # ここで state.seer_results（本物の占い結果）・確定FactLedger・他プレイヤーの
+        # 非公開情報へはこの申告を書き込まない。
+        seer_ref = f"[seer_claim:{len(self.state.seer_claims) + 1}]"
+        result_claim_ref = f"[claim:{len(self.state.public_role_claims) + 1}]"
         self.state.seer_claims.append(
             PublicSeerClaim(
                 day=self.state.day,
@@ -1673,10 +2079,23 @@ class GameEngine:
                     else None
                 ),
                 vote_proposal=vote_match.group(1).strip() if vote_match else None,
+                source=SOURCE_COMPATIBILITY_TEXT,
+                evidence_ids=(result_claim_ref, seer_ref),
             )
         )
         self.state.fact_ledger.public_claims.append(
             self.state.public_role_claims[-1]
+        )
+        self.state.role_provenance.record_claim(
+            claim_ref=result_claim_ref,
+            day=self.state.day,
+            claimant=speaker,
+            claimed_role=Role.SEER.value,
+            source=SOURCE_COMPATIBILITY_TEXT,
+            actor_role=actor.role.value if actor is not None else None,
+            target=target,
+            result=claimed_result,
+            discussion_turn=self.state.discussion_turn,
         )
         self._emit_public_claim(
             "seer_result_corrected"
@@ -1686,6 +2105,8 @@ class GameEngine:
             claimant=speaker,
             target=target,
             claimed_result=claimed_result,
+            claim_ref=result_claim_ref,
+            interpretation=PUBLIC_LINE_LABEL,
         )
         return _ClaimPublication(
             role_published=role_published,
@@ -1708,6 +2129,56 @@ class GameEngine:
         ) == role:
             return content[sentence.end() :].strip()
         return ""
+
+    def _strip_role_claim_text(self, content: str | None, speaker: str | None = None) -> str:
+        """TASK-055: ブラフCOを許可しない設定で、役職CO行と占い結果行だけを除去する。
+
+        本文の他の部分・口調・結論には一切触れない（発言の自由はそのまま残す）。
+        マーカー形式（[CO] / [RESULT]）と自由文中のCO文の両方に対応し、本文全体を
+        再生成したり空にしたりはしない。
+        """
+        if not isinstance(content, str) or not content:
+            return ""
+        result_line_marker = re.compile(
+            r"^\s*(?:【結果】|\[RESULT\])",
+            re.IGNORECASE,
+        )
+        kept: list[str] = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                kept.append(line)
+                continue
+            marker = _CLAIM_MARKER_PREFIX.match(stripped) is not None
+            if marker and (
+                extract_public_role_claim(stripped, speaker) is not None
+                or result_line_marker.match(stripped) is not None
+            ):
+                continue
+            sentence_end = re.search(r"[。！？!?]", stripped)
+            head = stripped[: sentence_end.end()] if sentence_end else stripped
+            after_sentence = stripped[sentence_end.end() :] if sentence_end else ""
+            detected = extract_public_role_claim(head, speaker)
+            if detected is None:
+                kept.append(line)
+                continue
+            # CO述及句だけを最小範囲で落とす（同じ文の後半や後文まで消さない）。
+            # 「I am a Villager, and I propose voting for Player 5.」のように主張句の
+            # 後へ投票提案・理由が続く場合でも、それらは本文として残す。
+            fragments: list[str] = []
+            for clause_end in re.finditer(r"[、,，;；：:]", head):
+                candidate_head = head[: clause_end.start()]
+                if extract_public_role_claim(candidate_head, speaker) is not None:
+                    # 区切り以降（投票提案・理由など）は本文として残す
+                    fragments.append(head[clause_end.end() :].strip())
+                    break
+            # 区切りが無い場合はこの文全体がCOの述及なので、同じ行の後文だけを残す
+            if after_sentence.strip():
+                fragments.append(after_sentence.strip())
+            for fragment in fragments:
+                if fragment:
+                    kept.append(fragment)
+        return "\n".join(kept).strip()
 
     def _record_model_inference(self, speaker: str, content: str | None) -> None:
         if isinstance(content, str) and content.strip() and not is_pass_body(content.strip()):
@@ -1980,22 +2451,69 @@ class GameEngine:
             self.event_callback({"type": event_type, **details})
 
     def _append_discussion_message(self, message: Message) -> None:
-        """Append a public speech and emit it immediately for live UIs/loggers."""
-        self.state.append_discussion_message(message)
-        if self.event_callback is not None:
-            self.event_callback(
-                {
-                    "type": "discussion_message",
-                    "day": self.state.day,
-                    "phase": self.state.phase.value,
-                    "phase_label": "Day discussion",
-                    "speaker": message.speaker,
-                    "player": message.speaker,
-                    "action": "discussion",
-                    "private": False,
-                    "content": message.content,
-                }
-            )
+        """Append a public speech and emit it immediately for live UIs/loggers.
+
+        TASK-056: 公開「前」の知識境界で本文を観測し、まだ起きていないイベントを根拠に
+        していないかをログに残す。本文は一字一句そのまま公開する - この検査は観測専用で、
+        語彙・口調・結論の自動修正や再生成要求は一切行わない（`body_modified=false`）。
+        `timeline_policy="off"` では知識境界そのものを作らない（旧挙動とのA/B比較用）。
+        """
+        policy = normalize_day_timeline_policy(
+            getattr(self.state, "timeline_policy", DAY_TIMELINE_POLICY_DEFAULT)
+        )
+        inspectable = message.speaker != "system" and policy != DAY_TIMELINE_POLICY_OFF
+        snapshot = self.state.timeline_snapshot(message.speaker) if inspectable else None
+        appended = self.state.append_discussion_message(message)
+        if self.event_callback is None:
+            return
+        event: dict[str, object] = {
+            "type": "discussion_message",
+            "day": self.state.day,
+            "discussion_turn": int(appended.turn or self.state.discussion_turn),
+            "phase": self.state.phase.value,
+            "phase_label": "Day discussion",
+            "speaker": appended.speaker,
+            "player": appended.speaker,
+            "action": "discussion",
+            "private": False,
+            "content": appended.content,
+        }
+        if appended.speech_id is not None:
+            event["speech_id"] = int(appended.speech_id)
+        event.update(
+            self._timeline_reference_fields(appended, snapshot, policy)
+        )
+        self.event_callback(event)
+
+    def _timeline_reference_fields(
+        self,
+        message: Message,
+        snapshot: TurnSnapshot | None,
+        policy: str,
+    ) -> dict[str, object]:
+        """公開本文を発言時点と突き合わせる（台帳とログ用の観測値だけを返す）。"""
+        if snapshot is None:
+            if message.speaker == "system":
+                return {}
+            # off 設定: 検査自体を行わない（観測カウンタも増やさない）
+            return {"timeline_observed": False, "timeline_policy": policy}
+        report = inspect_public_body(
+            message.content,
+            snapshot,
+            tuple(player.name for player in self.state.players),
+        )
+        timeline = self.state.public_timeline
+        timeline.reference_checks += 1
+        timeline.bodies_checked += 1
+        # この検査は本文を触っていない（公開文字列＝モデル応答から抽出した本文そのもの）
+        timeline.bodies_kept_unmodified += 1
+        timeline.future_reference_findings += len(report.findings)
+        timeline.attributed_references += report.attributed_references
+        timeline.unresolvable_references += report.unresolvable_references
+        fields: dict[str, object] = {"timeline_observed": True, "timeline_policy": policy}
+        fields.update(snapshot.to_log_fields())
+        fields.update(report.to_log_fields())
+        return fields
 
     def _collect_votes(
         self,
@@ -2101,6 +2619,10 @@ class GameEngine:
             day=day,
             attempt=vote_attempt,
             votes=dict(votes),
+        )
+        # TASK-056: 投票の成立を時系列台帳へ登録する（以降の発言はこれを根拠にできる）
+        self.state.public_timeline.record_vote_phase(
+            day, votes, runoff=runoff, ballot_id=ballot_id
         )
         return dict(votes)
 

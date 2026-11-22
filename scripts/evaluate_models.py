@@ -58,6 +58,10 @@ from werewolf.discussion_format import (
 )
 from werewolf.engine import extract_public_seer_result, is_public_seer_claim
 from werewolf.llm_actions import fit_dynamic_context
+from werewolf.thinking_profile import (
+    ThinkingProfiles,
+    reserve_body_budget,
+)
 
 
 @dataclass
@@ -208,6 +212,62 @@ def _metadata_counts(records: list[dict[str, Any]]) -> dict[str, int]:
         "thinking_only_count": thinking_only,
         "truncated_count": truncated,
     }
+
+
+def record_harness_attempts(
+    profiles: ThinkingProfiles,
+    model: str,
+    budget_key: str,
+    result: dict[str, Any],
+) -> dict[str, object]:
+    """1シナリオの評価結果からモデル×アクション別の生成観測を加算する（TASK-053）。
+
+    本番の `llm_actions._record_generation_response` と同じ形に揃え、本文が空のまま
+    打ち切られた送信を thinking 消費量の下限証拠として残す。空が続いた場合は本番同様
+    モデル別余白を拡大し、次のシナリオ・ラウンドの初回リクエストへ反映する。
+    """
+
+    metas = [meta for meta in (result.get("response_metadata") or []) if isinstance(meta, dict)]
+    attempts = metas or [{}]
+    elapsed_total = float(result.get("elapsed_seconds") or 0.0)
+    per_attempt_seconds = elapsed_total / max(1, len(attempts))
+    error_info = result.get("error") if isinstance(result.get("error"), dict) else {}
+    error_kind = error_info.get("kind")
+    profile = profiles.get_or_create(model, budget_key)
+    sent_predict = result.get("num_predict")
+    sent_value = (
+        int(sent_predict)
+        if isinstance(sent_predict, int) and not isinstance(sent_predict, bool)
+        else None
+    )
+    for index, meta in enumerate(attempts, start=1):
+        content_length = meta.get("content_length")
+        body_chars = (
+            int(content_length)
+            if isinstance(content_length, int) and not isinstance(content_length, bool)
+            else 0
+        )
+        thinking_present = bool(meta.get("thinking_present"))
+        empty = body_chars == 0
+        is_last = index == len(attempts)
+        profiles.record(
+            model,
+            budget_key,
+            request_number=index,
+            body_char_count=body_chars,
+            thinking_present=thinking_present,
+            done_reason=meta.get("done_reason"),
+            eval_count=meta.get("eval_count"),
+            elapsed_seconds=per_attempt_seconds,
+            empty=empty and not thinking_present,
+            thinking_only=empty and thinking_present,
+            timed_out=bool(is_last and error_kind == "timeout"),
+            transport_error=bool(is_last and error_info and error_kind != "timeout"),
+        )
+        if empty and thinking_present and meta.get("done_reason") == "length":
+            # 思考が生成上限を食い潰した → まずモデル別余白を拡大（本番と同じ段階）。
+            profile.widen_allowance(num_predict_sent=sent_value)
+    return profile.serialize()
 
 
 def _failure_reason_counts(records: list[dict[str, Any]]) -> dict[str, int]:
@@ -1261,6 +1321,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-body-reservation",
+        dest="body_reservation",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable TASK-053 body-budget reservation for the first request of each model x "
+            "action. By default a separate thinking allowance plus a minimum body budget is "
+            "reserved inside num_predict based on measured thinking-only/empty responses "
+            "(capped per action), mirroring production behavior."
+        ),
+    )
+    parser.add_argument(
         "--base-url",
         type=str,
         default="http://localhost:11434",
@@ -1307,6 +1379,8 @@ def main() -> None:
     records_by_model: dict[str, list[dict[str, Any]]] = {
         cfg.model: [] for cfg in player_configs
     }
+    # TASK-053: モデル×アクション別の生成観測プロファイル（本文予約とthinking余白の算出元）
+    thinking_profiles = ThinkingProfiles()
     # 実際にAPIへ送信した行動別生成上限（モデル別の設定解決結果）を記録する
     applied_budgets_by_model: dict[str, dict[str, dict[str, Any]]] = {
         cfg.model: {} for cfg in player_configs
@@ -1394,6 +1468,14 @@ def main() -> None:
             else "未設定"
         )
     )
+    print(
+        "本文予算予約（TASK-053）: "
+        + (
+            "on（初回リクエストでモデル別のthinking余白と本文最低予算を分離）"
+            if bool(getattr(args, "body_reservation", True))
+            else "off（num_predictは設定値のまま。比較ラン用）"
+        )
+    )
     if args.models:
         print(f"--models 指定: {', '.join(args.models)}")
     print(f"Evaluating {len(player_configs)} models...")
@@ -1433,6 +1515,20 @@ def main() -> None:
                     num_predict, num_predict_source = apply_thinking_floor(
                         num_predict, num_predict_source, thinking_enabled, budget_key
                     )
+                    # TASK-053: 本番と同じ本文予算予約を適用する。モデル×アクション別の
+                    # 観測から「thinking余白 + 本文最低予算」を分離し、思考が上限を食い潰して
+                    # 空応答になるのを防ぐ（cap超えは抑え、待ち時間増を限定）。
+                    body_reservation = reserve_body_budget(
+                        num_predict,
+                        num_predict_source,
+                        thinking_profiles.get(model, budget_key),
+                        budget_key,
+                        thinking_enabled=thinking_enabled,
+                        enabled=bool(getattr(args, "body_reservation", True)),
+                    )
+                    if body_reservation.applied and body_reservation.num_predict is not None:
+                        num_predict = body_reservation.num_predict
+                        num_predict_source = body_reservation.source
                     if num_predict is not None:
                         scenario_options["num_predict"] = num_predict
                     if thinking_enabled is not None:
@@ -1472,6 +1568,12 @@ def main() -> None:
                         ),
                         "source": thinking_source,
                     }
+                    # TASK-053: 本文予約の適用結果と、この結果から更新したモデル×アクション別
+                    # プロファイルを評価JSONLへ残す（実機での比較・能力プロファイル更新の検証用）。
+                    result["body_reservation"] = body_reservation.serialize()
+                    result["generation_profile"] = record_harness_attempts(
+                        thinking_profiles, model, budget_key, result
+                    )
                     records_by_model[model].append(result)
 
                     status = "OK" if result["is_parse_valid"] else "FAILED"
@@ -1600,6 +1702,9 @@ def main() -> None:
             "seer",
         ):
             act_recs = [r for r in records if r["action_type"] == action_name]
+            action_budget_key = ACTION_TYPE_TO_BUDGET_KEY[action_name]
+            # TASK-053: このモデル×アクションの観測プロファイル（率・平均待ち時間を含む）
+            action_profile = thinking_profiles.get(model, action_budget_key)
             act_total = len(act_recs)
             act_valid = sum(1 for r in act_recs if r["is_parse_valid"])
             act_compliant = sum(1 for r in act_recs if r["is_format_compliant"])
@@ -1662,7 +1767,12 @@ def main() -> None:
                 ),
                 **_metadata_counts(act_recs),
                 "failure_reasons": _failure_reason_counts(act_recs),
-                "action_budget_key": ACTION_TYPE_TO_BUDGET_KEY[action_name],
+                "action_budget_key": action_budget_key,
+                # TASK-053: モデル×アクション別の空応答率・thinking消費率・平均待ち時間
+                # （本文予算制御の効果比較に使う実測プロファイル）。
+                "generation_profile": (
+                    action_profile.serialize() if action_profile is not None else None
+                ),
             }
 
         co_recs = [
@@ -1767,6 +1877,14 @@ def main() -> None:
             "thinking_supported": thinking_supported_by_model.get(model, True),
             # 思考onが生成上限を思考だけで消費しなかったか（不足なら以後offで送信）
             "thinking_budget_ok": thinking_budget_ok_by_model.get(model, True),
+            # TASK-053: モデル別×アクション別の生成プロファイル（本文予約の成否を含む）
+            "generation_profiles": thinking_profiles.snapshot().get(model, {}),
+            "reserved_body_actions": sorted(
+                key
+                for key, applied in applied_budgets_by_model.get(model, {}).items()
+                if isinstance(applied, dict)
+                and applied.get("source") == "model_action_body_reservation"
+            ),
             "by_action": by_action,
         }
 
@@ -1787,6 +1905,9 @@ def main() -> None:
         "selected_models": [cfg.model for cfg in player_configs],
         "rounds": args.rounds,
         "timeout": args.timeout,
+        # TASK-053: 本文予算予約の設定（A/B比較の判別用）とモデル×アクション別プロファイル
+        "body_reservation": bool(getattr(args, "body_reservation", True)),
+        "generation_profiles": thinking_profiles.snapshot(),
         "transport_retries": total_transport_retries,
         "semantic_retries": total_semantic_retries,
         "total_retries": overall_total_retries,

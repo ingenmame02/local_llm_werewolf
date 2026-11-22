@@ -1,0 +1,21 @@
+=== [DAY_TIMELINE] 実出力例（ Player 7 ）===
+[DAY_TIMELINE]
+- 時点とIDだけで「この時点で知れていた範囲」を示す参考欄です。論点・口調・結論や推理の順番は決めません。
+- 現在 D1T2#8、あなたはこれから [speech:7] として発言。このターンの先行発言: なし（今日の公開イベント 7 件）。
+- まだ起きていないこと: 他7人が自分の後、今日の投票、今夜の夜行動。これらの結果はまだ存在しないので、現時点では根拠にできません（推測すること自体は自由です）。
+
+diagnostics: {'day_timeline_chars': 223, 'day_timeline_lines': 4, 'timeline_next_speech_id': 7, 'timeline_night_actions_pending': True, 'timeline_own_speeches_today': 0, 'timeline_pending_speakers': 7, 'timeline_point': 'D1T2#8', 'timeline_prior_events_this_turn': 0, 'timeline_prior_events_today': 7, 'timeline_render_variant': 1, 'timeline_vote_already_done_today': False}
+
+=== 発言ヘッダ（時点つき / 旧形式フォールバック） ===
+ stamped : [D1 T1 s1 Player 1]
+   chars : 19
+ legacy  : [Day 1 / Speech 3 / Player 3 / In-game speech]
+   chars : 46
+
+=== プロンプト内の位置（節の数）: 1 ===
+[DAY_TIMELINE]
+- 時点とIDだけで「この時点で知れていた範囲」を示す参考欄です。論点・口調・結論や推理の順番は決めません。
+- 現在 D1T2#8、あなたはこれから [speech:7] として発言。このターンの先行発言: なし（今日の公開イベント 7 件）。
+- まだ起きていないこと: 他7人が自分の後、今日の投票、今夜の夜行動。これらの結果はまだ存在しないので、現時点では根拠にできません（推測すること自体は自由です）。
+
+diagnostics day_timeline_chars: 223 | lines: 4 | header_style: stamped_compact | evidence_chars: 359

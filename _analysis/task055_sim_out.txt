@@ -1,0 +1,32 @@
+=== task055_allow === winner=village requests=61
+  claim_role_published: 3 | role_claim_disallowed: None | fatal_fallbacks: 0
+  公開ログの真偽キー混入: none
+  privateにengine照合: True | privateにRoleEvidence: True
+  public role_provenance keys: ['claims', 'interpretation_label', 'metrics']
+  public metrics: {'role_claims_recorded': 8, 'verdict_lines_self_reported': 5, 'role_claims_disallowed': 0}
+  全CO行のラベル: {'public_claim_line'} | source: {'compatibility_text'}
+  engine evidence owners: ['Player 5'] | seer: Player 5 | 不正保有者: none
+  ブラフ側の申告行: 3 | category: {'unsupported_role_evidence'}
+  state.seer_results: {'Player 1': 'wolf', 'Player 2': 'wolf'}
+  ブラフ発言数: 9 | 合計文字数: 405 | 論点を含む発言数: 9
+  公開台帳のブラフ側CO行: 5 | 全CO行ラベル: {'public_claim_line'}
+=== task055_deny === winner=village requests=61
+  claim_role_published: 1 | role_claim_disallowed: 9 | fatal_fallbacks: 0
+  公開ログの真偽キー混入: none
+  privateにengine照合: True | privateにRoleEvidence: True
+  public role_provenance keys: ['claims', 'interpretation_label', 'metrics']
+  public metrics: {'role_claims_recorded': 3, 'verdict_lines_self_reported': 2, 'role_claims_disallowed': 9}
+  全CO行のラベル: {'public_claim_line'} | source: {'compatibility_text'}
+  engine evidence owners: ['Player 5'] | seer: Player 5 | 不正保有者: none
+  ブラフ側の申告行: 0 | category: set()
+  state.seer_results: {'Player 1': 'wolf', 'Player 2': 'wolf'}
+  ブラフ発言数: 9 | 合計文字数: 405 | 論点を含む発言数: 9
+  公開台帳のブラフ側CO行: 0 | 全CO行ラベル: {'public_claim_line'}
+
+=== 検証 ===
+公開ログへ真偽キーが出ない: True
+denyで受理不可が発生: True
+allowで受理不可ゼロ: True
+allowでブラフCOが公開台帳へ載る: True
+denyでブラフCOが公開台帳から消える: True
+両設定で本文の論点は保持: True

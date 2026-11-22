@@ -2150,3 +2150,276 @@ python src/werewolf/cli.py --mode ollama --models-file config/players.json --see
 ### 完了条件
 
 `legacy`、`free`、新しい台帳/圧縮方式を同じseed群で比較でき、勝敗だけでなく上記指標の回帰テストとしてCIに追加できる。
+
+## TASK-052 最新ゲーム分析 — 死亡者参照の事前解決と軽量補正
+
+状態：完了（LL不使用テスト green・実機ログ game_088e49f0690c 再現テスト確認）
+
+実装概要：`dead_player_resolution.py` を新設し、死亡者言及文を `HISTORICAL_REFERENCE`（過去記録への言及・合法的推論）、`ACTIONABLE_TARGET`（現在の行動要求・違反）、`DEAD_PLAYER_QUESTION`（現在の回答要求・違反）へ文構造・呼びかけ対象・時制・引用・理由修飾に基づき高精度に構造化分類した。
+プロンプト生成時には `[PREVIOUS_TOPICS]`、`[HYPOTHESIS_LEDGER]`、`[SELF_ACTION_MEMORY]`、直近質問に `[historical_only]`、`[cannot_answer]` 属性を付与し、冗長な禁止命令文を増やさずに死亡者への要求が過去記録であることを事前明示した。
+出力後検出（`engine.py` / `llm_actions.py`）では、過去投票の理由説明や他者への質問・引用文を `HISTORICAL_REFERENCE` として識別し、`dead_player_mention`（warningのみ・修復なし・再生成なし・本文保持率100%）として安全に通過させた。
+真の違反（死亡者への直接質問・投票表明）に対しては、全文再生成ではなく違反文のみを文脈を壊さない短い訂正文へ軽量置換し、`regeneration_avoided=True` および診断情報（置換前後の文・分類結果）を記録する。
+実機ログ `game_088e49f0690c` の再現テストにおいて、誤検出されていた6件（88秒の再生成遅延の元凶を含む）の誤検出をゼロにし、真の違反1件のみを対象文置換で安全に補正することを確認。コンテキスト節約、モデルの一貫性、合理的な推理、発言の自由度を両立した。
+
+対象ログ：`logs/game_088e49f0690c.jsonl`（game_id=`088e49f0690c`）
+
+### 背景
+
+TASK-047により、死亡者を対象とする仮説は`historical`化され、台帳上の行動対象から除外できるようになった。しかし最新ゲームでは、依然として`dead_player_question`が3件、`dead_player_action_target`が4件発生し、Player 5では再生成も発生した。
+
+これは台帳の分離不足ではなく、プロンプトに含まれる過去発言・質問・仮説の文脈から、モデルが死亡者を「現在応答できる相手」と再解釈している問題である。死亡者への言及そのもの（過去発言の検証や襲撃理由の推測）は合法なので、単純な名前削除は禁止する。
+
+### 目的
+
+死亡者に対する現在の質問・投票・襲撃・行動要求だけを事前に解決し、過去記録への言及や自由な推理は保持する。TASK-048の`publish`方針と本文保持率を壊さず、必要最小限の補正にする。
+
+### 実装案
+
+1. プロンプト生成時に、`known_dead_players`、`historical_reference`、`actionable_target`を構造化し、死亡者名が出る各文を「過去記録への言及」と「現在の要求」に分類する。
+2. `[PREVIOUS_TOPICS]`、`[HYPOTHESIS_LEDGER]`、`[SELF_ACTION_MEMORY]`、直近発言の各セクションで、死亡者への質問・行動要求には`historical_only`または`cannot_answer`の属性を付ける。自由な本文生成を禁止する命令文は追加しない。
+3. 出力後の検出では、過去の投票理由・CO・発言を論じる文はwarningのみとし、死亡者へ現在の回答・投票・行動を要求する文だけを最小補正対象にする。
+4. 補正時は全文再生成ではなく、対象文のみを短い訂正文へ置換できる経路を追加する。置換前後の本文、`historical_reference`、`actionable_target`をprivate診断ログへ記録する。
+
+### 完了条件
+
+- 最新ログを再生したモック試合で、`dead_player_question`と`dead_player_action_target`のうち、現在要求に該当するものを再生成なしで安全に処理できる。
+- 過去発言の引用・死亡者の投票履歴・CO結果への言及は削除されない。
+- `discussion_message`の本文保持率、TASK-048の新規性指標、質問回答率が現状以下にならない。
+- 死亡者参照の誤検出率と、再生成・補正に要した時間を別々に比較できる。
+
+## TASK-053 最新ゲーム分析 — モデル別thinking-only応答の本文予算制御
+
+状態：完了（LL不使用テスト green・ローカル模擬ゲームで挙動確認。実機Ollama評価は未実施）
+
+対象ログ：`logs/game_088e49f0690c.jsonl`（game_id=`088e49f0690c` の thinking-only 3件・パース失敗12件を再現検証）
+
+実装概要：`src/werewolf/thinking_profile.py` を新設し、モデル×アクション別の生成観測プロファイル（`ModelActionProfile` / `ThinkingProfiles`）を決定的に集める仕組みにした。送信回数・初回/再要求の内訳・本文文字数・thinking有無・`done_reason=length` での打ち切り・空応答（`empty_content` と `thinking_only_response` を分離）・1送信あたり待機秒を積上げ、打ち切られた送信の実測生成トークンを `thinking_floor_tokens`（思考が消費した下限量）として保持する。`reserve_body_budget()` は初回リクエストでのみ「行動別の本文最低予算＋モデル別thinking余白」を分離して `num_predict` を引き上げる（本文最低: 議論640／人狼相談448／投票192／襲撃・占い160／CO補正256、予約cap: 議論6144／人狼相談3072／投票1792／襲撃・占い1536／CO補正1280）。下げることはせず、再要求・無効化時・タイムアウト観測済みモデルでは適用しない。`thinking_allowance()` は適応拡大値→下限×1.25→証拠なしなら0の順で解くため、思考を実際に使うモデルだけ余白が増え、使わないモデルのコンテキストと待ち時間は節約されたままになる。
+`llm_actions.py` は `_options_for()` で予約を適用して解決元を `model_action_body_reservation` にし、TASK-046の全局 `THINKING_MARGIN_TOKENS` に代えてモデル×アクション別実測余白（`_thinking_margin_for()`）を `context_budget_breakdown()`・動的num_ctx・`llm_request_configuration.thinking_margin_tokens` へ反映した。さらに送信ごとに `llm_generation_attempt` イベント（本文有無、thinking有無、`done_reason`、`eval_count`、待機秒、`body_budget` 検査、更新後プロファイル）を発行し、本文が保持できたか（`body_covered`）と空応答の別を行動単位で検証できるようにした。
+思考予算が枯渇したときは即座に思考を off にせず、まず `widen_allowance()` で余白を拡大する（`thinking_budget_exhausted` に `thinking_allowance_widened=True`・`thinking_kept=True`・`thinking_off_switched=False` を記録）。`THINKING_OFF_AFTER_EXHAUSTIONS = 2` で余白が頭打ちになった場合のみ `model_capabilities["thinking_budget"] = False` へ落とし、以後はそのモデルの思考行動を off にする（推論の自由を削る処置を最終手段に後退させた）。
+再要求では長いプロンプトを再送しない。対象選択の再要求は公開事実（`- Alive:` / `- Known dead:` / `- Confirmed deaths:` / `- Latest vote:`）だけを添え、「does not prescribe your conclusion, reasoning, or tone」と明記して口調・結論・論点を固定しない。議論の自由記述では戦略が `round_transcript_memory` でも、生成起因（空・思考のみ・切り詰め）の再要求は core-ledger 短縮プロンプトへ切り替え、`context_compression_stage` に `retry_prompt_style="core_ledger_short"` と初回／再要求のプロンプト文字数を記録した。ローカル模擬（実機不使用の `_task053_sim_check.py`）では thinking枯渇3件すべてで余白拡大により thinking を保持したまま本文を回復（占い 1024→1183、議論 2,048→2,687・3,584→3,712）、予約適用は8リクエスト、再要求プロンプトは 15,416→2,678 字（82.6%減）・14,139→2,518 字（82.2%減）、全78行動でフォールバック0・存在しない名前への指定0 を確認した。
+可視化と評価：`GameLogger` はモデル別 stats へ `action_profiles`（要求数・再要求率・空応答率・thinking消費率・打ち切り率・平均待ち時間・平均本文長・余白拡大回数・thinking off化回数・直近の本文最低予算/余白）を持ち、`game_result` へ書き出す。CLI と評価ハーネス（`scripts/evaluate_models.py`）には `--no-body-reservation`（既定 on）を追加し、本番と同じ予約を適用した評価JSONL（`body_reservation`・`generation_profile`）とサマリ（`generation_profiles`・`reserved_body_actions`）でモデル×アクション別の比較を可能にした。検証は新規 `tests/test_task053_thinking_body_reservation.py`（14テスト、LL不使用）を含む `python -m pytest -q` が 100 passed、`compileall` 成功。実機（Ollama）での評価は行っていない。
+
+### 背景
+
+最新ゲームではthinking-only応答が3件、パース失敗が12件発生した。特に投票・人狼相談で、思考が生成予算を使い切って本文が空になり、再要求へ移行している。モデル別では、GPT-OSS・Gemma・Gemma系モデルで空応答が確認された。
+
+### 目的
+
+モデルの推論能力や自由な考え方を制限せず、thinkingが本文生成を食い潰した場合だけ、アクション種別とモデル能力に応じて本文を確保する。
+
+### 実装案
+
+1. `thinking-only`、`empty_content`、`generation_truncated`をモデル×アクション別に集計し、成功率と待ち時間から能力プロファイルを更新する。
+2. 初回リクエストでthinking予算と本文最低予算を分離し、投票・襲撃・占いなど短いアクションは本文を先に確保する。議論・人狼相談ではモデルごとに別の余白を持たせる。
+3. thinking-only時は同一の長いプロンプトを再送せず、元の公開情報と必要なアクションだけを維持した短い再要求を行う。再要求で口調・結論・論点を固定しない。
+4. `thinking_budget_exhausted`、本文保持、再要求回数、アクション完了時間を評価ログへ記録する。
+
+### 完了条件
+
+- モデル別・アクション別の空応答率とthinking消費率を比較できる。
+- thinking-only再要求で本文が確保され、投票・夜アクションの対象が不正にならない。
+- 平均待ち時間と再要求回数を削減し、通常の議論本文の長さ・多様性を悪化させない。
+
+## TASK-054 最新ゲーム分析 — 秘密情報漏洩ガードの分類精度と再要求負荷
+
+状態：完了（LL不使用テスト green・実ログ game_088e49f0690c 再演で誤検出7件すべて自動回避と旧再生成141.37秒の削減を確認。実機Ollama評価は未実施）
+
+### 背景
+
+最新ゲームでは秘密情報漏洩検出が7件発生した。内訳は役職自己申告6件、人狼仲間の漏洩1件で、公開前の遮断自体は成功した。一方、漏洩検出は本文の再要求を誘発し、自由発言の保持や応答時間に影響する。
+
+### 目的
+
+実際の役職・仲間情報の漏洩は確実に遮断しつつ、公開CO、他者の役職推測、ゲーム内で既に公開された情報まで誤って漏洩扱いしない。TASK-048の本文保持方針と両立させる。
+
+### 実装案
+
+1. `self_role_assertion`、`wolf_partner_identity`、公開済みCOの再言及、他者への推測を別カテゴリに分離し、検出根拠と公開済み事実IDを記録する。
+2. 公開FactLedgerで裏付けられる役職・判定の再言及は漏洩から除外し、非公開の役職・仲間情報だけをhard gate対象にする。
+3. 漏洩時の再要求は、本文全体を定型文へ置換せず、漏洩箇所を含む文だけを安全な推測表現へ差し替えるか、元本文保持の可否を分類する。
+4. モデル別に漏洩率、誤検出率、再要求時間、本文保持率を計測し、ガードの強度を一律にしない。
+
+### 完了条件
+
+- 公開済みCO・占い結果・投票事実の再言及が誤検出されない。
+- 非公開役職・人狼仲間情報は公開ログ、次プレイヤーの公開コンテキスト、FactLedgerへ漏れない。
+- 漏洩再要求の回数・時間と本文保持率を現状と比較でき、自由な推論表現を維持できる。
+
+## TASK-055 最新ゲーム分析 — 役職主張と役職由来情報のプロヴェナンス分離
+
+状態：完了（LL不使用テスト green・ローカル模擬ゲーム（allow/deny）で挙動確認。実機Ollama評価は未実施）
+
+対象ログ：`logs/game_15b1bdf65773.jsonl`（game_id=`15b1bdf65773`）
+
+実装概要：`src/werewolf/role_provenance.py` を新設し、3つの概念を構造的に分けた。`RoleEvidence` は**ゲームエンジンが発行した情報だけ**を保持する（夜の占い結果。`owner`＝保有者名と `source="private_action"` を持ち、IDは `[engine_seer:{day}:{owner}->{target}]`）。`PublicInterpretation` は公開されたCO行・結果行を「誰が何を申告したか」として記録し、エンジン照合（`engine_supported` / `engine_evidence_ids` / `category`）は `admin_view()` 専用、公開用の `public_view()` は例外なく同一の中立ラベル `public_claim_line` ＋出所（`public_claim` / `compatibility_text`）だけを持つ。`RoleProvenanceLedger` はカテゴリ（`engine_issued_evidence` / `self_reported_unverified` / `unsupported_role_evidence` / `bluff_role_claim_disallowed`）で分類し、公開メトリクスは中立カウンタ（`role_claims_recorded` / `verdict_lines_self_reported` / `role_claims_disallowed`）のみ、真偽の内訳（`engine_supported_verdict_lines` / `unsupported_role_evidence_lines` / `per_claimant`）は `admin_metrics()` だけに載せる。**この割り切りは意図的な設計判断**であり、照合結果を公開ログや他プレイヤーのプロンプトへ出すと「どちらが真の占い師か」が確定して推論ゲームそのものが壊れるため、真偽の追跡は管理者ログ限定とした（README・本TASKに明記）。
+`models.py` では既存の `PublicRoleClaim`（＝TASK-055のRoleClaim台帳行）へ `source` と `evidence_ids`（`[claim:N]` / `[seer_claim:N]` の公開用ID。エンジン発行IDは公開されると真偽が漏れるため置かない）を追加し、`LedgerFact` へ `evidence_id`、`GameState` へルール設定 `allow_bluff_role_claim`（既定True）と `role_provenance` を追加した。`engine.py` の `run_seer_phase()` はエンジンの占い結果を `RoleEvidence` として登録したうえで確定FactLedgerへ同じ証拠IDを付け、`_record_public_role_claim()` は許可時に出所つきの本人申告としてのみ記録する（`state.seer_results`・`confirmed_facts`・他プレイヤーの非公開情報へは捏造判定を一切書き込まないことをテストで固定）。不許可設定のときだけCO行と結果行を受理せず `role_claim_disallowed` を発行するが、公開イベントへ試みた役職名を載せない（否か可が外から読めるため）。本文処理は新設 `_strip_role_claim_text()` が「主張句だけを最小範囲で」除去し、同じ文の後半（投票提案・理由）や後文は一字一句保持するため、発言の自由・口調・結論への介入は新たな再生成要求を含まない。`llm_actions.py` の `claim_role` ツール経路でも同じ `source` / `evidence_ids` / ポリシーを適用し（拒否理由は `bluff_role_claim_disallowed`）、`ledger_metrics` と `game_result` へ中立計上を出した。
+プロンプト側は節を増やさない方針で統一した。`_discussion_claim_ledger()` の占い結果行を全員一律 `Self-reported Verdict [seer_claim:N] ... (claimed by this player only)` へ変え、出所説明の中立行（CO・判定はエンジン発行情報ではなく本人の申告であり、ゲーム内では誰も検証できない＝整合性・投票・死亡・時間で判断せよ）を1行だけ追加した。ID参照方式（TASK-047）はそのままなので本文の再掲は増えていない。新設 `PromptBuilder._info_boundary_section()` は「エンジンが本人だけに発行した非公開情報」「自分が既に公開したCO・申告判定」「現在のルール（ブラフ可/不可）」を5行前後で別欄に示し、「公開するか、ブラフするか、黙るか、誰を疑うかはあなたの判断／この欄は口調・論点・結論を決めない」と明記する（実測: 議論42リクエストで平均288字・最大338字、`info_boundary_chars` を diagnostics へ記録）。CO決定プロンプト（`build_discussion_claim_prompt`）は自由度を示す1文をポリシーで差し替えるのみ（+0〜1文）。他プレイヤーのプロンプト・公開ログには `engine_supported` / `unsupported_role_evidence` / `engine_seer` が一切含まれないことをテストと実ログスキャンで検証した。
+検証：新規 `tests/test_task055_role_claim_provenance.py`（15テスト、LL不使用）で、エンジン発行情報の保有者限定・捏造判定の `unsupported_role_evidence` 分類・公開ビューに真偽キーが無いこと・不受理行を公開シリアライズへ出さないこと・deny時の本文保持（`[CO]`/`[RESULT]` は消し本文は同一文字列）・allow時のCO自由受理・本人向け一貫性欄の中立性と短さ・英語話者での同枠・ツークレーム経路の出所と拒否条件を確認し、既存スイートとの合計で `python -m pytest -q` が **133 passed**（TASK-047の公開ラベル1アサーションのみ新表記へ更新）。ローカル模擬 `_analysis/task055_sim_check.py`（実機不使用）では allow/deny 各1ゲーム（winners=village、要求61、致命的フォールバック0）を回し、allow では村人2名の占い師COが公開台帳へ載る（5行）一方で engine evidence owners は真占い師 Player 5 のみ・`state.seer_results` は engine 発行分だけ・公開ログに真偽キー無し、deny では不受理9件・公開台帳のブラフ側行0・本文は9発言405字がそのまま保持、いずれも private ログにだけ RoleEvidence と照合結果が出ることを確認した。さらに `--mode mock` のCLI実行（`--bluff-role-claim allow/deny`）でも public / private の出力分離を実ログで確認済み。実機（Ollama）での `seer_result_without_claim` 削減効果の評価は未実施。
+
+### 背景
+
+Player 4は実際には村人だったが、Day 1に占い師COを行い、Player 1を人狼とする占い結果まで公開した。ゲーム上のブラフとしてCO自体を許す設計なら、COは自由な主張として成立し得る。一方、村人が実際に占い結果を取得した主体のように結果を生成できると、公開主張とゲーム内で得られる情報の境界が崩れる。
+
+同ログでは`claim_role_published`が4件、`seer_result_claim_missing`が3件発生しており、CO行・結果行・実際の役職由来情報の関係がモデルから見えにくい。
+
+### 目的
+
+ブラフとしての役職COを許す自由度を維持しつつ、「COしている」と「本当にその役職の情報を持つ」を分離する。真占い師以外が占い結果を主張した場合も、即座に本文全体を禁止・再生成するのではなく、主張の出所を記録して評価可能にする。
+
+### 実装案
+
+1. `RoleClaim`、`RoleEvidence`、`PublicInterpretation`を分離し、各CO・結果行に`source`（private_action、public_claim、model_inference、compatibility_text）と`evidence_ids`を付ける。
+2. ルール設定に`allow_bluff_role_claim`を追加する。許可時は村人・人狼・狂人のCO本文を公開主張として受理するが、実際の占い結果としてFactLedgerへ登録できるのはゲームエンジンが発行した結果だけにする。
+3. 非占い師の結果行は`unsupported_role_evidence`として分類し、COそのものを削除せず、結果だけを「本人の主張」として扱う。実際の判定と誤認させる文だけを必要最小限に注記する。
+4. プロンプトでは「あなたが実際に知っている非公開情報」「公開されている主張」「自分が演じている／主張している役職」を短い別欄で渡す。役職を明かすか、ブラフするか、誰を疑うかはモデルに委ねる。
+
+### 完了条件
+
+- 村人の占い師COを、設定に応じて公開主張または不許可として扱える。
+- 村人の捏造した占い結果が、真の占い結果・確定FactLedger・他プレイヤーのprivate情報として登録されない。
+- 狼・狂人のブラフCOと、実際の役職由来情報を公開ログ上で追跡できる。
+- CO許可時の発言の自由度を保ちつつ、`seer_result_without_claim`や結果行の誤解釈を減らせる。
+
+## TASK-056 最新ゲーム分析 — Day内イベント時系列の明示と未来参照防止
+
+状態：完了（LL不使用テスト green・ローカル模擬（explicit/off）で挙動確認。実機Ollama評価は未実施）
+
+対象ログ：`logs/game_15b1bdf65773.jsonl`（Day 1のPlayer 4発言）
+
+実装概要：`src/werewolf/day_timeline.py` を新設し、公開イベントだけの時系列台帳 `PublicTimeline`（`TimelineEvent`＝`sequence / day / turn / kind / actor / speech_id / summary / evidence_id`、`available_at` は `D1T2#7` 形）と、発言直前の知識境界 `TurnSnapshot`（`prior_this_turn`＝自分の前にそのターンで公開された発言、`own_speeches_today`、`speakers_pending`＝まだ発言していない生存者、`today_vote_done`、`night_pending`、`known_dead`、`next_speech_id`）を作った。**`turn_start_snapshot` と `current_turn_prior_events` を分離**するため、snapshot は「その発言者が見る直前」だけで組み、プロンプト組み立ても発言追加も、台帳の登順を壊さない（エンジン発行の非公開情報＝占い結果・襲撃対象・役職は snapshot にも `serialize()` にも一切載せない）。`GameState` へ `public_timeline` とルール設定 `timeline_policy`（既定 `"explicit"`、`"off"` でA/B比較）を持たせ、`append_discussion_message()` が公開時に `day / discussion_turn / speech_id / timeline_index` を `Message` へスタンプして台帳へ登録する（旧ログや手組み履歴は既定値 `0 / 0 / None / None` のままでも動く）。日の開始・投票成立・処刑・襲撃死も `record_day_start() / record_vote_phase() / record_death()` で登順に残す。
+
+コンテキスト節約は2方向で行った。①新しい `[DAY_TIMELINE]` 節は時点・ID・未発生イベントのみで上限5行／460字（実測: 議論54リクエストで平均294字・4.67行、説明文を短い版へ縮める段階的フォールバックで、先行発言一覧は4名＋「ほかN件」に打ち切る。`day_timeline_chars` / `day_timeline_lines` / `timeline_render_variant` を diagnostics へ記録）。発言本文の再掲はない。②既存の発言履歴ヘッダを時点つき短縮形 `[D1 T2 s14 Player 2]`（約21字）へ変え、従来形 `[Day 1 / Speech 3 / Player 2 / In-game speech]`（45字）に対し1行23字の削減とした。`sN` は推理メモ・論点台帳・仮説台帳の `[speech:N]` と同じ番号なので本文を引かずに関連付けられる。ローカル模擬の同一履歴A/Bでは **旧形（TASK-056前相当）19,002字 → 短縮＋欄あり 18,702字**、つまりヘッダ縮約557字減に対して新しい欄の実費256字、**正味300字の削減**（`evidence_char_count` 1,900→1,343、`avg_day_timeline_chars` 294、`avg_evidence_char_count` 実測1,080.9）。時系列欄は圧縮対象の `[CONVERSATION_EVIDENCE]` より前に置くため予算削除で落ちて時点が消えない。
+
+合理的な議論のため、時点と因果の境界だけを渡す（推順・論点・口調・結論は指示しない）。節の先頭行に「この欄は口調・論点・結論や推理の順番を決めない」と明記し、`[CONTINUITY_MEMO]` と同じ中立性にした。仮説台帳へは観測時点 `observed_at`（`D1T2#7`、未指定なら `D2T3`）を刻み、`observed ...` として描画・シリアライズする（古い要約を新しい事実として読み替えないための補助で、本文の追記はしない）。`evidence_grounding_rate_at_speech_time`（引用した発言が時点で存在した割合）と `timeline_event_count` / `future_events_withheld`（プロンプトへ出さなかった後発イベント数）を `metrics()` と `game_result` へ出した。
+
+**未来参照の検出は観測専用**である4カテゴリ（`vote_outcome_before_vote` / `death_before_death` / `speech_from_unspoken_player` / `night_action_before_night`）を `inspect_public_body()` で実装し、断定表現だけを対象にして婉曲（かもしれない・と思う・might・if 等）と疑問文は数えない（誤検出で発言の自由を削らない）。検出しても本文・語彙・口調・結論は一切書き換えず、再生成要求も発行しないことを `body_modified: false` と `bodies_kept_unmodified == bodies_checked` で記録する（模擬54発言で検査54件・修正0件、`vote_outcome_before_vote` 27件を検出し `future_event_reference_rate` 0.5、`evidence_grounding_rate_at_speech_time` 1.0）。死亡が既に公開済みの人を挙げる文は「過ぎた夜」の話として疑わず、引用追跡率の分母は他者発言の引用だけに限定した（投票・死亡・夜行動の断定と混ぜない）。`timeline_policy="off"` では知識境界の計算ごと行わない（旧挙動との差分は欄の有無だけで、ヘッダ短縮と台帳のスタンプは両設定で効く）。`--day-timeline {explicit,off}`（既定 explicit）を追加し、`meta.day_timeline_policy`、`game_result.public_timeline`（時点・ID・要約のみ／非公開情報なし）、カテゴリ別件数、根拠追跡率、`avg_day_timeline_chars` / `avg_evidence_char_count` をログへ出した。
+
+検証：新規 `tests/test_task056_day_timeline.py`（32テスト、LL不使用）で、ヘッダ短縮と旧ログフォールバック・台帳の登順と重複登録スキップ・未知kind拒否・ serialize に非公開情報が出ないこと・ snapshot の既知／未発生分離（投票前、死亡前、後発プレイヤー）・死亡と投票の事後判定・台帳なし履歴からの復元・時系列欄の上限5行460字と中立文言・一覧打ち切り・圧縮対象より前に置かれること・ off で欄だけが消えること・未来参照4カテゴリと婉曲／疑問文の非検出・引用追跡率の分母・エンジンが本文を同一文字列のまま公開し検査専用であること（`body_modified=false`、再要求イベントなし）・仮説台帳の観測時点・ポリシー正規化を確認し、既存スイートとの合計で `python -m pytest -q` が **165 passed**。ローカル模擬 `_analysis/task056_sim_check.py`（実機不使用、explicit/off 各1ゲーム＝winners=village／要求78／発言54）では上記の実測値に加え、公開台帳へ `attack_target` / `divination_result` / `true_role` が混ざらないこと、off で検査・計上が一切増えないことを確認した（`[OK]` 8項目 all pass）。実ログ側は `_analysis/task056_log_scan.py` で Day 1 の24発言が日毎の連番のみで T1/T2/T3 と `[speech:N]` に紐づかない状態を数値化して動機を固定している。実機（Ollama）での `future_event_reference` 削減効果の評価は未実施。
+
+### 背景
+
+同ゲームではDay 1に42件の議論コンテキストが生成され、Player 4は同日内に複数回発言した。しかし現行のプロンプトは、日・ターン・発言者・選択理由を台帳や履歴の各所に分散して提示しており、「この発言時点で既に知っていた情報」と「同じ日の後続ターンで公開された情報」の境界が弱い。
+
+Player 4の初回議論では、推定必要量が15,630 tokensに達し、後続の再要求では短縮コンテキストへ切り替わった。情報が圧縮・再構成される過程で、同日内の順序や「誰が先に何を言ったか」が失われやすい。
+
+### 目的
+
+同じ日の議論を、全文履歴を増やさずに「ターン開始時点の状態」「自分より前の発言」「現在の質問」「まだ発生していないイベント」に分ける。モデルが後続発言や未来の投票結果を過去の根拠として扱わないようにする。
+
+### 実装案
+
+1. 各公開イベントに`day`、`discussion_turn`、`speech_id`、`sequence`、`available_at`を付け、プロンプトに短い`[DAY_TIMELINE]`として時系列順に表示する。
+2. `turn_start_snapshot`と`current_turn_prior_events`を分け、現在プレイヤーより後の発言・投票・夜行動は選択候補から除外する。後で判明した事実は「現在時点では未知」と明示する。
+3. 要約・仮説・トピック台帳にも証拠の発生時点を付け、同じ論点の要約が新しい事実のように再解釈されないようにする。
+4. 時系列情報はID・時点・短い要約だけにし、全文の再掲や「必ずこの順で推理する」といった命令は追加しない。
+
+### 完了条件
+
+- 同日内の先行発言、現在発言、後続発言をモックで区別できる。
+- 後続イベントを根拠にした発言を検出でき、公開本文の自由な表現や結論自体は自動修正しない。
+- コンテキストを増やさず、`future_event_reference`、時系列違反、発言時点の根拠追跡率をログ化できる。
+
+## TASK-057 最新ゲーム分析 — プロンプト契約の簡素化と情報ブロック間の重複削減
+
+状態：完了（LL不使用テスト green・ローカル模擬A/Bで字数・重複・削除段階を実測。実機Ollama評価は未実施）
+
+### 実装概要（TASK-057）
+
+新規 `src/werewolf/prompt_contract.py` にプロンプト契約の台帳と検査を集約した。`PromptSectionMeta`（`name / markers / tier / purpose / source / authority / expires_at`）で議論プロンプトの全節を登録し、`find_sections()` がマーカー位置から区間を割る。**同じマーカーを2つの節で持たないことをテストで固定**しているため、位置計測と除去範囲がずれない。tier は `core`（ルール・生存者・確定事実台帳 `[FACT_LEDGER]`、主張台帳 `[CLAIM_LEDGER]`、エンジン発行情報 `[ACTOR_PRIVATE_MEMO]`、自分の推理メモ `[YOUR_PREVIOUS_REASONING_MEMO]`、自分の発言欄、`[DAY_TIMELINE]`、`[CONVERSATION_EVIDENCE]`、`[CURRENT_TASK]`、現在の質問 `[Current Question]`、秘匿境界、`[BEHAVIOR_CONTRACT]`）と `optional`（論点要約・仮説差分台帳・推測行・推理誘導・暫定ガイダンス・整合アラート・派生メモJSON・質問の重複引用 `[Direct Answer to Previous Question]`）に分けた。`drop_sections(text, names)` はマーカー区間だけを除き、`CORE_NEVER_DROPPED` の名前を渡すと `ValueError`、未登録名も `ValueError` とする（core本文には1文字も触れない）。期限管理は `expires_at`（`D1T1` / `N1` 形）で持ち、`guidance_expired()` と `expired_sections_present()` で「期限切れの暫定案内がまだ載っているか」を観測できる。段階除去は `OPTIONAL_REMOVAL_STAGES`（stage1: 論点要約＋推理誘導 → stage2: 仮説差分＋推測行 → stage3: 期限切れ暫定ガイダンス＋質問の重複引用 → stage4: 整合アラート＋派生メモJSON）を累積式とし、自分の発言・行動記録・確定事実・現在の質問はどの段階でも落ちない。
+
+重複排除は「発言本文は `[CONVERSATION_EVIDENCE]` の1箇所だけ」を原則にした。`quote_or_reference(body, speech_id, evidence_speech_ids)` は**履歴へ実際に載っているIDを持つ本文だけ**を `[ref:sN] (same speech as [CONVERSATION_EVIDENCE])` へ縮め、ID無し・履歴から削られた本文はそのまま残す（空参照を作らない）。適用箇所は①現在の質問の引用行、②`[Direct Answer to Previous Question]` の質問文、③`[Your Speeches Today]`（全IDが証拠に揃うときだけ「listed above by id」へ）、④`[SELF_ACTION_MEMORY]` の「自分が実際に言った文」行（投票・占いの行はエンジン記録なので不変）、⑤`- Player Speech & Inferences (Unverified)` 行（台帳へ発言を写し込んでいる行だけ `[ref:sN] 名前` 化し、自分の推測文章はそのまま残す）、⑥派生メモの `current_round_evidence`（`evidence_entries_to_references`）。`legacy` ではこれらの旧挙動（本文再掲）を再現するため、A/B比較の基準側になる。
+
+`[BEHAVIOR_CONTRACT]` は強い制約を1度だけ書く統合節である（秘匿情報の非公開・創作禁止・一人称視点・メタ話禁止・出力ブロック順・`[REASONING]` を `[BODY]` に混ぜない・指定言語・CO行と本文を混ぜない／本文を空にしない※COを依頼するときのみ）。一方で `strength="freedom"` の行を同じ節に置き、**口調・文量・構成・論点・結論は自由で、推理の順番も指示しない**と明記した（強制的な語彙や3-5文等の指定は契約に入れない）。静的検査 `inspect_behavior_contract()` は `duplicate_rule`（同一 rule_id の重複）、`obligation_vs_freedom`（無条件の義務と自由行が同じ次元に並ぶ）、`freedom_without_anchor`（自由行のない制約のみ）を出し、`condition` を持つ義務（strict設定で自分へ直接問われたときだけ回答）は `conditional_pair` として扱い矛盾に数えない。`scan_prompt_constraints()` / `duplicated_constraints()` / `disallowed_duplicate_count()` はプロンプト実文字列から制約文の出現回数を数え、`ALLOWED_DUPLICATE_RULES`（パス形式の最終確認など、出力形式の一部として必要な言い換え）を除外する。simplified では旧ユーザープロンプト側へ散らばっていた同じ命令bullet（三人称禁止・記録外情報を使わない・`[REASONING]`非混入）を削除した。
+
+予算超過時の段階除去は `llm_actions._build_discussion_prompt_with_budget()` に集約した。**まず1回のプロンプトを作り、`find_sections()` で現実に存在する節名を取得してから**、overflow（割り当て − 見積もり必要トークン）が続く段階だけを組み直すため、存在しない節のために再構築しない。組み直し回数は `prompt_build_calls`、試行した段階は `contract_stage_attempts` として診断へ出す（`legacy` では段階除去自体を行わず `contract_removal_stage=0`）。`cli.py` には `--prompt-contract {simplified,legacy}`（既定 simplified）を加え、`state.prompt_contract_policy` へ反映した。送信オプションへ本設定を混ぜないよう除外リストへ入れ、Ollama 側未知キーを防いでいる。ログは `game_result.prompt_contract_policy` と台帳メトリクス（`avg_prompt_user_chars / max_prompt_user_chars / avg_prompt_core_chars / avg_prompt_optional_chars / dedup_references_total / dedup_saved_chars_total / duplicate_constraint_total / optional_removed_chars_total / contract_stage{1..4}_removals / avg_prompt_build_calls / avg_contract_stage_attempts`）、モデル別 stats（同項目＋`contract_removal_stage_counts`）を出し、`discussion_context_selected` へ `prompt_section_chars`（節別字数）、`prompt_duplicate_constraint_rules`、期限切れ節の実在数などが入る（JSONL化可能）。
+
+### ローカル実測（実機Ollama不使用・モッククライアント、seed 20261121 / config/players.json）
+
+同一フルゲームを両ポリシーで走らせると winners=village、requests=104、speeches=42、parse_failures=74、retries=45 が**両側で一致**し（発言の形式・再要求負荷は変わらない）、公開ログへ `attack_target` / `divination_result` / `true_role` は混ざらなかった。プロンプト量は `avg_prompt_user_chars` **17,484.0 → 14,114.1（−19.2%）**、`max_prompt_user_chars` **21,659 → 16,509（−23.8%）**、同じ制約文の重複カウント `duplicate_constraint_total` **436 → 184（−58%）**、ID参照は 573箇所・本文削減実測 `dedup_saved_chars_total` 20,712字。段階除去は割り当てが8kで窮屈なモデルでのみ発動し（42選択のうち stage1=3／stage2=3／stage3=1／stage4=29、`optional_removed_chars_total` 110,173字）、落ちたのは論点要約・推理誘導・仮説差分・推測行・期限切れガイダンス・整合アラート・派生メモだけで、`[FACT_LEDGER]` `[SELF_ACTION_MEMORY` `[CONVERSATION_EVIDENCE` `[BEHAVIOR_CONTRACT]` `[Instructions]` は全リクエストに残った。同じ履歴で段階除去なし（同一条件）比べるA/Bでは avg chars 21,543 → 20,465、推定トークン 15,010 → 14,471（**正味5,393字・2,695 tokens減**）、証拠外での発言本文再掲 **6.80箇所／406字 → 0箇所／0字**、重複制約 kinds 8.20 → 4.20、ID参照 0 → 19.20（契約と参照化だけで減った分）。ローカル側の組立コストは `avg_prompt_build_calls` 1.43 → 4.10、`avg_contract_stage_attempts` 0 → 3.05、議論構築時間 0.402秒 → 0.548秒（104リクエスト合計、+1.4ms/リクエスト相当）で、モデル推論の待機時間より2桁小さい。
+
+検証：新規 `tests/test_task057_prompt_contract.py`（25テスト、LL不使用）で、ポリシー正規化（`off`→legacy／未知値はsimplified）・`GameState.prompt_contract_policy` の正規化・台帳の一意性（マーカー重複禁止）と purpose/source/authority/expires_at の所持・`expires_at` の期限判定（D1T1, N1 形）・`drop_sections` が optional だけ落とし core の本文を1文字も減らさないこと（入れ子見出しをまたがない）・core名や未登録名を渡すと `ValueError`・段階が累積式で core を含まないこと・期限切れガイダンスの観測・`quote_or_reference` が ID無し／履歴から削られた本文では本文を残す（空参照を作らない）・短い本文は参照化しない・自分の発言欄と `[SELF_ACTION_MEMORY]` と推測行が ID参照へ変わり legacy では旧来の本文再掲のまま残ること・**全生存者のプロンプトで同じ発言本文が2度以上載らないこと**（simplified）と legacy では重複が残ること・制約文の重複カウントが simplified で減り core（事実台帳・主張台帳・自分の行動記録・発言履歴）は両設定で等しく残ること・契約行の `duplicate_rule` / `obligation_vs_freedom` / `freedom_without_anchor` 検出と条件つき義務は `conditional_pair` 扱い・`render_behavior_contract` の自己診断（重複0・矛盾0）・diagnostics が JSONL化可能で `prompt_core_chars + prompt_optional_chars <= 総字数`・builder 側で任意段階を落としても core の見出し（`[FACT_LEDGER]` `[CLAIM_LEDGER]` `[CURRENT_TASK]` `[Instructions]` `[DAY_TIMELINE]` `[CONVERSATION_EVIDENCE` `[BEHAVIOR_CONTRACT]`）が無傷・段階除去が overflow 時だけ発動し `legacy` では発動しないこと（`FakeContractClient` を使い実Ollamaへは一切送らない）、割り当てに余裕があれば組み直し自体を行わないこと（`prompt_build_calls <= 2`）を確認した。既存スイートとの合計は `python -m pytest -q` で **190 passed**（TASK-046 の予算テスト、TASK-047 の重複抑制テスト、TASK-048 の論点台帳テスト、TASK-055 の秘匿境界テスト、TASK-056 の時系列テスト、自由人格モードのテストを含む）。ローカル検証スクリプトは `_analysis/task057_prompt_ab.py`（同一履歴A/Bとモックフルゲーム両ポリシー）、`_analysis/task057_repeat_check.py`（ simplified で同じ本文を2度以上載せている節の実測＝証拠以外の重複0）、`_analysis/task057_metrics.py`（`game_result.ledger_metrics` とモデル別 stats の読み出し）で、いずれも実機Ollamaは使わない。ユーザー指示どおり**モデルの実機テストは行っていない**ため、実ログ相当のプロンプト量・パース失敗率・立場一貫性への効果は実機評価として未実施である。
+
+### 背景
+
+最新ゲームではPlayer 4の初回議論で、system prompt 2,104文字、user prompt 18,109文字、推定必要量15,630 tokensに対し、送信`num_ctx`は12,288だった。全体ではパース失敗18件、再要求19件、議論平均79.8秒、`dynamic_context_fit=false`が85件中75件発生している。
+
+現在のプロンプトには、FactLedger、ClaimLedger、推理メモ、HypothesisLedger、TopicLedger、質問、自己行動履歴、自由人格指針、出力形式が同時に存在する。各ブロックは個別には有用だが、同じ事実や制約を別の表現で繰り返すと、モデルが優先順位を誤ったり、古い要約を現在の命令・事実として扱ったりする。
+
+### 目的
+
+プロンプトを短くするだけでなく、情報の役割と優先順位を明確にし、制約の増加による混乱を減らす。自由な口調・論点・結論を残し、ゲームルールと情報秘匿に必要な最小限の契約だけを強くする。
+
+### 実装案
+
+1. 各セクションに`purpose`、`source`、`authority`、`expires_at`を付け、同じ`evidence_id`の本文は1ブロックだけに置く。その他はIDと短い参照にする。
+2. `core`（ルール・生存者・確定事実・現在アクション）と`optional`（過去発言要約・仮説差分・トピック要約・推理メモ）を分け、コンテキスト不足時はoptionalだけを段階的に削る。
+3. 自由人格、質問、推理メモ、反復防止などの指示を一つの`behavior_contract`へ統合し、互いに重複・矛盾する命令がないか静的検査する。
+4. `prompt_section_chars`、重複`evidence_id`数、推定トークン、削除段階、モデル別のパース失敗・立場変更・時系列違反をログへ記録する。
+
+### 完了条件
+
+- 同じ確定事実・制約・発言が複数ブロックへ本文付きで現れない。
+- 重要なcore情報を保持したまま、平均・最大プロンプト量と`context_needed_tokens`を削減できる。
+- パース失敗・再要求時間・立場の不整合を現状と比較できる。
+- 自由人格モードの発言長、口調、論点の多様性を悪化させない。
+
+## TASK-058 最新ゲーム分析 — 実機8kモデル向けcore予算の段階圧縮
+
+状態：未着手（実機ログ `game_106015c79ec9` で課題を確認。実装・比較未実施）
+
+### 背景
+
+TASK-057のsimplified設定は実機でも本文重複を削減したが、core情報だけで依然として大きい。`game_106015c79ec9` では54件の議論リクエスト中48件がstage4までoptionalを削除しており、平均user promptは17,924.7字、最大23,165字、平均coreは14,257.5字だった。`prompt_optional_chars` は平均215.1字まで減っているため、次のボトルネックはoptionalではなく、core内に残る長い証拠本文・過去日の確定履歴・同一事実の列挙である。
+
+同ゲームでは、78アクション中15件の再要求、議論のtruncation 3件、thinking-only 4件、`thinking_budget_exhausted` 4件が発生した。これはTASK-053のthinking制御だけでなく、入力コンテキストが大きい状態で出力予算も確保しにくくなった可能性を示す。ただし、ルール・現在の質問・自分の行動記録・当時点の証拠を一律に削ると一貫性と合理的推理を損なうため、削除ではなく役割を保った圧縮が必要である。
+
+### 目的
+
+coreを「常に全文保持する情報」と「同じ意味を短い事実へ畳める情報」に分け、8k系モデルでも現在の質問への回答、直近の時系列、役職主張の根拠、自分の過去発言を優先できるようにする。本文の自由な口調・論点・推理順は変更せず、入力側の情報表現だけを最小化する。
+
+### 実装案
+
+1. `core`内に `anchor / recent / historical` の保持層を追加する。`anchor` はルール、秘匿境界、現在の質問、現在の行動形式、自分の行動記録を保持し、`recent` は現在ターンの先行発言・直近の主張更新・未解決質問を保持する。`historical` は既に台帳へ正規化された過去イベントを、本文ではなく時点・actor・kind・evidence IDの短い行へ置き換える。
+2. `[CONVERSATION_EVIDENCE]` を予算内で圧縮する際、単純な末尾切り捨てを禁止し、現在の質問の対象、直近の反証、役職主張とその根拠、現在投票に関係する発言を優先する。削除した本文は公開ログから消さず、プロンプト上でのみ `[ref:sN]` として追跡可能にする。
+3. `context_needed_tokens`、`effective_requested_num_ctx`、出力body予約量、core各層の文字数を同一リクエストで記録し、入力圧縮によってthinking-only・truncation・再要求が減ったかをモデル別に比較する。
+4. 役職主張・占い結果・死亡・投票のような確定イベントは、本文圧縮後も `observed_at` と `evidence_id` を保持する。古い要約を新しい事実として扱わない境界を静的テストで固定する。
+5. `--core-compression {off,layered}` または同等のA/B設定を追加し、既定の自由人格・behavior contract・秘匿ガード・day timelineの意味を変更しない。
+
+### 完了条件
+
+- 同一seed・同一モデル構成で、`layered` が `off` より平均・最大user promptと`context_needed_tokens`を削減する。
+- `anchor` と現在質問、直近時系列、必要な役職主張の根拠が全リクエストで保持される。
+- 8k系モデルのthinking-only、truncation、`generation_limit`、再要求率をモデル別に比較できる。
+- `future_event_reference_rate`、`evidence_grounding_rate_at_speech_time`、役職プロヴェナンス、公開ログ秘匿性が悪化しない。
+- 本文の口調・論点・推理順を再生成または固定せず、削除・圧縮はプロンプト内だけで完結する。
+- LL不使用テスト、モックA/B、実機Ollamaの同一seed比較結果をTASKS.mdへ記録する。
+
+## TASK-059 最新ゲーム分析 — 時系列参照の未解決・誤帰属を根拠付きで解消
+
+状態：未着手（TASK-056の実機ログ評価で課題を確認）
+
+### 背景
+
+`game_106015c79ec9` では議論54件に対して時系列検査53件、未来参照8件、`future_event_reference_rate=0.1509`、`evidence_grounding_rate_at_speech_time=0.9167` だった。内訳は `death_before_death=1`、`speech_from_unspoken_player=6`、`night_action_before_night=1`、未解決参照6件である。TASK-056の「本文を改変せず観測する」方針は守られているが、時系列情報を提示しても、モデルが発言者・発言時点・後発イベントの境界を6件で正しく結び付けられていない。
+
+また、全体の発言は53件であるのに対し、未来参照検査は53件に留まるため、検査対象外の公開文・台帳要約・claim compatibility経路がないかも確認する必要がある。検出漏れを防ぎつつ、婉曲な推測や「もし起きていたなら」の自由な議論まで違反扱いしないことが重要である。
+
+### 目的
+
+発言本文を修正・再生成せず、モデルが参照できる証拠の時点と帰属を一貫して示す。未来参照をゼロにすることを目的にせず、実際に発生済みの事実、発言者がその時点で知り得た情報、単なる仮説を区別して計測可能にする。
+
+### 実装案
+
+1. 全公開発言・claim・vote・death・night actionの各入力経路に、検査対象の`timeline_index`、`available_at`、`evidence_id`を必須化し、検査対象数と除外理由を記録する。
+2. `speech_from_unspoken_player` を、同一ターンの先行発言・別ターンの既発言・死亡後の履歴参照に分ける。未発言者名を一般論として挙げたケースと、実際にその人物が発言したと帰属するケースを分離する。
+3. 未解決参照6件について、ID欠落・旧ログ互換・同一内容の重複・実際の未来参照を分類し、空参照や推測文の誤検出を増やさない。
+4. プロンプトには時点・ID・短い帰属情報だけを追加し、本文の自動修正・論点指定・結論誘導は行わない。必要なら診断専用に「この根拠は現在時点で利用可能か」を示すが、本文へ警告を挿入しないモードも維持する。
+5. `future_event_reference_rate` と `evidence_grounding_rate_at_speech_time` を、公開発言・claim・投票・台帳要約ごと、さらにモデル別に分解する。
+
+### 完了条件
+
+- 54件の議論以外を含め、全公開情報経路の検査対象数が説明可能になる。
+- 実機ログの8件をカテゴリ別に再現し、少なくとも未解決参照の原因を100%分類できる。
+- 実際の未来参照・誤帰属は減少し、婉曲表現・疑問文・自由な仮説の誤検出率は増加しない。
+- `evidence_grounding_rate_at_speech_time` と現在質問への回答率を維持または改善する。
+- 本文変更なし、公開台帳への秘匿情報混入なし、`day_timeline=off` の互換動作を維持する。

@@ -102,6 +102,7 @@ ollama serve
 | `--num-ctx INT` | 未設定 | コンテキスト長。省略時は API リクエストに含めず、サーバー／モデル既定値が使われます |
 | `--override-player-num-ctx` | off | `--num-ctx` をプレイヤー別 `num_ctx` より優先させる（`--num-ctx` と併用） |
 | `--no-dynamic-context` | off | 動的コンテキストを停止（固定コンテキストの比較用） |
+| `--no-body-reservation` | off | モデル×アクション別の本文予算予約（初回リクエストでthinking余白＋本文最低予算を分離して確保）を無効化し、従来動作との比較を可能にする |
 | `--num-predict INT` | 未設定 | 生成上限（全体設定）。省略時は行動別既定値 |
 | `--num-predict-by-action ACTION=N` | — | 行動別生成上限の上書き（複数指定可） |
 | `--thinking {auto,on,off}` | `auto` | 思考生成。`auto` は行動別既定（議論・人狼相談 on／襲撃・占い・投票・CO補正 off） |
@@ -110,6 +111,10 @@ ollama serve
 | `--context-strategy {...}` | `hybrid_retrieval` | 議論に渡す履歴の構成（後述） |
 | `--question-hint-mode {strict,soft,none}` | `soft` | 直前の質問への回答指示の強さ。`soft` は観測のみ／`strict` は旧来（1文目ルール＋1回再生成）／`none` は質問欄も指示も出しません |
 | `--novelty-policy {publish,append,legacy_repair}` | `publish` | 低新規性（既出論点の連呼）時の処理。`publish` は本文をそのまま公開（再生成・文の除去なし）／`append` は本文を保持し未論点への短い任意の追記要求のみ／`legacy_repair` は旧挙動（重複文の除去＋1回の意味的再要求・A/B比較用） |
+| `--leak-guard-policy {tiered,legacy_strict}` | `tiered` | 秘密漏洩ガードのゲート分類。`tiered` は未公開の真の情報（未公開の占い判定・狼仲間関係・自分の真陣営・プロンプトや生成設定）だけ遮断し、公開済みCOや判定の再言及・他者の役職推測は本文をそのまま公開（推理メモは観測のみ）。漏洩した文だけの中立化を優先して全文再生成を避けます。`legacy_strict` は旧挙動（推理メモを含む全文照合で1件でも検出すれば全文再生成→削句。誤検出由来の再要求負荷とのA/B比較用） |
+| `--bluff-role-claim {allow,deny}` | `allow` | 実際にその役職を持たないプレイヤーの役職CO（ブラフCO）と、持っていない占い結果の申告を許すか。`allow` はCO・対抗CO・判定申告をそのまま公開し、台帳では「本人の申告（`public_claim_line`）」として記録するだけで、エンジンが発行した実際の占い結果（`RoleEvidence`）とは分離します（どちらが真の占い師かは公開ログ・プロンプトに出ません）。`deny` は実保有者だけがCO・判定を公開でき、非保有者のCO行と結果行は公開前に除去しますが、それ以外の本文は一字一句そのまま残し再生成も要求しません。不受理数は中立カウンタ `role_claims_disallowed` だけで計上し、試みた役職は公開イベントへ出しません |
+| `--day-timeline {explicit,off}` | `explicit` | 議論プロンプトに発言時点の時系列欄 `[DAY_TIMELINE]` を出すか。`explicit` は現在時点（Day / Turn / #順序）・自分の発言順（`[speech:N]`）・このターンで既知の先行発言・**まだ起きていないこと**（自分より後の発言者、今日の投票、今夜の夜行動）を5行／460字以内で示します。口調・論点・結論や推理の順番は決めず、公開本文は書き換えません（未来参照の検出は観測専用で `body_modified=false`）。`off` は時系列欄と検査を行わない旧挙動（A/B比較用）。発言ヘッダの短縮と台帳の時点スタンプは両設定で効きます |
+| `--prompt-contract {simplified,legacy}` | `simplified` | プロンプト契約の整理。`simplified` は強い制約（非公開情報の秘匿・創作禁止・一人称視点・メタ話禁止・`[REASONING]` を `[BODY]` に混ぜない・ブロック順・応答言語）を `[BEHAVIOR_CONTRACT]` へ1箇所に集め、同じ命令文の再掲を減らします。発言本文は `[CONVERSATION_EVIDENCE]` の1箇所だけに出し、質問引用・自分の発言欄・行動記録の発言行・推測行は `[ref:sN]` 参照にします（履歴から削られた発言の空参照は作りません）。割り当てが足りないときだけ optional 節（論点要約・推理誘導・仮説差分・推測行・期限切れガイダンス・整合アラート・派生メモ）を段階的に落とし、確定事実台帳・現在の質問・自分の行動記録・自分の推理メモ・発言本文・時系列欄は落としません。口調・文量・構成・論点・結論は自由のままです。`legacy` は旧来の形（命令文の重複と本文再掲）でA/B比較用 |
 | `--language {English,Japanese}` | 設定／日本語 | 応答言語 |
 | `--personality {…profiles…,free}` | 設定そのまま | 全プレイヤーの個性プロファイルを上書き。`free` は自由発言モード（話し方の preset なし） |
 | `--log-dir DIR` | `logs` | JSONL ログの出力先 |
@@ -206,6 +211,10 @@ ollama serve
 - メタ漏洩・異常発言の警告も、内容を漏らさない安全な要約として次のプレイヤーへ渡します。
 - 再試行では失敗理由に応じた修正指示と、直近の公開発言・公開 CO など必要な情報だけを再送します。占い師本人の非公開結果は、その占い師の再試行にのみ含めます。
 - 全履歴系のプロンプト監査では公開発言の SHA-256、通し発言番号、選択理由、除外範囲を記録し、会話本文や非公開の狼相談・占い結果は診断イベントに含めません。
+- 発言時点の時系列明示（既定 on / `--day-timeline off` で比較）: `[DAY_TIMELINE]` に「現在時点・自分の発言順・このターンで既知の先行発言・まだ起きていないこと（後発プレイヤー／今日の投票／今夜の夜行動）」を5行460字以内で出します。エンジン側は発言ごとに `day / discussion_turn / speech_id / timeline_index` をスタンプし、日の開始・投票・処刑・襲撃死も登順で台帳（`public_timeline`）へ登録するため、「自分が先に言ったのか、相手が後に言ったのか」を本文を引かずに追えます。口調・論点・結論や推理の順番は指示しません。
+- 同じ機能で節約も行う: 発言履歴ヘッダを従来形 `[Day 1 / Speech 3 / Player 2 / In-game speech]`（45字）から時点つき短縮形 `[D1 T2 s14 Player 2]`（約21字）へ縮約したため、ローカル模擬の実測では新しい欄の実費（約256字／リクエスト）より大きい削減（ヘッダ合計 約557字／同一履歴）となり、プロンプト总量は旧構成より約300字減少しました（`avg_day_timeline_chars`、`avg_evidence_char_count`、`evidence_header_style` でA/B検証可）。
+- プロンプト契約の簡素化（既定 `simplified` / `--prompt-contract legacy` で比較）: `[BEHAVIOR_CONTRACT]` が強い制約を1度だけ書き、口調・文量・構成・論点・結論と推理の順番は自由だと明記します（質問へ答える義務なども「直接問われたときだけ」と条件つきで、自由行と矛盾させません）。節には `purpose / source / authority / expires_at` を持つ台帳（`prompt_contract.py`）を当て、コンテキスト不足時は optional 節だけを段階的に落とすため、確定事実・現在の質問・自分の行動記録・自分の推理メモ・発言本文は無傷のままです。
+- 発言本文の二重送信をやめる: 同じ発言は `[CONVERSATION_EVIDENCE]` だけに載せ、`[Current Question]` の引用・`[Direct Answer to Previous Question]`・`[Your Speeches Today]`・`[SELF_ACTION_MEMORY]` の発言行・`Player Speech & Inferences` 行は `[ref:sN]`（=`[speech:N]` と同じ番号）で参照します。ローカル模擬の実測では `avg_prompt_user_chars` 17,484 → 14,114（−19.2%）、`max_prompt_user_chars` 21,659 → 16,509、同じ制約文の重複カウント 436 → 184、ID参照 573箇所、証拠外での本文再掲 6.80箇所／406字 → 0箇所／0字（同一履歴A/B）でした。`duplicate_constraint_total`、`dedup_saved_chars_total`、`contract_stage{1..4}_removals`、`avg_prompt_build_calls` でA/B検証できます。
 
 ## 生成上限（num_predict）と思考生成（think）
 
@@ -228,6 +237,7 @@ ollama serve
 - `--show-private`: 管理者ログを生成し、端末にも秘密情報を表示
 - `--private-log`: 管理者ログだけを生成（端末には表示しません）
 - 公開ログには秘密情報・診断メタデータ・失敗詳細を含めません。管理者ログを共有する場合は取り扱いに注意してください。
+- `game_result` の `public_timeline` は公開イベントの時系列（時点 `available_at`、`speech_id`、`[speech:N]` の証拠ID、46字以内の要約のみ。発言全文・占い結果・役職・襲撃対象は載せません）。併せて `day_timeline_policy`、カテゴリ別の未来参照検出数（`vote_outcome_before_vote` / `death_before_death` / `speech_from_unspoken_player` / `night_action_before_night`）、発言時点の根拠追跡率 `evidence_grounding_rate_at_speech_time`、`avg_day_timeline_chars` / `avg_evidence_char_count` を記録します。検出は観測専用で、`discussion_message.body_modified` は常に `false`（本文は一字一句そのまま公開）です。
 
 ## 評価・ベンチマーク
 
@@ -301,7 +311,7 @@ ollama show werewolf-existing-model-4k --modelfile
 ## リポジトリ構成
 
 ```text
-src/werewolf/                ゲームエンジン、プロンプト生成、Ollama クライアント、CO/本文解析、漏えいガード、CLI
+src/werewolf/                ゲームエンジン、プロンプト生成、Ollama クライアント、CO/本文解析、漏えいガード、役職出所台帳、Day内時系列台帳（day_timeline.py）、CLI
 scripts/                     evaluate_models.py（モデル評価） / benchmark_context.py（コンテキスト比較） / diagnose_ollama_context.py（コンテキスト診断）
 config/players.json          プレイヤー 8 体の設定
 modelfiles/                  Ollama 派生モデル定義

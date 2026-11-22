@@ -1,0 +1,105 @@
+winner: village | requests: 81
+generation_attempt: 81
+
+[騾∽ｿ｡縺ｮ蜀・ｨｳ・医Δ繝・Νﾃ励い繧ｯ繧ｷ繝ｧ繝ｳ・云
+  werewolf-calm3-22b-8k ﾃ・discussion: requests=3 thinking_only=0 empty=0 num_predict=[2560]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=72.0
+  werewolf-calm3-22b-8k ﾃ・vote: requests=1 thinking_only=0 empty=0 num_predict=[768]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=37.0
+  werewolf-deepseek-r1-8k ﾃ・discussion: requests=9 thinking_only=0 empty=0 num_predict=[4096]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=72.0
+  werewolf-deepseek-r1-8k ﾃ・vote: requests=3 thinking_only=0 empty=0 num_predict=[1024]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=37.0
+  werewolf-gemma4-8k ﾃ・discussion: requests=9 thinking_only=0 empty=0 num_predict=[4096]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=72.0
+  werewolf-gemma4-8k ﾃ・vote: requests=3 thinking_only=0 empty=0 num_predict=[1024]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=37.0
+  werewolf-glm-4.7-flash-8k ﾃ・attack: requests=1 thinking_only=0 empty=0 num_predict=[1024]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=23.0
+  werewolf-glm-4.7-flash-8k ﾃ・discussion: requests=9 thinking_only=0 empty=0 num_predict=[2560]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=72.0
+  werewolf-glm-4.7-flash-8k ﾃ・vote: requests=3 thinking_only=0 empty=0 num_predict=[1024]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=37.0
+  werewolf-glm-4.7-flash-8k ﾃ・wolf_discussion: requests=1 thinking_only=0 empty=0 num_predict=[1536]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=42.0
+  werewolf-gpt-oss-20b-8k ﾃ・discussion: requests=9 thinking_only=0 empty=0 num_predict=[3072]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=72.0
+  werewolf-gpt-oss-20b-8k ﾃ・vote: requests=3 thinking_only=0 empty=0 num_predict=[1024]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=37.0
+  werewolf-mistral-small-8k ﾃ・attack: requests=1 thinking_only=0 empty=0 num_predict=[640]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=23.0
+  werewolf-mistral-small-8k ﾃ・discussion: requests=7 thinking_only=1 empty=1 num_predict=[2048, 2687, 4096]
+    floor=2048 allowance=2047 exhaustions=1 widenings=1 covered_thinking_only=0 thinking_share=0.1429 avg_body_chars=66.2
+  werewolf-mistral-small-8k ﾃ・vote: requests=2 thinking_only=0 empty=0 num_predict=[768]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=37.0
+  werewolf-mistral-small-8k ﾃ・wolf_discussion: requests=1 thinking_only=0 empty=0 num_predict=[1024]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=42.0
+  werewolf-muse-glimmer-8k ﾃ・discussion: requests=4 thinking_only=1 empty=1 num_predict=[3584, 3712, 7168]
+    floor=3584 allowance=3072 exhaustions=1 widenings=1 covered_thinking_only=0 thinking_share=0.25 avg_body_chars=60.3
+  werewolf-muse-glimmer-8k ﾃ・seer: requests=3 thinking_only=1 empty=1 num_predict=[1024, 1183, 2048]
+    floor=1024 allowance=1023 exhaustions=1 widenings=1 covered_thinking_only=0 thinking_share=0.3333 avg_body_chars=29.0
+  werewolf-muse-glimmer-8k ﾃ・vote: requests=1 thinking_only=0 empty=0 num_predict=[1024]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=37.0
+  werewolf-qwen3.8-8k ﾃ・discussion: requests=6 thinking_only=0 empty=0 num_predict=[2560]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=72.0
+  werewolf-qwen3.8-8k ﾃ・vote: requests=2 thinking_only=0 empty=0 num_predict=[768]
+    floor=0 allowance=None exhaustions=0 widenings=0 covered_thinking_only=0 thinking_share=0.0 avg_body_chars=37.0
+
+[num_predict隗｣豎ｺ蜈ゾ {'player_by_action': 70, 'retry_generation_boost': 3, 'model_action_body_reservation': 8}
+莠育ｴ・←逕ｨ繝ｪ繧ｯ繧ｨ繧ｹ繝・ 8
+  werewolf-muse-glimmer-8k ﾃ・discussion: sent=3712 body_min=640 allowance=3072 required=3712 covered=True margin=3072
+  werewolf-mistral-small-8k ﾃ・discussion: sent=2687 body_min=640 allowance=2047 required=2687 covered=True margin=2047
+  werewolf-muse-glimmer-8k ﾃ・discussion: sent=3712 body_min=640 allowance=3072 required=3712 covered=True margin=3072
+  werewolf-mistral-small-8k ﾃ・discussion: sent=2687 body_min=640 allowance=2047 required=2687 covered=True margin=2047
+  werewolf-muse-glimmer-8k ﾃ・seer: sent=1183 body_min=160 allowance=1023 required=1183 covered=True margin=1023
+  werewolf-mistral-small-8k ﾃ・discussion: sent=2687 body_min=640 allowance=2047 required=2687 covered=True margin=2047
+  werewolf-mistral-small-8k ﾃ・discussion: sent=2687 body_min=640 allowance=2047 required=2687 covered=True margin=2047
+  werewolf-mistral-small-8k ﾃ・discussion: sent=2687 body_min=640 allowance=2047 required=2687 covered=True margin=2047
+
+[陦悟虚繝医Ξ繝ｼ繧ｹ] 莉ｶ謨ｰ=78 繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ=0 閾ｴ蜻ｽ逧・ｮ牙・繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ=0 蟄伜惠縺励↑縺・錐蜑阪∈縺ｮ謖・ｮ・0
+
+[繝｢繝・Νﾃ励い繧ｯ繧ｷ繝ｧ繝ｳ蛻･縺ｮ隕ｳ貂ｬ繝励Ο繝輔ぃ繧､繝ｫ・育ｩｺ縺縺｣縺溯｡悟虚縺縺托ｼ云
+  werewolf-mistral-small-8k ﾃ・discussion: thinking_only=1 empty=0 floor=2048 allowance=2047 exhaustions=1 widenings=1 covered_thinking_only=0 empty_rate=0.1429 thinking_share=0.1429 avg_body_chars=66.2
+  werewolf-muse-glimmer-8k ﾃ・discussion: thinking_only=1 empty=0 floor=3584 allowance=3072 exhaustions=1 widenings=1 covered_thinking_only=0 empty_rate=0.25 thinking_share=0.25 avg_body_chars=60.3
+  werewolf-muse-glimmer-8k ﾃ・seer: thinking_only=1 empty=0 floor=1024 allowance=1023 exhaustions=1 widenings=1 covered_thinking_only=0 empty_rate=0.3333 thinking_share=0.3333 avg_body_chars=29.0
+
+[thinking莠育ｮ嶺ｸ崎ｶｳ縺ｸ縺ｮ蟇ｾ蜃ｦ・医∪縺壻ｽ咏區諡｡螟ｧ縲｛ff縺ｯ譛邨よ焔谿ｵ・云
+  werewolf-muse-glimmer-8k ﾃ・seer: widened=True kept=True off_switched=False allowance=1023 count=1
+  werewolf-muse-glimmer-8k ﾃ・discussion: widened=True kept=True off_switched=False allowance=3072 count=1
+  werewolf-mistral-small-8k ﾃ・discussion: widened=True kept=True off_switched=False allowance=2047 count=1
+  閭ｽ蜉帛愛螳壹〒thinking off蛹・ []
+
+[蜀崎ｦ∵ｱゅ・繝ｭ繝ｳ繝励ヨ縺ｮ遏ｭ邵ｮ・磯聞縺・・繝ｭ繝ｳ繝励ヨ繧貞・騾√＠縺ｪ縺・ｼ云
+  werewolf-muse-glimmer-8k ﾃ・discussion: style=core_ledger_short reason=generation_retry initial=15416 retry=2678 saving=0.826
+  werewolf-mistral-small-8k ﾃ・discussion: style=core_ledger_short reason=generation_retry initial=14139 retry=2518 saving=0.822
+
+[game_result.model_stats.action_profiles]
+  werewolf-calm3-22b-8k: thinking_budget_fallbacks=0
+    discussion: requests=3 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=72.0
+    vote: requests=1 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=37.0
+  werewolf-deepseek-r1-8k: thinking_budget_fallbacks=0
+    discussion: requests=9 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=72.0
+    vote: requests=3 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=37.0
+  werewolf-gemma4-8k: thinking_budget_fallbacks=0
+    discussion: requests=9 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=72.0
+    vote: requests=3 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=37.0
+  werewolf-glm-4.7-flash-8k: thinking_budget_fallbacks=0
+    attack: requests=1 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=23.0
+    discussion: requests=9 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=72.0
+    vote: requests=3 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=37.0
+    wolf_discussion: requests=1 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=42.0
+  werewolf-gpt-oss-20b-8k: thinking_budget_fallbacks=0
+    discussion: requests=9 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=72.0
+    vote: requests=3 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=37.0
+  werewolf-mistral-small-8k: thinking_budget_fallbacks=1
+    attack: requests=1 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=23.0
+    discussion: requests=7 empty_rate=0.1429 thinking_only_rate=0.1429 widenings=1 off_switches=0 avg_elapsed=0.0 avg_body_chars=66.2
+    vote: requests=2 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=37.0
+    wolf_discussion: requests=1 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=42.0
+  werewolf-muse-glimmer-8k: thinking_budget_fallbacks=2
+    discussion: requests=4 empty_rate=0.25 thinking_only_rate=0.25 widenings=1 off_switches=0 avg_elapsed=0.0 avg_body_chars=60.3
+    seer: requests=3 empty_rate=0.3333 thinking_only_rate=0.3333 widenings=1 off_switches=0 avg_elapsed=0.0 avg_body_chars=29.0
+    vote: requests=1 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=37.0
+  werewolf-qwen3.8-8k: thinking_budget_fallbacks=0
+    discussion: requests=6 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=72.0
+    vote: requests=2 empty_rate=0.0 thinking_only_rate=0.0 widenings=0 off_switches=0 avg_elapsed=0.0 avg_body_chars=37.0

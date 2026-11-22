@@ -1,0 +1,52 @@
+TASK-054 leak gate verification (no live model calls)
+log=C:\Users\yukic\local_llm_werewolf\logs\game_088e49f0690c.private.jsonl
+
+== 実ログの漏洩検出を新ゲートで再演 ==
+[anchor 36] day=1 Player 3/werewolf-mistral-small-8k role=madman log_rules=['self_role_assertion']
+    legacy_hard=['self_role_assertion'] tiered_hard=[]
+    soft=['self_role_public_claim'] observe=[] memo=[] fact_ids=['[claim:1]', '[claim:2]', '[seer_claim:2]'] avoided=True
+    outcome=publish body_chars=547 kept=547 preservation=1.000 旧再生成=13.31s 節約=13.31s
+[anchor 76] day=1 Player 6/werewolf-deepseek-r1-8k role=wolf log_rules=['self_role_assertion']
+    legacy_hard=['self_role_assertion'] tiered_hard=[]
+    soft=['self_role_public_claim'] observe=['third_party_role_speculation'] memo=[] fact_ids=['[claim:1]', '[claim:2]', '[seer_claim:2]'] avoided=True
+    outcome=publish body_chars=573 kept=573 preservation=1.000 旧再生成=53.57s 節約=53.57s
+[anchor 157] day=1 Player 7/werewolf-gpt-oss-20b-8k role=villager log_rules=['self_role_assertion']
+    legacy_hard=['self_role_assertion'] tiered_hard=[]
+    soft=[] observe=[] memo=['reasoning_memo_region', 'self_role_assertion'] fact_ids=['[claim:1]', '[claim:2]', '[claim:3]', '[claim:4]'] avoided=True
+    outcome=publish body_chars=384 kept=384 preservation=1.000 旧再生成=14.08s 節約=14.08s
+[anchor 176] day=1 Player 1/werewolf-calm3-22b-8k role=seer log_rules=['self_role_assertion']
+    legacy_hard=['self_role_assertion'] tiered_hard=[]
+    soft=[] observe=['public_claim_restatement', 'third_party_role_speculation'] memo=[] fact_ids=['[claim:1]', '[claim:2]', '[claim:3]', '[claim:4]'] avoided=True
+    outcome=publish body_chars=251 kept=251 preservation=1.000 旧再生成=13.73s 節約=13.73s
+[anchor 181] day=1 Player 1/werewolf-calm3-22b-8k role=seer log_rules=['self_role_assertion']
+    legacy_hard=['self_role_assertion'] tiered_hard=[]
+    soft=[] observe=['public_claim_restatement', 'published_seer_verdict_restatement'] memo=[] fact_ids=['[claim:1]', '[claim:2]', '[claim:3]', '[claim:4]'] avoided=True
+    outcome=publish body_chars=280 kept=280 preservation=1.000 旧再生成=0.00s 節約=0.00s
+[anchor 392] day=2 Player 7/werewolf-gpt-oss-20b-8k role=villager log_rules=['self_role_assertion']
+    legacy_hard=['self_role_assertion'] tiered_hard=[]
+    soft=[] observe=['third_party_role_speculation'] memo=['reasoning_memo_region', 'self_role_assertion'] fact_ids=['[claim:1]', '[claim:2]', '[claim:3]', '[claim:4]'] avoided=True
+    outcome=publish body_chars=441 kept=441 preservation=1.000 旧再生成=22.81s 節約=22.81s
+[anchor 457] day=2 Player 8/werewolf-gemma4-8k role=wolf log_rules=['wolf_partner_identity']
+    legacy_hard=['wolf_partner_identity'] tiered_hard=[]
+    soft=[] observe=['third_party_role_speculation'] memo=[] fact_ids=['[claim:1]', '[claim:2]', '[claim:3]', '[claim:4]'] avoided=True
+    outcome=publish body_chars=570 kept=570 preservation=1.000 旧再生成=23.86s 節約=23.86s
+
+== 集計 ==
+anchors=7 false_positive_avoided=7 sentence_repairs=0 retry_needed=0
+旧ランの再生成合計=141.37s / 新ゲートで浮く節約=141.37s
+本文合計=3046字 保持=3046字 保持率=1.0
+strict強度なら追加で中立化する文（balancedでは本文そのまま）=2件
+本文保持の下限 MIN_BODY_PRESERVATION_RATIO=0.6
+
+== 合成文での歯止め確認 ==
+  wolf_true_camp: hard=['private_team_reference', 'self_role_true_camp_disclosure']
+  wolf_partner_binding: hard=['private_team_reference']
+  unpublished_verdict: hard=['unpublished_seer_result']
+  prompt_reference: hard=['internal_configuration_reference']
+  madman_camp: hard=['self_role_true_camp_disclosure']
+  villager_first_person_claim: hard=- soft=['self_role_public_claim'] observe=[] legacy=['self_role_assertion']
+  third_party_speculation: hard=- soft=[] observe=['third_party_role_speculation'] legacy=[]
+  reasoning_memo_only: hard=- soft=[] observe=[] legacy=['self_role_assertion']
+
+== NG ==
+(none)

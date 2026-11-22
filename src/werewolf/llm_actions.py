@@ -8,6 +8,10 @@ from difflib import SequenceMatcher
 from typing import Callable
 
 from .action_parser import ActionKind, ActionParser
+from .dead_player_resolution import (
+    analyze_dead_player_references,
+    classify_dead_player_sentence,
+)
 from .context_budget import (
     EffectiveContextResolution,
     process_env_context,
@@ -32,6 +36,23 @@ from .config import (
     THINKING_BUDGET_SOURCE,
     THINKING_CAPABILITY_SOURCE,
     THINKING_NUM_PREDICT_SOURCE,
+)
+from .thinking_profile import (
+    BODY_MIN_TOKENS_BY_ACTION,
+    BODY_RESERVATION_MAX_NUM_PREDICT,
+    DEFAULT_THINKING_ALLOWANCE_TOKENS,
+    EMPTY_CONTENT_REASON,
+    GENERATION_TRUNCATED_REASON,
+    MAX_THINKING_ALLOWANCE_TOKENS,
+    RESERVATION_SKIPPED_TIMEOUT,
+    THINKING_ONLY_REASON,
+    THINKING_OFF_AFTER_EXHAUSTIONS,
+    BodyReservation,
+    ModelActionProfile,
+    ThinkingProfiles,
+    inspect_body_budget,
+    reserve_body_budget,
+    thinking_allowance,
 )
 from .discussion_format import (
     DEFAULT_QUESTION_HINT_MODE,
@@ -66,8 +87,38 @@ from .prompts import (
     is_japanese_language,
     language_directive,
 )
-from .secret_leak_guard import LeakFinding, SecretLeakGuard
+# TASK-057: プロンプト契約のポリシー解決と、コンテキスト不足時の optional 節の段階除去を使う。
+# core（確定事実・現在の質問・自分の行動記録・自分の推理メモ）は落とさない。
+from .prompt_contract import (
+    OPTIONAL_REMOVAL_MAX_STAGE,
+    PROMPT_CONTRACT_POLICY_LEGACY,
+    find_sections,
+    normalize_prompt_contract_policy,
+    optional_names_dropped_up_to,
+)
+from .leak_gate_policy import (
+    DEFAULT_LEAK_GUARD_POLICY,
+    RULE_INTERNAL_CONFIG,
+    RULE_MODEL_IDENTIFIER,
+    RULE_PARTNER_IDENTITY,
+    RULE_PRIVATE_TEAM_REFERENCE,
+    RULE_SELF_ROLE_META,
+    RULE_SELF_ROLE_TRUE_CAMP,
+    RULE_TEAM_ACTION_VIEW,
+    RULE_THIRD_PERSON_SELF_META,
+    RULE_UNPUBLISHED_SEER_RESULT,
+    STRENGTH_BALANCED,
+    STRENGTH_STRICT,
+    LeakGuardProfiles,
+    normalize_leak_guard_policy,
+)
+from .secret_leak_guard import LeakClassification, LeakFinding, SecretLeakGuard
 from .self_consistency import SelfConsistencyGuard
+# TASK-055: 役職主張の出所を分離する（CO自体は自由、実際の判定はエンジン発行情報のみ）
+from .role_provenance import (
+    PUBLIC_LINE_LABEL,
+    SOURCE_PUBLIC_CLAIM,
+)
 
 _THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 _UNCLOSED_THINK_BLOCK = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
@@ -129,8 +180,10 @@ CONTEXT_MIN_CTX = 2048
 CONTEXT_SHRINK_RATIO = 2
 # TASK-046: thinking on のリクエストでは、思考トークンが生成上限を消費し本文が
 # 空・切り詰めになりやすい。実測（thinking_budget_exhausted・thinking_only）から、
-# thinking分として別枠の余白を予算計算に含める（TASK-049のモデル別プロファイルへ接続）。
-THINKING_MARGIN_TOKENS = 1024
+# thinking分として別枠の余白を予算計算に含める。
+# TASK-053: この値は「観測のない場合の既定」に降ろし、実測のあるモデル・行動では
+# `ModelActionProfile` から算出したモデル別の余白（allowance）を優先して使う。
+THINKING_MARGIN_TOKENS = DEFAULT_THINKING_ALLOWANCE_TOKENS
 # 発言履歴（CONVERSATION_EVIDENCE相当）の文字数予算の下限・上限。
 # TASK-046: 600字は直近の議論数件しか残さなかった（game_22754212a062 では42回のうち
 # 40回が下限に潰れ、Day1 6発言→2件だけ保持）。議論の断裂を防ぐため下限を引き上げる。
@@ -151,6 +204,7 @@ def context_budget_breakdown(
     *,
     thinking_enabled: bool = False,
     effective_limit: object = None,
+    thinking_margin: int | None = None,
 ) -> dict[str, object]:
     """リクエスト予算を 入力/出力(生成上限)/thinking/安全余白 に分けた構成で返す（TASK-046）。
 
@@ -158,6 +212,8 @@ def context_budget_breakdown(
     安全側を取る。thinking on では思考トークンが生成上限を消費して本文を削るため、
     thinking 分を別枠の余白として確保する。`effective_limit`（実効コンテキスト上限）
     を渡すと、収まる余地（headroom）と超過量を別々に測定できる。
+    TASK-053: `thinking_margin` を渡すとモデル別の実測余白を反映する（観測のない
+    モデルでは既定値を使い、過大な余白で応答時間を増やさない）。
     """
     prompt_chars = sum(len(str(message.get("content", ""))) for message in messages)
     generation = (
@@ -166,7 +222,14 @@ def context_budget_breakdown(
         else 512
     )
     input_tokens = math.ceil(prompt_chars * CONTEXT_TOKENS_PER_CHAR)
-    thinking_tokens = THINKING_MARGIN_TOKENS if thinking_enabled else 0
+    if thinking_enabled:
+        thinking_tokens = (
+            int(thinking_margin)
+            if isinstance(thinking_margin, int) and not isinstance(thinking_margin, bool)
+            else THINKING_MARGIN_TOKENS
+        )
+    else:
+        thinking_tokens = 0
     total = input_tokens + int(generation) + thinking_tokens + CONTEXT_MARGIN_TOKENS
     breakdown: dict[str, object] = {
         "input_tokens_estimate": input_tokens,
@@ -183,16 +246,21 @@ def context_budget_breakdown(
 
 
 def request_token_estimate(
-    messages: list[dict[str, object]], num_predict: object, *, thinking: bool = False
+    messages: list[dict[str, object]],
+    num_predict: object,
+    *,
+    thinking: bool = False,
+    thinking_margin: int | None = None,
 ) -> int:
     """送信プロンプトの実測文字数と生成上限から、必要なコンテキストトーク数を概算する。
 
     日本語混在のプロンプトは文字数よりトーク数が大きくなりやすいため、概算係数は
     安全側を取る。生成上限は思考onの残余を含む値を受け取る前提。
-    thinking on の場合は思考消費分の別枠余白（`THINKING_MARGIN_TOKENS`）も加える。
+    thinking on の場合は思考消費分の別枠余白（既定は `THINKING_MARGIN_TOKENS`、
+    TASK-053ではモデル別実測値を `thinking_margin` で渡せる）も加える。
     """
     breakdown = context_budget_breakdown(
-        messages, num_predict, thinking_enabled=thinking
+        messages, num_predict, thinking_enabled=thinking, thinking_margin=thinking_margin
     )
     return int(breakdown["total_needed_tokens"])
 
@@ -205,17 +273,25 @@ def fit_dynamic_context(
     shrink_ratio: int = CONTEXT_SHRINK_RATIO,
     min_ctx: int = CONTEXT_MIN_CTX,
     thinking: bool = False,
+    thinking_margin: int | None = None,
 ) -> tuple[dict[str, object], int | None, bool]:
     """送信オプションの `num_ctx` を実測必要量へ合わせる（ゲームと評価ハーネスで共用）。
 
     必要量は `request_token_estimate`（プロンプト実測文字数＋生成上限＋余白＋thinking分）。
     過大割り当て（設定値が必要量の `shrink_ratio` 倍以上）のみ縮小し、必要量不足は `ceiling`
     （プレイヤーの `max_num_ctx` 等）まで拡張する。`ceiling` 未指定時は拡張しない。
+    TASK-053: `thinking_margin` でモデル別のthinking余白を渡すと、思考を実際に使う
+    モデルだけコンテキストを増やし、使わないモデルの割り当ては節約したままにする。
     """
     requested_ctx = options.get("num_ctx")
     if not isinstance(requested_ctx, int) or isinstance(requested_ctx, bool):
         return options, None, False
-    needed = request_token_estimate(messages, options.get("num_predict"), thinking=thinking)
+    needed = request_token_estimate(
+        messages,
+        options.get("num_predict"),
+        thinking=thinking,
+        thinking_margin=thinking_margin,
+    )
     # TASK-046: `ceiling`（実効コンテキスト上限・max_num_ctx）を超えるnum_ctxは、
     # 過大割り当ての判定にかかわらず上限へ縮小する（上限を超えるリクエストを
     # 生成しない完了条件の担保）。入力は発言履歴予算の圧縮で上限内に収める。
@@ -586,6 +662,68 @@ class OllamaActions(ActionPolicy):
         # TASK-046: モデル別の実効コンテキスト上限（env・Modelfile・/api/ps・設定の単一値解決）。
         # 初回リクエスト時に1回だけ解決してキャッシュし、解決イベントを記録する。
         self._context_budgets: dict[str, EffectiveContextResolution] = {}
+        # TASK-053: モデル×アクション別の生成観測プロファイル（thinking消費・空応答率・
+        # 待ち時間）。初回リクエストの本文予約とモデル別thinking余白の算出元に使う。
+        self._thinking_profiles = ThinkingProfiles()
+
+    def thinking_profiles_snapshot(self) -> dict[str, dict[str, dict[str, object]]]:
+        """TASK-053: モデル×アクション別のプロファイル（評価ログ・CLI表示用）。"""
+        return self._thinking_profiles.snapshot()
+
+    def _profile_for(self, actor: Player, budget_key: str) -> ModelActionProfile:
+        key = normalize_action_budget_key(budget_key)
+        return self._thinking_profiles.get_or_create(actor.model, key)
+
+    def _body_reservation_enabled(self) -> bool:
+        """TASK-053: 本文予算予約を適用するか（既定on、CLIで `--no-body-reservation`）。"""
+        if self.options is None:
+            return True
+        return self.options.get("body_reservation") is not False
+
+    def _thinking_margin_for(
+        self, actor: Player, budget_key: str, thinking_enabled: bool | None
+    ) -> int:
+        """モデル別の実測thinking余白（TASK-046の全局余白ではなく観測値を使う）。"""
+
+        return thinking_allowance(
+            self._thinking_profiles.get(actor.model, normalize_action_budget_key(budget_key)),
+            thinking_enabled=thinking_enabled,
+            default_margin=THINKING_MARGIN_TOKENS,
+        )
+
+    def _body_reservation(
+        self,
+        actor: Player,
+        budget_key: str,
+        num_predict: object,
+        num_predict_source: str,
+        thinking_enabled: bool | None,
+        *,
+        retry: bool = False,
+    ) -> BodyReservation:
+        """初回リクエスト向けに「本文最低予算 + モデル別thinking余白」を分離する。
+
+        タイムアウト観測済みのモデルでは応答時間を優先して適用しない。
+        再要求は本文専用に上限を絞るため対象外（`retry=True`）。
+        """
+
+        key = normalize_action_budget_key(budget_key)
+        profile = self._thinking_profiles.get(actor.model, key)
+        cap = BODY_RESERVATION_MAX_NUM_PREDICT.get(key)
+        timeout_fit = self._slow_model(actor) and key in {"discussion", "wolf_discussion"}
+        reservation = reserve_body_budget(
+            num_predict,
+            num_predict_source,
+            profile,
+            key,
+            thinking_enabled=thinking_enabled,
+            cap=cap,
+            enabled=self._body_reservation_enabled() and not timeout_fit,
+            retry_request=retry,
+        )
+        if timeout_fit and not reservation.applied:
+            return replace(reservation, skip_reason=RESERVATION_SKIPPED_TIMEOUT)
+        return reservation
 
     def _resolve_context_budget(
         self,
@@ -773,26 +911,31 @@ class OllamaActions(ActionPolicy):
         budget_key: str = "discussion",
         free_form_priority: bool = False,
     ) -> PromptContext:
-        """動的発言履歴予算を適用した議論プロンプトを作る（TASK-036）。
+        """動的発言履歴予算を適用した議論プロンプトを作る（TASK-036 / TASK-057）。
 
         まず予算なしで作り、発言履歴が割り当てコンテキストに収まらない場合だけ
         予算付きで再構築する。確定扱いの発言（直近・現在の質問・公開CO台帳）は削らない。
+
+        TASK-057: `prompt_contract_policy="simplified"` では、発言履歴を削ってもなお
+        割り当てを超えるときだけ optional 節（論点要約・仮説差分・暫定案内・派生メモ）を
+        段階的に落とす。core（ルール・生存者・確定事実・現在の質問・自分の行動記録・
+        自分の推理メモ・発言本文）はどの段階でも落とさないため、立場の一貫性は保たれる。
+        口調・論点・結論への指示は追加しない（落とすのは参考情報のブロックだけ）。
         """
         context_strategy = actor.context_strategy or self.context_strategy
-        prompt_ctx = PromptBuilder.build_discussion_prompt(
-            actor=actor,
-            alive_players=alive,
-            conversation_history=history,
-            day=day,
-            state=self.state,
-            include_claim=include_claim,
-            context_strategy=context_strategy,
-            free_form_priority=free_form_priority,
-            question_hint_mode=self.question_hint_mode,
+        contract_policy = normalize_prompt_contract_policy(
+            getattr(self.state, "prompt_contract_policy", None)
         )
-        budget = self._dynamic_evidence_budget(actor, budget_key, prompt_ctx)
-        if budget is not None:
-            prompt_ctx = PromptBuilder.build_discussion_prompt(
+        stage_limit = (
+            OPTIONAL_REMOVAL_MAX_STAGE
+            if contract_policy != PROMPT_CONTRACT_POLICY_LEGACY
+            and self._dynamic_context_enabled()
+            else 0
+        )
+
+        def build(dropped: tuple[str, ...], budget: int | None) -> PromptContext:
+            build_calls[0] += 1
+            return PromptBuilder.build_discussion_prompt(
                 actor=actor,
                 alive_players=alive,
                 conversation_history=history,
@@ -803,7 +946,36 @@ class OllamaActions(ActionPolicy):
                 evidence_char_budget=budget,
                 free_form_priority=free_form_priority,
                 question_hint_mode=self.question_hint_mode,
+                prompt_contract_policy=contract_policy,
+                optional_sections_dropped=dropped,
             )
+
+        # 構築回数は観測する（段階除去の組み直しで無駄な再構築をしていないかの判断材料）。
+        build_calls = [0]
+        dropped: tuple[str, ...] = ()
+        prompt_ctx = build((), None)
+        budget = self._dynamic_evidence_budget(actor, budget_key, prompt_ctx)
+        if budget is not None:
+            prompt_ctx = build(dropped, budget)
+        stage = 0
+        applied_stage = 0
+        overflow_tokens = self._prompt_overflow_tokens(actor, budget_key, prompt_ctx)
+        # 実際にプロンプトへ現れている optional 節だけを削る。存在しない節のために組み直すと、
+        # その分だけローカルでの構築コストが増えるため、見出しの存在を先に1度だけ数える。
+        present_sections = set(find_sections(prompt_ctx.user_prompt))
+        while stage < stage_limit and overflow_tokens > 0:
+            stage += 1
+            newly_present = [
+                name
+                for name in optional_names_dropped_up_to(stage)
+                if name not in dropped and name in present_sections
+            ]
+            if not newly_present:
+                continue
+            dropped = optional_names_dropped_up_to(stage)
+            prompt_ctx = build(dropped, budget)
+            applied_stage = stage
+            overflow_tokens = self._prompt_overflow_tokens(actor, budget_key, prompt_ctx)
         # TASK-046: 実効上限・圧縮段階を診断に記録し、「プロンプト総量」と「必須証拠の
         # 欠落」を別々に検証できるようにする（発言内容・口調の制約は行わない）。
         if prompt_ctx.diagnostics is not None:
@@ -814,7 +986,48 @@ class OllamaActions(ActionPolicy):
             prompt_ctx.diagnostics["compression_stage"] = (
                 "evidence_budget_applied" if budget is not None else "full"
             )
+            # TASK-057: 削除段階・試行段階・構築回数と overflow を記録する（実機比較の判断材料）。
+            prompt_ctx.diagnostics["contract_removal_stage"] = int(applied_stage)
+            prompt_ctx.diagnostics["contract_stage_attempts"] = int(stage)
+            prompt_ctx.diagnostics["prompt_build_calls"] = int(build_calls[0])
+            if dropped:
+                prompt_ctx.diagnostics["dropped_optional_sections"] = list(dropped)
+            prompt_ctx.diagnostics["prompt_overflow_tokens"] = int(overflow_tokens)
         return prompt_ctx
+
+    def _prompt_overflow_tokens(
+        self,
+        actor: Player,
+        budget_key: str,
+        prompt_ctx: PromptContext,
+    ) -> int:
+        """送信見積もりの必要トーク数が割り当てを何度超えるか（不明なら 0）。
+
+        `num_ctx` 未指定（サーバー既定に委ねる）では解決済み実効上限を使い、それも無ければ
+        判定しない（0 を返して段階除去を進めない）。thinking 分はモデル別実測余白を引く。
+        """
+        options, _source, thinking_enabled, _thinking_source = self._options_for(
+            actor, budget_key
+        )
+        allocatable = options.get("num_ctx") if options else None
+        if not isinstance(allocatable, int) or isinstance(allocatable, bool):
+            allocatable = self._resolve_context_budget(actor).limit
+        if not isinstance(allocatable, int) or isinstance(allocatable, bool):
+            return 0
+        generation = options.get("num_predict") if options else None
+        if not isinstance(generation, int) or isinstance(generation, bool):
+            generation = DEFAULT_ACTION_NUM_PREDICT.get(
+                normalize_action_budget_key(budget_key), 512
+            )
+        prompt_chars = len(prompt_ctx.system_prompt) + len(prompt_ctx.user_prompt)
+        needed = (
+            math.ceil(prompt_chars * CONTEXT_TOKENS_PER_CHAR)
+            + int(generation)
+            + CONTEXT_MARGIN_TOKENS
+            + self._thinking_margin_for(actor, budget_key, bool(thinking_enabled))
+        )
+        return max(0, needed - int(allocatable))
+
 
     def _question_answer_check(
         self,
@@ -1189,6 +1402,9 @@ class OllamaActions(ActionPolicy):
         alive: tuple[str, ...],
         history: tuple[Message, ...],
         leak_categories: tuple[str, ...],
+        *,
+        rule_ids: tuple[str, ...] = (),
+        retained_body: str | None = None,
     ) -> str | None:
         actor = self._player(player)
         started_at = self._start_action("discussion_safety_retry", actor)
@@ -1222,11 +1438,55 @@ class OllamaActions(ActionPolicy):
                 "You referenced the system or model configuration. Write only in-game dialogue."
             ),
         }
+        # TASK-054: 検出ルール単位で必要な案内だけを1行出す（カテゴリ横断の長文案内より
+        # 短く、論点・口調・結論は縛らない）。ルールが不明なときだけ旧カテゴリ案内へ落とす。
+        rule_repair_guidance: dict[str, str] = {
+            RULE_SELF_ROLE_TRUE_CAMP: (
+                "You confirmed your hidden camp as a fact. State your role only through the "
+                "in-game claims you choose to publish."
+            ),
+            RULE_PARTNER_IDENTITY: (
+                "You bound a named player as your ally. Remove the alliance wording and argue "
+                "from publicly recorded speech, votes, and deaths."
+            ),
+            RULE_PRIVATE_TEAM_REFERENCE: (
+                "You referenced a private consult or partner. Speak only about what the public "
+                "record shows."
+            ),
+            RULE_TEAM_ACTION_VIEW: (
+                "You spoke from the wolf camp's planning side. Judge and propose votes using "
+                "public information."
+            ),
+            RULE_UNPUBLISHED_SEER_RESULT: (
+                "You wrote an unpublished verdict outside a CO. Either publish it inside a Seer CO "
+                "line or remove the target name, verdict, and divination words."
+            ),
+            RULE_SELF_ROLE_META: (
+                "You explained role meta (bluffing, configuration, true role). Write only the CO "
+                "you choose to publish and in-game reasoning."
+            ),
+            RULE_THIRD_PERSON_SELF_META: (
+                "You discussed your own role as an outside description. Talk about yourself in "
+                "the first person without meta-explanations."
+            ),
+            RULE_INTERNAL_CONFIG: (
+                "You referenced the system or generation setup. Write only in-game dialogue."
+            ),
+            RULE_MODEL_IDENTIFIER: (
+                "You named your own model. Write only in-game dialogue."
+            ),
+        }
         leak_lines = [
-            leak_repair_guidance[category]
-            for category in leak_categories
-            if category in leak_repair_guidance
+            rule_repair_guidance[rule_id]
+            for rule_id in rule_ids
+            if rule_id in rule_repair_guidance
         ]
+        if not leak_lines:
+            leak_lines = [
+                leak_repair_guidance[category]
+                for category in leak_categories
+                if category in leak_repair_guidance
+            ]
         user_prompt = (
             self._short_discussion_retry_prompt(
                 actor,
@@ -1246,16 +1506,23 @@ class OllamaActions(ActionPolicy):
                 else ""
             )
             + "\n[Safety Retry]\n"
-            + "Do not reuse the previous output; rewrite it short from scratch. "
-            + "Do not disclose role meta-explanations, your camp, your partner, or the model/config. "
-            + "Return in-game dialogue based only on public information. "
-            + "A legitimate public CO may be stated as an in-game claim in the first person, "
-            + "but do not include meta-talk explaining the reason.\n"
-            + f"Detected categories (your body is not shown): {', '.join(leak_categories)}\n"
+            + "Replace only the sentences that exposed hidden information. Your topics, order, "
+            "reasoning, and tone stay yours; this note does not prescribe a conclusion.\n"
+            + "Never expose an unpublished verdict, your real camp, or an ally's name. Repeating a "
+            "claim or verdict already published in the ledger is allowed and is not a leak.\n"
+            + "Speak in singular first person (I/me/my) about publicly recorded speech, votes, and deaths.\n"
+            + "Detected: "
+            + (", ".join(rule_ids) if rule_ids else ", ".join(leak_categories))
+            + "\n"
             + "".join(f"- {line}\n" for line in leak_lines)
-            + "Wolf-camp first-person phrases are prohibited ('as werewolves', 'our wolf strategy', "
-            + "'how to act as a werewolf', 'as wolves'); they are detected as leaks. Speak in a "
-            + "villager's first person (I/me/my) about public info: doubts, questions, vote intention.\n"
+            + (
+                "\n[Keep These Public Sentences]\n"
+                f"{retained_body.strip()[:1200]}\n"
+                "You may reuse these already-public sentences where they fit. They are evidence of "
+                "what you said before, not a template for your answer.\n"
+                if retained_body and retained_body.strip()
+                else ""
+            )
             + self._attempt_generation_guidance(
                 actor,
                 "discussion",
@@ -1656,9 +1923,11 @@ class OllamaActions(ActionPolicy):
         failure_reason: str,
     ) -> str:
         corrections = {
-            "empty_content": "Previous response was empty.",
-            "thinking_only_response": "Previous response was only thinking. Output only the answer.",
-            "generation_truncated": "Previous response was truncated. Output only the format without explanations.",
+            # TASK-053: 失敗理由は thinking_profile の定数で揃える（ログ側と同じ語）。
+            # いずれも形式だけを直し、結論・口調・論点は固定しない。
+            EMPTY_CONTENT_REASON: "Previous response was empty.",
+            THINKING_ONLY_REASON: "Previous response was only thinking. Output only the answer.",
+            GENERATION_TRUNCATED_REASON: "Previous response was truncated. Output only the format without explanations.",
             "invalid_target": "Previous target was outside the valid candidates. Choose only from eligible candidates.",
             "invalid_action_response": "Could not parse target from previous response.",
             "context_overflow_compacted": "Previous input was too long. Pick concisely from the candidates.",
@@ -1668,14 +1937,45 @@ class OllamaActions(ActionPolicy):
             f"[Retry] {corrections.get(failure_reason, 'Please correct your previous response.')}\n"
             f"- Action: {label}\n"
             f"- You: {actor.name}\n"
-            f"- Eligible candidates: {', '.join(valid_candidates)}\n"
+            f"- Day: {self.state.day}\n"
+            + self._retry_public_fact_lines()
+            + f"- Eligible candidates: {', '.join(valid_candidates)}\n"
             f"Choose exactly 1 candidate and reply with 1 line only: '{label}: Name'.\n"
             # TASK-043: 自分・候補外の名前・案内文のプレースホルダの出力を明確に禁止する
             # （実機ログでは自分への投票とプレースホルダ模倣が再試行原因になった）。
             "- Never write your own name, a player outside the list, or the format template's "
             "example text; use exactly one living candidate name from the list above.\n"
             f"- 候補リスト以外の名前（自分「{actor.name}」・存在しない名前・案内文の例）は書かない。\n"
+            # TASK-053: 公開事実だけを添え、結論・口調・論点は固定しない。長いプロンプトの
+            # 再送をやめて待ち時間を削りつつ、自分の判断で対象を選ばせる（一貫性の担保は
+            # 事実の提示だけで行う）。
+            "- Decide by your own reading of the public facts above. This retry fixes only the "
+            "output format; it does not prescribe your conclusion, reasoning, or tone.\n"
             f"出力は厳密に{actor.response_language}で行ってください。"
+        )
+
+    def _retry_public_fact_lines(self) -> str:
+        """再要求プロンプトへ添える最小限の公開事実（TASK-053・一貫性の根拠）。"""
+
+        dead_players = tuple(player.name for player in self.state.players if not player.is_alive)
+        latest_vote = (
+            ", ".join(
+                f"{voter}->{target}"
+                for voter, target in self.state.vote_history[-1][2].items()
+            )
+            if self.state.vote_history
+            else "None"
+        )
+        death_events = sorted(
+            [(day, name) for day, name in self.state.attack_deaths]
+            + [(day, name) for day, name in self.state.executions]
+        )[-3:]
+        death_text = ", ".join(f"Day {day} {name}" for day, name in death_events) or "None"
+        return (
+            f"- Alive: {', '.join(self.state.alive_players)}\n"
+            f"- Known dead: {', '.join(dead_players) or 'None'}\n"
+            f"- Confirmed deaths: {death_text}\n"
+            f"- Latest vote: {latest_vote}\n"
         )
 
     def _public_response_leak_findings(
@@ -1716,7 +2016,16 @@ class OllamaActions(ActionPolicy):
                 and self.state.seer_results.get(result[0]) == result[1]
             ):
                 allowed_results = frozenset({result})
-        return SecretLeakGuard.inspect(
+        # TASK-054: 公開面のみを、モデル別強度つきで分類する（soft/observe は再生成しない）。
+        policy = normalize_leak_guard_policy(
+            getattr(self.state, "leak_guard_policy", DEFAULT_LEAK_GUARD_POLICY)
+        )
+        profiles = getattr(self.state, "leak_guard_profiles", None)
+        if not isinstance(profiles, LeakGuardProfiles):
+            profiles = LeakGuardProfiles(policy=policy)
+            self.state.leak_guard_profiles = profiles
+        profiles.policy = policy
+        return SecretLeakGuard.classify(
             content,
             actor,
             self.state,
@@ -1725,7 +2034,9 @@ class OllamaActions(ActionPolicy):
                 or SecretLeakGuard.allows_public_claim(content, actor)
             ),
             allowed_public_results=allowed_results,
-        )
+            guard_policy=policy,
+            guard_strength=profiles.strength_for(actor.model),
+        ).hard
 
     def _free_text_with_context(
         self,
@@ -1773,6 +2084,14 @@ class OllamaActions(ActionPolicy):
                 self.context_strategy == "round_transcript_memory"
                 or actor.context_strategy == "round_transcript_memory"
             )
+            # TASK-053: thinking-only・空・切り詰めでの再要求は、戦略が
+            # round_transcript_memory でも同一の長いプロンプトを再送しない。公開台帳と
+            # 直近発言だけを保持した短縮プロンプトへ差し替え、口調・結論・論点は固定しない
+            # （長いままの再送が待ち時間と再要求ループの主因だった）。
+            uses_core_ledger_retry = (
+                not keeps_round_context
+                or last_response_issue in GENERATION_ISSUE_REASONS
+            )
             user_prompt = (
                 self._seer_co_correction_prompt(actor, last_spoken_result)
                 if is_co_correction
@@ -1782,7 +2101,7 @@ class OllamaActions(ActionPolicy):
                         action, actor, last_response_issue
                     )
                     + "\nKeep the full current-round transcript and continuity memo; fix only the problematic part."
-                    if keeps_round_context
+                    if (keeps_round_context and not uses_core_ledger_retry)
                     else self._short_discussion_retry_prompt(
                     actor,
                     last_response_issue,
@@ -1828,7 +2147,7 @@ class OllamaActions(ActionPolicy):
             if (
                 is_light_retry
                 and action in {"discussion", "discussion_body"}
-                and not keeps_round_context
+                and uses_core_ledger_retry
             ):
                 self._emit(
                     "context_compression_stage",
@@ -1854,6 +2173,11 @@ class OllamaActions(ActionPolicy):
                         "unanswered_question_to_actor",
                         "recent_counter_arguments",
                     ],
+                    # TASK-053: 短縮プロンプトでどこまでコンテキストを節約できたかを、初回
+                    # 送信のプロンプト長と直接比較できるようにする（長いプロンプト再送の排除）。
+                    retry_prompt_style="core_ledger_short",
+                    initial_user_prompt_char_count=len(prompt_ctx.user_prompt),
+                    retry_user_prompt_char_count=len(user_prompt),
                     dropped_scope="speech_history_beyond_recent_and_ledger",
                     request_number=attempt + 1,
                 )
@@ -2063,16 +2387,9 @@ class OllamaActions(ActionPolicy):
                     or self._has_thinking(chat_response.content)
                     else "empty_content"
                 )
-            if (
-                metadata.get("done_reason") == "length"
-                and metadata.get("thinking_present")
-                and not response_text
-            ):
-                # 思考生成が生成上限をすべて消費し、本文が生成されなかった。
-                # 同じ失敗を毎ターン繰り返さないため、このモデルの思考行動をoffへ落とす。
-                self._record_thinking_budget_exhausted(
-                    actor, action, started_at, metadata
-                )
+            # TASK-053: 思考が生成上限を食い潰して本文が空になった観測は、`_chat` の
+            # `_record_generation_response` で中心記録する（投票・襲撃・占いも同じ経路で
+            # 拾え、まずモデル別thinking余白の拡大で解消するため行動別の記述は不要）。
             # TASK-048: 論点の再掲・同一発言の反復は「低新規性」として計測し、再生成しない。
             # publish（既定）はそのまま公開、append は既存本文を保持した短い任意の追記だけ、
             # legacy_repair のみ旧挙動（重複文の除去→意味的再要求）を通す。
@@ -2147,6 +2464,7 @@ class OllamaActions(ActionPolicy):
                 and response_issue in LEDGER_REPAIR_ISSUES
             ):
                 original_issue = response_issue
+                original_text_before_repair = response_text
                 repaired = self._repair_discussion_response(
                     actor, response_text, original_issue, recent_messages
                 )
@@ -2163,6 +2481,45 @@ class OllamaActions(ActionPolicy):
                         holds_human_seer_result = self._holds_human_seer_result(
                             action, actor, response_text
                         )
+                        dead_details = {}
+                        if original_issue in {
+                            "dead_player_question",
+                            "dead_player_action_target",
+                        }:
+                            dead_names = frozenset(
+                                p.name
+                                for p in self.state.players
+                                if not p.is_alive
+                            )
+                            living_names = frozenset(
+                                p.name
+                                for p in self.state.players
+                                if p.is_alive
+                            )
+                            classifications = analyze_dead_player_references(
+                                original_text_before_repair,
+                                dead_names,
+                                living_names,
+                            )
+                            dead_details = {
+                                "historical_references": [
+                                    c.sentence
+                                    for c in classifications
+                                    if c.is_historical_reference
+                                ],
+                                "actionable_targets": [
+                                    c.sentence
+                                    for c in classifications
+                                    if c.is_actionable_target
+                                ],
+                                "dead_player_questions": [
+                                    c.sentence
+                                    for c in classifications
+                                    if c.is_dead_player_question
+                                ],
+                                "original_content": original_text_before_repair,
+                                "repaired_content": response_text,
+                            }
                         self._emit(
                             "ledger_repair",
                             action,
@@ -2171,6 +2528,7 @@ class OllamaActions(ActionPolicy):
                             reason=original_issue,
                             body_preserved=bool(response_text),
                             regeneration_avoided=True,
+                            **dead_details,
                         )
             if (
                 attempt >= 1
@@ -2826,12 +3184,14 @@ class OllamaActions(ActionPolicy):
     ) -> str:
         retry_guidance = {
             "empty_content": (
-                "Previous response had an empty body. Without thinking or greetings, "
-                "output only a 3-5 sentence final response in [BODY]."
+                "Previous response had an empty body. Write your final answer into [BODY] "
+                "(3-5 sentences). The point you raise, your tone, and your conclusion stay "
+                "yours to choose; only the output format is fixed."
             ),
             "thinking_only_response": (
-                "Previous response had only thinking and no final response. Do not output thinking; "
-                "output only a 3-5 sentence final response in [BODY]."
+                "Previous response had only thinking and no final response. Move your own "
+                "judgement into [BODY] now (3-5 sentences) and finish it inside the limit; "
+                "do not restate the thinking text, and keep your points, tone and conclusion free."
             ),
             "generation_truncated": (
                 "Previous response was cut off by generation limit. Using the structured format, output 3-5 sentences in [BODY] "
@@ -3147,11 +3507,24 @@ class OllamaActions(ActionPolicy):
                 else TIMEOUT_SAFE_NUM_PREDICT
             )
             thinking_off = True
+        reservation = self._body_reservation(
+            actor,
+            budget_key,
+            effective_limit,
+            "generation_guidance",
+            False if thinking_off else None,
+            retry=bool(thinking_off) or bool(retry_cap),
+        )
+        if reservation.applied and reservation.num_predict is not None:
+            # TASK-053: 実際に送信する上限（本文予約込み）をプロンプトへ反映し、
+            # 指示とリクエストのずれを防ぐ。
+            effective_limit = reservation.num_predict
         guidance = self._generation_budget_guidance(
             actor,
             budget_key,
             thinking_enabled=False if thinking_off else None,
             num_predict=effective_limit,
+            body_reservation=reservation if reservation.applied else None,
         )
         if retry_cap:
             guidance += (
@@ -3168,11 +3541,14 @@ class OllamaActions(ActionPolicy):
         *,
         thinking_enabled: bool | None = None,
         num_predict: int | None = None,
+        body_reservation: BodyReservation | None = None,
     ) -> str:
         """行動別生成上限に対する最終回答用の残余トークンを指示する。
 
         再要求では実際に送信する値（思考off・増加後の上限）を受け取り、
         プロンプトの指示と実際のリクエストを一致させる。
+        TASK-053: `body_reservation` を渡すと「思考用の別枠余白」と「本文最低予算」の
+        内訳を指示へ加える（論点・口調・結論は固定せず、本文だけが最後まで出るようにする）。
         """
         if num_predict is None:
             num_predict, _ = resolve_action_num_predict(
@@ -3187,6 +3563,14 @@ class OllamaActions(ActionPolicy):
             notes = (
                 "\nThinking (think) is off for this request. Write no thinking or preamble; "
                 "output only the final answer in the requested format."
+            )
+        if body_reservation is not None and body_reservation.applied:
+            notes += (
+                f"\n[Body reserve] num_predict includes a separate allowance: about "
+                f"{body_reservation.thinking_allowance_tokens} tokens are reserved for your own "
+                f"reasoning and at least {body_reservation.body_min_tokens} tokens are kept for "
+                "the final answer. Think as freely as you like, then write the answer so it "
+                "finishes inside the limit."
             )
         if num_predict is None:
             return notes
@@ -3321,44 +3705,44 @@ class OllamaActions(ActionPolicy):
         )
 
     def _dead_player_question_targets(self, text: str) -> tuple[str, ...]:
-        request_cues = (
-            r"質問(?:したい|します|してください|させて)",
-            r"聞(?:きたい|きます|いてください|いてみたい)",
-            r"尋ね(?:たい|ます|てください)",
-            r"教えて(?:ください|ほしい|もらいたい)?",
-            r"説明して(?:ください|ほしい|もらいたい)?",
-            r"答えて(?:ください|ほしい|もらいたい)?",
-            r"回答して(?:ください|ほしい|もらいたい)?",
-            r"話して(?:ください|ほしい|もらいたい)?",
-            r"(?i:\b(?:ask|asking|question|questions|tell|explain|answer|respond|"
-            r"reply|clarify)\b)",
-        )
-        request_pattern = re.compile("|".join(request_cues))
-        dead_players = tuple(
+        dead_players = frozenset(
             player.name for player in self.state.players if not player.is_alive
         )
-        targets: set[str] = set()
-        for sentence in self._discussion_sentences(text):
-            for dead_name in dead_players:
-                escaped_name = re.escape(dead_name)
-                addressed = re.search(
-                    rf"{escaped_name}(?:さん)?(?:に|へ)"
-                    rf"[^。！？!?]{{0,48}}(?:{request_pattern.pattern})",
-                    sentence,
-                )
-                direct_address = re.search(
-                    rf"{escaped_name}さん[,、]"
-                    rf"[^。！？!?]{{0,48}}(?:{request_pattern.pattern})",
-                    sentence,
-                )
-                english_address = re.search(
-                    rf"(?:{request_pattern.pattern})[^.!?]{{0,48}}{escaped_name}(?!\d)"
-                    rf"|{escaped_name}(?!\d)[^.!?]{{0,48}}(?:{request_pattern.pattern})",
-                    sentence,
-                )
-                if addressed or direct_address or english_address:
-                    targets.add(dead_name)
-        return tuple(sorted(targets))
+        living_players = frozenset(
+            player.name for player in self.state.players if player.is_alive
+        )
+        classifications = analyze_dead_player_references(
+            text, dead_players, living_players
+        )
+        return tuple(
+            sorted(
+                {
+                    c.dead_player
+                    for c in classifications
+                    if c.is_dead_player_question and c.dead_player
+                }
+            )
+        )
+
+    def _dead_player_action_targets(self, text: str) -> tuple[str, ...]:
+        dead_players = frozenset(
+            player.name for player in self.state.players if not player.is_alive
+        )
+        living_players = frozenset(
+            player.name for player in self.state.players if player.is_alive
+        )
+        classifications = analyze_dead_player_references(
+            text, dead_players, living_players
+        )
+        return tuple(
+            sorted(
+                {
+                    c.dead_player
+                    for c in classifications
+                    if c.is_actionable_target and c.dead_player
+                }
+            )
+        )
 
     def _has_unverified_past_vote_reference(self, text: str) -> bool:
         vote_history = self.state.vote_history
@@ -3840,6 +4224,14 @@ class OllamaActions(ActionPolicy):
                     )
                 )
         elif issue == "dead_player_action_target":
+            target = next(
+                (
+                    name
+                    for name in self._dead_player_action_targets(body)
+                    if name
+                ),
+                None,
+            )
             question_set = self.state.action_candidate_sets.get(
                 f"question:{actor.name}"
             )
@@ -3855,19 +4247,24 @@ class OllamaActions(ActionPolicy):
                     None,
                 )
             )
-            replacement = (
-                self._localized_text(
+            if target is not None and alternative is not None:
+                replacement = self._localized_text(
+                    actor,
+                    f"{target} is dead and cannot be targeted. My current judgment is about the living player {alternative}.",
+                    f"{target}さんは死亡しているため行動対象にできません。私の現在の判断対象は生存している{alternative}さんです。",
+                )
+            elif alternative is not None:
+                replacement = self._localized_text(
                     actor,
                     f"My current judgment is about the living player {alternative}.",
                     f"私の現在の判断対象は生存している{alternative}さんです。",
                 )
-                if alternative is not None
-                else self._localized_text(
+            else:
+                replacement = self._localized_text(
                     actor,
                     "I do not ask dead players for current actions; I check only what is recorded.",
                     "死亡したプレイヤーに現在の行動を求めません。記録された事項だけを確認します。",
                 )
-            )
         elif issue in {"contradictory_past_vote", "recorded_action_denied"}:
             latest_vote = next(
                 (
@@ -4070,18 +4467,7 @@ class OllamaActions(ActionPolicy):
                     )
                 )
             if issue == "dead_player_action_target":
-                should_replace = any(
-                    re.search(
-                        rf"{re.escape(dead_name)}(?:さん)?(?:に|へ)"
-                        rf"[^。！？!?]{{0,16}}(?:投票|処刑|吊|襲撃|占い|回答|説明)",
-                        sentence,
-                    )
-                    for dead_name in (
-                        player.name
-                        for player in self.state.players
-                        if not player.is_alive
-                    )
-                )
+                should_replace = bool(self._dead_player_action_targets(sentence))
             if should_replace:
                 changed = True
                 if issue == "third_person_self_reference":
@@ -4350,15 +4736,8 @@ class OllamaActions(ActionPolicy):
         }
         if self._dead_player_question_targets(body):
             return "dead_player_question"
-        for dead_name in dead_players:
-            if re.search(
-                rf"{re.escape(dead_name)}(?:さん)?(?:に|へ)"
-                rf"[^。！？!?]{{0,24}}(?:襲撃|占い|投票|処刑|返答|回答|説明)"
-                rf"[^。！？!?]{{0,12}}(?:してほしい|してください|してもらいたい|"
-                rf"するよう求め|すべき|選んでほしい)",
-                body,
-            ):
-                return "dead_player_action_target"
+        if self._dead_player_action_targets(body):
+            return "dead_player_action_target"
         for dead_name in dead_players:
             name = re.escape(dead_name)
             for sentence in self._discussion_sentences(body):
@@ -4380,17 +4759,6 @@ class OllamaActions(ActionPolicy):
                     )
                 ):
                     return "unverified_dead_role"
-            if re.search(
-                rf"{name}(?:さん)?(?:に|へ)(?:は)?"
-                rf"(?:投票(?:する|したい|すべき|しよう)?|"
-                rf"票を入れる(?:べき|べきです|べきだ|たい)?|"
-                rf"処刑(?:する|したい|すべき)?|吊(?:る|りたい|るべき))",
-                body,
-            ) or re.search(
-                rf"(?:投票先|処刑対象)(?:は|として|に)\s*{name}(?:さん)?",
-                body,
-            ):
-                return "dead_player_action_target"
 
         if re.search(
             r"(?:今夜|夜に)(?:は)?(?:私は|僕は|私が|僕が)?"
@@ -4625,6 +4993,11 @@ class OllamaActions(ActionPolicy):
                     "override_player_num_ctx",
                     "dynamic_context",
                     "question_hint_mode",
+                    # TASK-053: 本文予算予約のon/offは実行側の設定で、Ollamaへは送らない。
+                    "body_reservation",
+                    # TASK-057: プロンプト契約の選択はプロンプト構築側（state）で使う設定なので、
+                    # サーバーへは送らない（送信オプションに未知のキーを混ぜない）。
+                    "prompt_contract_policy",
                 }
             }
             if self.options is not None
@@ -4698,6 +5071,21 @@ class OllamaActions(ActionPolicy):
         num_predict, num_predict_source = apply_thinking_floor(
             num_predict, num_predict_source, thinking_enabled, key
         )
+        # TASK-053: 初回リクエストでは「本文最低予算 + モデル別thinking余白」を分離して
+        # 確保する。投票・襲撃・占いなどの短い行動は本文を先に確保し、思考が上限を
+        # 食い潰しても空応答にしない。設定値より優先して引き上げるが上限 cap で抑え、
+        # タイムアウト観測済みモデルでは適用しない（待ち時間優先）。再要求は対象外。
+        reservation = self._body_reservation(
+            actor,
+            key,
+            num_predict,
+            num_predict_source,
+            thinking_enabled,
+            retry=disable_thinking,
+        )
+        if reservation.applied and reservation.num_predict is not None:
+            num_predict = reservation.num_predict
+            num_predict_source = reservation.source
         if num_predict is not None:
             # 思考下限で変更した値も実際に送信するoptionsへ反映しないと、
             # 優先元だけ表示され送信値は変わらない。
@@ -4732,6 +5120,7 @@ class OllamaActions(ActionPolicy):
         actor: Player,
         *,
         thinking: bool = False,
+        thinking_margin: int | None = None,
     ) -> tuple[dict[str, object], int | None, bool]:
         """必要なコンテキストだけ確保する動的num_ctx（TASK-036）。
 
@@ -4739,12 +5128,15 @@ class OllamaActions(ActionPolicy):
         （TASK-046）を必要量とし、必要量の2倍以上の過大割り当てだけを縮小する。逆に必要量
         不足の場合は、プレイヤー設定の `max_num_ctx` まで拡張する（設定の上限を超えない）。
         概算は日本語混在では大きめ（安全側）になる。
+        TASK-053: `thinking_margin` にはモデル×アクション別の実測値を使い、思考を全く
+        使わないモデルのコンテキストを過大確保しない（節約と応答時間の短縮）。
         """
         return fit_dynamic_context(
             options,
             messages,
             ceiling=actor.max_num_ctx,
             thinking=thinking,
+            thinking_margin=thinking_margin,
         )
 
     def _dynamic_evidence_budget(
@@ -4782,7 +5174,9 @@ class OllamaActions(ActionPolicy):
         fixed_tokens = math.ceil(max(0, raw_chars - evidence_chars) * CONTEXT_TOKENS_PER_CHAR)
         # TASK-046: thinking on のリクエストは思考消費分を別枠で差し引き、本文が
         # 空・切り詰めされる入力を削る（発言の自由度は削らない：履歴の優先除去のみ）。
-        thinking_reserve = THINKING_MARGIN_TOKENS if thinking_enabled else 0
+        # TASK-053: 余白はモデル×アクション別の実測値を使う。思考を使わないモデルでは
+        # 0 に近い値になり、発言履歴へ回せるぶんだけコンテキストを増やす（節約と両立）。
+        thinking_reserve = self._thinking_margin_for(actor, budget_key, bool(thinking_enabled))
         available_input_tokens = (
             int(allocatable) - int(generation) - CONTEXT_MARGIN_TOKENS - thinking_reserve
         )
@@ -5036,6 +5430,146 @@ class OllamaActions(ActionPolicy):
                 reason="model_does_not_support_thinking",
             )
 
+    def _record_generation_response(
+        self,
+        actor: Player,
+        budget_key: str,
+        action: str | None,
+        started_at: float | None,
+        request_options: dict[str, object],
+        request_number: int,
+        request_reason: str,
+        thinking_enabled: bool | None,
+        send_started: float,
+        response: ChatResponse,
+    ) -> ChatResponse:
+        """送信結果をモデル×アクション別の生成プロファイルへ加算する（TASK-053）。
+
+        本文の有無・thinkingの有無・打ち切り（done_reason=length）・実測生成トークン・
+        1送信あたりの待ち時間を集計し、`llm_generation_attempt` として記録する。
+        議論の論点・口調には一切干渉せず、観測だけを残す。
+        """
+
+        key = normalize_action_budget_key(budget_key)
+        profile = self._profile_for(actor, key)
+        body_text = self._final_response(response.content).strip()
+        elapsed_seconds = max(0.0, time.perf_counter() - send_started)
+        thinking_present = bool(response.thinking_present) or self._has_thinking(
+            response.content
+        )
+        empty = not body_text
+        thinking_only = empty and thinking_present
+        profile.record_attempt(
+            request_number=request_number,
+            body_char_count=len(body_text),
+            thinking_present=thinking_present,
+            done_reason=response.done_reason,
+            eval_count=response.eval_count,
+            elapsed_seconds=elapsed_seconds,
+            empty=empty and not thinking_only,
+            thinking_only=thinking_only,
+        )
+        body_budget = inspect_body_budget(
+            profile,
+            key,
+            request_options.get("num_predict"),
+            thinking_enabled=bool(thinking_enabled) if thinking_enabled is not None else None,
+        )
+        if thinking_only:
+            # 「thinking余白＋本文最低予算を予約していたのに空になった」かだけを見る。
+            # 余白を積んでいない送信でたまたま本文枠が残ったケースは数えない
+            # （予約の成否自体は body_budget の body_covered で検証する）。
+            allowance_tokens = body_budget.get("thinking_allowance_tokens")
+            if (
+                body_budget["body_covered"]
+                and isinstance(allowance_tokens, int)
+                and not isinstance(allowance_tokens, bool)
+                and allowance_tokens > 0
+            ):
+                profile.covered_thinking_only_count += 1
+            if response.done_reason == "length" and action is not None and started_at is not None:
+                # 思考が生成上限を食い潰して本文が空（TASK-053: まず余白を拡大する）。
+                self._record_thinking_budget_exhausted(
+                    actor,
+                    action,
+                    started_at,
+                    {
+                        "eval_count": response.eval_count,
+                        "num_predict": request_options.get("num_predict"),
+                        "content_length": len(body_text),
+                    },
+                )
+        if action is not None and started_at is not None:
+            self._emit(
+                "llm_generation_attempt",
+                action,
+                actor,
+                started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                action_budget_key=key,
+                request_elapsed_seconds=round(elapsed_seconds, 3),
+                thinking_requested=bool(thinking_enabled) if thinking_enabled is not None else None,
+                thinking_present=thinking_present,
+                body_char_count=len(body_text),
+                body_empty=empty,
+                thinking_only_response=thinking_only,
+                done_reason=response.done_reason,
+                eval_count=response.eval_count,
+                num_predict=request_options.get("num_predict"),
+                body_budget=body_budget,
+                generation_profile=profile.serialize(),
+            )
+        return response
+
+    def _record_generation_failure(
+        self,
+        actor: Player,
+        budget_key: str,
+        action: str | None,
+        started_at: float | None,
+        request_options: dict[str, object],
+        request_number: int,
+        request_reason: str,
+        thinking_enabled: bool | None,
+        send_started: float,
+        error: OllamaError,
+    ) -> None:
+        """通信失敗をプロファイルへ記録する（タイムアウト・接続・HTTP）。"""
+
+        key = normalize_action_budget_key(budget_key)
+        profile = self._profile_for(actor, key)
+        elapsed_seconds = max(0.0, time.perf_counter() - send_started)
+        timed_out = error.kind == "timeout"
+        profile.record_attempt(
+            request_number=request_number,
+            elapsed_seconds=elapsed_seconds,
+            empty=True,
+            timed_out=timed_out,
+            transport_error=not timed_out,
+        )
+        if action is not None and started_at is not None:
+            self._emit(
+                "llm_generation_attempt",
+                action,
+                actor,
+                started_at,
+                request_number=request_number,
+                request_reason=request_reason,
+                action_budget_key=key,
+                request_elapsed_seconds=round(elapsed_seconds, 3),
+                thinking_requested=bool(thinking_enabled) if thinking_enabled is not None else None,
+                thinking_present=False,
+                body_char_count=0,
+                body_empty=True,
+                thinking_only_response=False,
+                done_reason=None,
+                eval_count=None,
+                num_predict=request_options.get("num_predict"),
+                generation_issue=self._transport_failure_reason(error),
+                generation_profile=profile.serialize(),
+            )
+
     def _record_thinking_budget_exhausted(
         self,
         actor: Player,
@@ -5043,27 +5577,55 @@ class OllamaActions(ActionPolicy):
         started_at: float,
         metadata: dict[str, str | int | bool | None],
     ) -> None:
-        """思考onの応答が思考トークンだけで生成上限を消費したモデルを記録する。
+        """思考が生成上限を食い潰した観測を、まず「モデル別thinking余白の拡大」で解消する。
 
-        実機ログでは議論の思考が num_predict をすべて消費し、本文が空のまま
-        done_reason=length になった。同じ上限で再試行しても同じ結果になるため、
-        以後の同一モデルの思考行動（議論・人狼相談）はoffへ自動で切り替える。
-        offでは同じ num_predict のほとんどが本文に使えるため、文量はむしろ増える。
+        TASK-053: 実機ログ game_088e49f0690c では投票（gpt-oss）と人狼相談（gemma系）の
+        思考が num_predict をすべて消費し、本文が空のまま done_reason=length になった。
+        従来は即座にそのモデルの思考行動を off にしていたため推論の自由を削ったので、
+        ここではまず別枠の thinking 余白を拡大して本文を確保する（送信上限は
+        `reserve_body_budget` が吊り上げる）。拡大を尽くしても同じ行動で空が続く場合のみ、
+        安全側として思考 off へ切り替える。
         """
         capabilities = self.state.model_capabilities.setdefault(actor.model, {})
-        first_detection = capabilities.get("thinking_budget") is not False
+        if capabilities.get("thinking_budget") is False:
+            # 既に off 判定済み（毎ターン同じ記録を増やさない）。
+            return
+        budget_key = normalize_action_budget_key(action)
+        profile = self._profile_for(actor, budget_key)
+        sent = metadata.get("num_predict")
+        allowance, widened = profile.widen_allowance(
+            num_predict_sent=(
+                int(sent)
+                if isinstance(sent, int) and not isinstance(sent, bool)
+                else None
+            ),
+            max_allowance=min(
+                MAX_THINKING_ALLOWANCE_TOKENS,
+                BODY_RESERVATION_MAX_NUM_PREDICT.get(
+                    budget_key, MAX_THINKING_ALLOWANCE_TOKENS
+                ),
+            ),
+        )
+        keep_thinking = widened or profile.exhaustion_count < THINKING_OFF_AFTER_EXHAUSTIONS
+        self._emit(
+            "thinking_budget_exhausted",
+            action,
+            actor,
+            started_at,
+            reason=THINKING_BUDGET_EXHAUSTED_REASON,
+            eval_count=metadata.get("eval_count"),
+            num_predict=metadata.get("num_predict"),
+            content_length=metadata.get("content_length"),
+            thinking_off_switched=not keep_thinking,
+            thinking_kept=keep_thinking,
+            thinking_allowance_tokens=allowance,
+            thinking_allowance_widened=bool(widened),
+            thinking_exhaustion_count=profile.exhaustion_count,
+            body_min_tokens=BODY_MIN_TOKENS_BY_ACTION.get(budget_key),
+        )
+        if keep_thinking:
+            return
         capabilities["thinking_budget"] = False
-        if first_detection:
-            self._emit(
-                "thinking_budget_exhausted",
-                action,
-                actor,
-                started_at,
-                reason=THINKING_BUDGET_EXHAUSTED_REASON,
-                eval_count=metadata.get("eval_count"),
-                num_predict=metadata.get("num_predict"),
-                content_length=metadata.get("content_length"),
-            )
 
     def _record_tool_unsupported(
         self, actor: Player, action: str, started_at: float
@@ -5121,6 +5683,33 @@ class OllamaActions(ActionPolicy):
         role = args.get("role")
         if not isinstance(role, str) or role not in {item.value for item in Role}:
             return reject("Invalid role value.", "invalid_role")
+        # TASK-055実装案2: allow_bluff_role_claim=False の設定では、保有していない役職のCOを
+        # 受理しない。既定（許可）ではブラフCOも自由な公開主張として通すため、この分岐は入らない。
+        if (
+            not getattr(self.state, "allow_bluff_role_claim", True)
+            and role != actor.role.value
+        ):
+            self.state.role_provenance.record_disallowed_claim(
+                day=self.state.day,
+                claimant=actor.name,
+                claimed_role=role,
+                source=SOURCE_PUBLIC_CLAIM,
+                discussion_turn=self.state.discussion_turn,
+            )
+            self._emit(
+                "role_claim_disallowed",
+                action,
+                actor,
+                started_at,
+                body_preserved=True,
+                role_line_dropped=True,
+                interpretation=PUBLIC_LINE_LABEL,
+            )
+            return reject(
+                "Only the true holder of a role may publish that claim under this rule. "
+                "Your discussion body stays yours.",
+                "bluff_role_claim_disallowed",
+            )
         target = args.get("target")
         result = args.get("result")
         reason = args.get("reason")
@@ -5229,22 +5818,12 @@ class OllamaActions(ActionPolicy):
                 "message": "The same public claim is already recorded.",
             }
 
-        self.state.public_role_claims.append(
-            PublicRoleClaim(
-                day=self.state.day,
-                claimant=actor.name,
-                claimed_role=role,
-                target=target,
-                result=result,
-                reason=reason.strip() if isinstance(reason, str) else None,
-                vote_proposal=(
-                    vote_proposal.strip()
-                    if isinstance(vote_proposal, str)
-                    else None
-                ),
-            )
-        )
+        # TASK-055: 先に占い結果の公開IDを決め、CO行には「本人の公開主張」であることを示す
+        # IDだけを付ける。エンジンが発行した実際の判定（RoleEvidence）との対応は
+        # role_provenance 台帳（管理者ログ専用）だけが持つ。
+        seer_refs: list[str] = []
         if role == Role.SEER.value:
+            seer_index_before = len(self.state.seer_claims)
             if not previous_seer_claims:
                 self.state.seer_claims.append(
                     PublicSeerClaim(day=self.state.day, claimant=actor.name)
@@ -5258,6 +5837,39 @@ class OllamaActions(ActionPolicy):
                         result=result,
                     )
                 )
+            seer_refs = [
+                f"[seer_claim:{index}]"
+                for index in range(seer_index_before + 1, len(self.state.seer_claims) + 1)
+            ]
+        claim_ref = f"[claim:{len(self.state.public_role_claims) + 1}]"
+        self.state.public_role_claims.append(
+            PublicRoleClaim(
+                day=self.state.day,
+                claimant=actor.name,
+                claimed_role=role,
+                target=target,
+                result=result,
+                reason=reason.strip() if isinstance(reason, str) else None,
+                vote_proposal=(
+                    vote_proposal.strip()
+                    if isinstance(vote_proposal, str)
+                    else None
+                ),
+                source=SOURCE_PUBLIC_CLAIM,
+                evidence_ids=tuple([claim_ref, *seer_refs]),
+            )
+        )
+        self.state.role_provenance.record_claim(
+            claim_ref=claim_ref,
+            day=self.state.day,
+            claimant=actor.name,
+            claimed_role=role,
+            source=SOURCE_PUBLIC_CLAIM,
+            actor_role=actor.role.value,
+            target=target,
+            result=result,
+            discussion_turn=self.state.discussion_turn,
+        )
         self._emit(
             "claim_role_published",
             action,
@@ -5269,6 +5881,8 @@ class OllamaActions(ActionPolicy):
             reason=reason,
             vote_proposal=vote_proposal,
             source="tool",
+            claim_ref=claim_ref,
+            interpretation=PUBLIC_LINE_LABEL,
         )
         return {
             "status": "published",
@@ -5322,6 +5936,10 @@ class OllamaActions(ActionPolicy):
                     messages,
                     actor,
                     thinking=bool(thinking_enabled),
+                    # TASK-053: モデル×アクション別の実測thinking余白だけで確保する。
+                    thinking_margin=self._thinking_margin_for(
+                        actor, budget_key, bool(thinking_enabled)
+                    ),
                 )
             )
         num_ctx_before_fit = options.get("num_ctx") if options else None
@@ -5452,6 +6070,23 @@ class OllamaActions(ActionPolicy):
                     request_options.get("num_predict"),
                     thinking_enabled=bool(thinking_value),
                     effective_limit=context_resolution.limit,
+                    # TASK-053: モデル別実測のthinking余白を予算構成分解へ反映する。
+                    thinking_margin=self._thinking_margin_for(
+                        actor, budget_key, bool(thinking_value)
+                    ),
+                ),
+                thinking_margin_tokens=self._thinking_margin_for(
+                    actor, budget_key, bool(thinking_value)
+                ),
+                # TASK-053: 実際に送る生成上限が「本文最低予算 + thinking余白」を保てているかの
+                # 検査（モデル×アクション別の空応答率・thinking消費率の比較基盤）。
+                body_budget=inspect_body_budget(
+                    self._thinking_profiles.get(
+                        actor.model, normalize_action_budget_key(budget_key)
+                    ),
+                    normalize_action_budget_key(budget_key),
+                    request_options.get("num_predict"),
+                    thinking_enabled=bool(thinking_value),
                 ),
             )
 
@@ -5519,9 +6154,42 @@ class OllamaActions(ActionPolicy):
                 num_ctx_source=num_ctx_source,
             )
 
+        def send_and_record(request_options: dict[str, object] | None) -> ChatResponse:
+            """1送信を計測し、モデル×アクション別の生成プロファイルへ加算する（TASK-053）。"""
+
+            send_started = time.perf_counter()
+            try:
+                response = send(request_options)
+            except OllamaError as error:
+                self._record_generation_failure(
+                    actor,
+                    budget_key,
+                    action,
+                    started_at,
+                    request_options or {},
+                    request_number,
+                    request_reason,
+                    thinking_enabled,
+                    send_started,
+                    error,
+                )
+                raise
+            return self._record_generation_response(
+                actor,
+                budget_key,
+                action,
+                started_at,
+                request_options or {},
+                request_number,
+                request_reason,
+                thinking_enabled,
+                send_started,
+                response,
+            )
+
         try:
             try:
-                return send(options)
+                return send_and_record(options)
             except OllamaError as error:
                 if error.kind == "timeout":
                     # TASK-036: タイムアウトをモデル別能力情報へ記録し、以後の議論・
@@ -5542,7 +6210,7 @@ class OllamaActions(ActionPolicy):
                     THINKING_CAPABILITY_SOURCE,
                     f"{request_reason} (resent with think=off; the model does not support thinking)",
                 )
-                return send(fallback_options)
+                return send_and_record(fallback_options)
         finally:
             if original_timeout is not None:
                 self.client.timeout = original_timeout

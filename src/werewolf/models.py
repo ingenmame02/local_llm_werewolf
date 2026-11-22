@@ -1,7 +1,7 @@
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from .config import (
@@ -10,6 +10,7 @@ from .config import (
     normalize_personality_profile,
 )
 from .discussion_novelty import DiscussionTopicLedger
+from .leak_gate_policy import DEFAULT_LEAK_GUARD_POLICY, LeakGuardProfiles
 from .hypothesis_ledger import (
     REFUTATION_SUPERSEDED,
     STATEMENT_MAX_CHARS,
@@ -17,6 +18,28 @@ from .hypothesis_ledger import (
     HypothesisLedger,
     confidence_from_text,
     stance_of_sentence,
+)
+# TASK-055: 役職主張と役職由来情報のプロヴェナンス分離（このモジュールは models をimportしない）
+from .role_provenance import (
+    ALLOW_BLUFF_ROLE_CLAIM_DEFAULT,
+    SOURCE_COMPATIBILITY_TEXT,
+    RoleProvenanceLedger,
+)
+# TASK-056: Day内イベントの時系列台帳（day / discussion_turn / speech_id / sequence を残す。
+# このモジュールは models をimportしないため、循環参照にはならない）
+from .day_timeline import (
+    DAY_TIMELINE_POLICY_DEFAULT,
+    PublicTimeline,
+    TimelineEvent,
+    TurnSnapshot,
+    build_turn_snapshot,
+    normalize_day_timeline_policy,
+)
+# TASK-057: プロンプト契約のポリシー（simplified / legacy）。このモジュールは models を
+# import しないため循環参照にならない。節の台帳・証拠ID参照・段階除去を prompts 側で使う。
+from .prompt_contract import (
+    PROMPT_CONTRACT_POLICY_DEFAULT,
+    normalize_prompt_contract_policy,
 )
 
 
@@ -178,6 +201,12 @@ class Player:
 class Message:
     speaker: str
     content: str
+    # TASK-056: 公開イベントの発生時点（エンジンが公開時にスタンプする）。
+    # 旧ログや手組みテストでは未設定のままでも動くよう、すべて既定値を持つ。
+    day: int = 0
+    turn: int = 0
+    speech_id: int | None = None
+    timeline_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +219,8 @@ class PublicSeerClaim:
 
 @dataclass(frozen=True)
 class PublicRoleClaim:
+    """公開COの台帳行（TASK-055で出所と証拠IDを持つ RoleClaim）。"""
+
     day: int
     claimant: str
     claimed_role: str
@@ -197,6 +228,12 @@ class PublicRoleClaim:
     result: str | None = None
     reason: str | None = None
     vote_proposal: str | None = None
+    # 出所: public_claim（ツール等の明示申告）/ compatibility_text（本文から認識した行）。
+    # どちらも「そのプレイヤーが公に語った」情報であり、エンジン発行情報ではない。
+    source: str = SOURCE_COMPATIBILITY_TEXT
+    # 公開面に立てる証拠ID（`[claim:N]` / `[seer_claim:N]`）。エンジン発行のIDはここに
+    # 置かない（公開されると真偽が漏れるため、対応関係は role_provenance 側だけが知る）。
+    evidence_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -223,6 +260,8 @@ class LedgerFact:
     description: str
     visibility: str = "public"
     actor: str | None = None
+    # TASK-055: エンジンが発行した事実には証拠IDを付け、後からCO行と照合できるようにする
+    evidence_id: str | None = None
 
 
 @dataclass
@@ -438,6 +477,12 @@ class GameState:
     topic_ledger: DiscussionTopicLedger = field(default_factory=DiscussionTopicLedger)
     # TASK-048: 低新規性時の処理ポリシー（"publish" / "append" / "legacy_repair"）。既定 publish。
     novelty_policy: str = "publish"
+    # TASK-054: 漏洩ガードのゲートポリシー（"tiered" / "legacy_strict"）。既定 tiered。
+    # tiered は非公開の真の情報だけ遮断し、公開済みCO・判定の再言及や他者役職の推測は
+    # 本文そのまま公開（警告・観測のみ）。legacy_strict は旧来動作でA/B比較に使う。
+    leak_guard_policy: str = DEFAULT_LEAK_GUARD_POLICY
+    # TASK-054: モデル別の漏洩実績（hard/soft・補正・再要求秒・本文保持率）と強度。
+    leak_guard_profiles: LeakGuardProfiles = field(default_factory=LeakGuardProfiles)
     action_candidate_sets: dict[str, ActionCandidateSet] = field(default_factory=dict)
     discussion_claim_checks: set[tuple[int, str]] = field(default_factory=set)
     ledger_snapshots: list[LedgerSnapshot] = field(default_factory=list)
@@ -451,10 +496,34 @@ class GameState:
     player_self_memories: dict[str, SelfMemory] = field(default_factory=dict)
     # TASK-038: 質問への回答の強制度（"strict" / "soft" / "none"）。既定はsoft。
     question_hint_mode: str = "soft"
+    # TASK-055: ブラフとしての役職COを許すか（既定は許可）。許可時は村人・人狼・狂人のCOも
+    # 公開主張として受理するが、実際の占い結果として登録されるのはエンジンが発行した
+    # 情報だけである。不許可時は対象行を公開前に除去する（本文はそのまま残す）。
+    allow_bluff_role_claim: bool = ALLOW_BLUFF_ROLE_CLAIM_DEFAULT
+    # TASK-055: エンジン発行情報（RoleEvidence）と公開申告（PublicInterpretation）の台帳。
+    # 照合結果は管理者ログ専用で、公開面では全CO行を同じ中立ラベルに揃える。
+    role_provenance: RoleProvenanceLedger = field(default_factory=RoleProvenanceLedger)
+    # TASK-056: 公開イベントの時系列台帳（時点・ID・短い要約のみ。発言本文は保持しない）。
+    # 発言・投票・処刑・襲撃死を登順で並べ、「この時点で既知」と「まだ発生していない」
+    # の境界をプロンプトとログの両方で追跡できるようにする。
+    public_timeline: PublicTimeline = field(default_factory=PublicTimeline)
+    # TASK-056: 時系列明示のルール設定（"explicit" / "off"）。offはA/B比較用の旧挙動。
+    timeline_policy: str = DAY_TIMELINE_POLICY_DEFAULT
+    # TASK-057: プロンプト契約の簡素化（"simplified" / "legacy"）。simplified では同じ制約・
+    # 発言本文の再掲を1箇所に集め、コンテキスト不足時に optional 節だけを段階的に落とす。
+    # legacy はA/B比較用の旧挙動（重複した命令文のまま）で、発言の口調・論点には干渉しない。
+    prompt_contract_policy: str = PROMPT_CONTRACT_POLICY_DEFAULT
 
     def __post_init__(self) -> None:
         if self.day < 0:
             raise ValueError("Day cannot be negative.")
+        # TASK-056: 時系列明示のポリシーを正規化し、台帳と同じ値に揃える
+        self.timeline_policy = normalize_day_timeline_policy(self.timeline_policy)
+        self.public_timeline.policy = self.timeline_policy
+        # TASK-057: プロンプト契約のポリシーも正規化する（未知の設定値は既定の簡素化）
+        self.prompt_contract_policy = normalize_prompt_contract_policy(
+            self.prompt_contract_policy
+        )
         if not 0 <= self.discussion_turn <= 3:
             raise ValueError("Discussion turn must be between zero and three.")
         names = [player.name for player in self.players]
@@ -509,11 +578,77 @@ class GameState:
             raise ValueError(f"Player is already dead: {player_name}")
         player.is_alive = False
 
-    def append_discussion_message(self, message: Message) -> None:
-        """Append a public discussion message and mirror it into the live round."""
-        self.conversation_log.append(message)
-        if message.speaker != "system" and self.phase is Phase.DAY_DISCUSSION:
-            self.current_round_transcript.append(message)
+    def append_discussion_message(self, message: Message) -> Message:
+        """Append a public discussion message and mirror it into the live round.
+
+        TASK-056: 公開発言には発生時点（day / discussion turn / [speech:N] / 時系列順）を
+        スタンプし、同じ時点で公開イベント台帳へ登録する。台帳へは短い要約とIDだけ残し、
+        本文はコピーしない（コンテキスト増加を防ぐため）。
+        """
+        stamped = message
+        if message.speaker != "system":
+            speech_id = int(
+                message.speech_id
+                if message.speech_id is not None
+                else sum(
+                    1 for row in self.conversation_log if row.speaker != "system"
+                )
+                + 1
+            )
+            if (
+                message.day != self.day
+                or message.turn != self.discussion_turn
+                or message.timeline_index is None
+            ):
+                stamped = replace(
+                    message,
+                    day=self.day,
+                    turn=self.discussion_turn,
+                    speech_id=speech_id,
+                    timeline_index=self.public_timeline.next_sequence,
+                )
+            if self.phase is Phase.DAY_DISCUSSION:
+                self.public_timeline.record_speech(
+                    day=self.day,
+                    turn=self.discussion_turn,
+                    speaker=stamped.speaker,
+                    speech_id=speech_id,
+                    content=stamped.content,
+                )
+        self.conversation_log.append(stamped)
+        if stamped.speaker != "system" and self.phase is Phase.DAY_DISCUSSION:
+            self.current_round_transcript.append(stamped)
+        return stamped
+
+    def record_public_event(
+        self,
+        kind: str,
+        *,
+        actor: str | None = None,
+        summary: str = "",
+        day: int | None = None,
+        turn: int | None = None,
+    ) -> TimelineEvent | None:
+        """公開イベント（投票・処刑・襲撃死・日の開始）を時系列台帳へ登録する。"""
+        return self.public_timeline.record(
+            day=self.day if day is None else int(day),
+            turn=self.discussion_turn if turn is None else int(turn),
+            kind=kind,
+            actor=actor,
+            summary=summary,
+        )
+
+    def timeline_snapshot(self, actor_name: str) -> TurnSnapshot:
+        """発言直前の知識境界（既知の先行発言と、まだ起きていないイベント）を返す。"""
+        snapshot = build_turn_snapshot(self, actor_name)
+        # プロンプトへ出さなかった後発イベント数を観測する（未来参照の検出基準にも使う）
+        withheld = len(snapshot.speakers_pending)
+        if not snapshot.today_vote_done:
+            withheld += 1
+        if snapshot.night_pending:
+            withheld += 1
+        self.public_timeline.future_events_withheld += withheld
+        return snapshot
 
     def begin_discussion_turn(self) -> None:
         self.current_round_transcript = []
@@ -735,6 +870,9 @@ class GameState:
         if not isinstance(content, str) or not content.strip():
             return 0
         evidence_id = self._speech_id_for(speaker, content)
+        # TASK-056: 発生時点（D日Tターン#時系列順）を覚えさせて、同じ論点の再掲を
+        # 新しい事実として読み替えないための手がかりにする（本文は追加しない）
+        observed_point = f"D{day}T{turn}#{self.public_timeline.next_sequence}"
         confidence = confidence_from_text(content)
         created = 0
         for sentence in re.split(r"(?<=[。！？!?])\s*|\n+", content):
@@ -752,6 +890,7 @@ class GameState:
                     self.hypothesis_ledger.record(
                         subject=player.name,
                         actor=speaker,
+                        observed_at=observed_point,
                         day=day,
                         turn=turn,
                         stance=stance,
@@ -769,6 +908,8 @@ class GameState:
         if not isinstance(memo_text, str) or not memo_text.strip():
             return 0
         evidence_id = f"[memo:{actor_name}-day-{day}-turn-{turn}]"
+        # TASK-056: 推理メモ由来の仮説にも観測時点を持たせる（本人専用）
+        observed_point = f"D{day}T{turn}#{self.public_timeline.next_sequence}"
         confidence = confidence_from_text(memo_text)
         created = 0
         for sentence in re.split(r"(?<=[。！？!?])\s*|\n+", memo_text):
@@ -786,6 +927,7 @@ class GameState:
                     self.hypothesis_ledger.record(
                         subject=player.name,
                         actor=actor_name,
+                        observed_at=observed_point,
                         day=day,
                         turn=turn,
                         stance=stance,
@@ -830,7 +972,8 @@ class GameState:
 
     def topic_summary_for(self, actor_name: str, day: int) -> tuple[str, dict[str, object]]:
         """次ターンへ渡す既出論点の要約（観測のみ・1ブロックだけ）を返す。"""
-        return self.topic_ledger.summarize_for(actor_name, day)
+        dead_names = frozenset(player.name for player in self.players if not player.is_alive)
+        return self.topic_ledger.summarize_for(actor_name, day, dead_names=dead_names)
 
     def own_stances_for(self, actor_name: str) -> dict[str, str]:
         """本人がこれまでに取った立場（対象→立場）を返す（立場変更の計測基準）。"""

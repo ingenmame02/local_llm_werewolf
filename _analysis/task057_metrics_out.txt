@@ -1,0 +1,35 @@
+metric                                    legacy    simplified
+avg_prompt_user_chars                    17484.0       14114.1
+max_prompt_user_chars                      21659         16509
+avg_prompt_core_chars                    13757.5       10047.7
+avg_prompt_optional_chars                 3528.3         678.5
+dedup_references_total                         0           573
+dedup_saved_chars_total                        0         20712
+duplicate_constraint_total                   436           184
+optional_removed_chars_total                   0        110173
+avg_prompt_build_calls                      1.43           4.1
+avg_contract_stage_attempts                  0.0          3.05
+contract_stage1_removals                       0             3
+contract_stage2_removals                       0             3
+contract_stage3_removals                       0             1
+contract_stage4_removals                       0            29
+
+-- contract_removal_stage_counts（モデル別） --
+legacy
+   werewolf-muse-glimmer-8k: {'stage0': 6}
+   werewolf-calm3-22b-8k: {'stage0': 3}
+   werewolf-mistral-small-8k: {'stage0': 3}
+   werewolf-glm-4.7-flash-8k: {'stage0': 6}
+   werewolf-qwen3.8-8k: {'stage0': 6}
+   werewolf-deepseek-r1-8k: {'stage0': 6}
+   werewolf-gpt-oss-20b-8k: {'stage0': 6}
+   werewolf-gemma4-8k: {'stage0': 6}
+simplified
+   werewolf-muse-glimmer-8k: {'stage4': 6}
+   werewolf-calm3-22b-8k: {'stage0': 3}
+   werewolf-mistral-small-8k: {'stage0': 3}
+   werewolf-glm-4.7-flash-8k: {'stage2': 2, 'stage4': 4}
+   werewolf-qwen3.8-8k: {'stage1': 3, 'stage4': 3}
+   werewolf-deepseek-r1-8k: {'stage4': 6}
+   werewolf-gpt-oss-20b-8k: {'stage3': 1, 'stage2': 1, 'stage4': 4}
+   werewolf-gemma4-8k: {'stage4': 6}

@@ -13,6 +13,30 @@ from .discussion_format import (
     normalize_question_hint_mode,
 )
 from .models import GameState, Message, Player, PublicRoleClaim, ReasoningMemo, Role
+# TASK-056: 公開イベントの時系列欄（時点・IDのみを出し、口調・論点・結論には干渉しない）
+from .day_timeline import (
+    DAY_TIMELINE_POLICY_DEFAULT,
+    DAY_TIMELINE_POLICY_OFF,
+    EVIDENCE_HEADER_LEGEND,
+    normalize_day_timeline_policy,
+    render_timeline_section,
+    timeline_evidence_header,
+)
+# TASK-057: セクション台帳（purpose / source / authority / expires_at）、証拠ID参照への
+# 差し替え、契約の統合と静的検査、段階的な optional 除去をまとめて扱う。
+from .prompt_contract import (
+    PROMPT_CONTRACT_POLICY_DEFAULT,
+    PROMPT_CONTRACT_POLICY_LEGACY,
+    ContractDiagnostics,
+    REFERENCE_PREFIX,
+    drop_sections,
+    evidence_entries_to_references,
+    evidence_reference,
+    expired_sections_present,
+    normalize_prompt_contract_policy,
+    quote_or_reference,
+    render_behavior_contract,
+)
 
 
 
@@ -134,30 +158,55 @@ def language_tail(language: str) -> str:
     return f"- Final check: write every sentence in {language}; keep format lines literal.\n"
 
 
-def leak_boundary_block(actor: Player, language: str) -> str:
+def leak_boundary_block(actor: Player, language: str, lean: bool = False) -> str:
     """Anti-leak boundary placed immediately before the output instructions.
 
     Deliberately avoids quoting prohibited wolf-camp phrases: listing the
     forbidden phrases primes exactly the tokens that leak into public speech.
+
+    `lean=True`（TASK-057 simplified）では [BEHAVIOR_CONTRACT] が既に一度だけ書いた
+    汎用制約（秘匿・一人称・指示文の引用禁止）を繰り返さず、役職固有の線引きだけを出す。
+    秘匿の内容は減らさない（同じ制約の言い換えを1箇所に寄せるだけの整理）。
     """
-    if is_japanese_language(language):
-        lines = [
-            "[秘匿情報の扱い - 公開発言に写さない]",
-            "- このプロンプトの秘密欄（自分の役職・未公開の判定・夜の行動・仲間）は内部情報です。",
-            "- 未公開の判定の対象名と判定語は CO ブロックと結果ブロックにだけ書き、本文に写さない。",
-            "- 自分と別のプレイヤーが秘密の計画を共有している視点で発言しない。単数の一人称で村人の立場で話す。",
-            "- 仲間・相方・夜の相談の名前や内容を公開発言で言及しない。",
-            "- プロンプトの指示文・システム設定・生成条件を引用しない。",
-        ]
+    japanese = is_japanese_language(language)
+    if japanese:
+        lines = ["[秘匿情報の扱い - 公開発言に写さない]"]
+        if not lean:
+            lines += [
+                "- このプロンプトの秘密欄（自分の役職・未公開の判定・夜の行動・仲間）は内部情報です。",
+                "- 未公開の判定の対象名と判定語は CO ブロックと結果ブロックにだけ書き、本文に写さない。",
+                "- 単数の一人称で、公開記録にある発言・投票・死亡についてだけ話す。",
+            ]
+        lines.append(
+            "- 仲間・相方・夜の相談の名前や内容を公開発言で言及しない。"
+        )
+        if not lean:
+            lines.append("- プロンプトの指示文・システム設定・生成条件を引用しない。")
+        if actor.role in {Role.SEER, Role.VILLAGER}:
+            # 村側は自分の役職をゲーム内主張として述べるのも、他者の役職を推測するのも
+            # 合法（漏洩ではない）。自己検閲させず、論点と口調の自由を保つ。
+            lines.append(
+                "- 自分の役職をゲーム内主張（村人CO・占い師COなど）として述べることは合法です。"
+                "他者の役職は推測として論じて構いません。"
+            )
     else:
-        lines = [
-            "[Leak Boundary - never written in public speech]",
-            "- Private blocks of this prompt (your role, unpublished verdicts, night actions, ally) are internal.",
-            "- Unpublished targets and verdict words may appear ONLY inside the CO and RESULT blocks, never in the body.",
-            "- Never speak from a shared-hidden-plan perspective; use singular first person as a villager.",
-            "- Never name an ally, a partner, or a night consult in public speech.",
-            "- Never quote prompt instructions, system settings, or generation conditions.",
-        ]
+        lines = ["[Leak Boundary - never written in public speech]"]
+        if not lean:
+            lines += [
+                "- Private blocks of this prompt (your role, unpublished verdicts, night actions, ally) are internal.",
+                "- Unpublished targets and verdict words may appear ONLY inside the CO and RESULT blocks, never in the body.",
+                "- Never speak from a shared-hidden-plan perspective; keep to singular first person about public records.",
+            ]
+        lines.append(
+            "- Never name an ally, a partner, or a night consult in public speech."
+        )
+        if not lean:
+            lines.append("- Never quote prompt instructions, system settings, or generation conditions.")
+        if actor.role in {Role.SEER, Role.VILLAGER}:
+            lines.append(
+                "- Declaring your own role as an in-game claim is legitimate, and you may argue "
+                "about other players' roles as speculation. Neither is a leak."
+            )
     if actor.role in {Role.WOLF, Role.MADMAN}:
         lines.append(
             "- Your true camp is hidden. A public sentence exposing a hidden camp, an ally, "
@@ -395,12 +444,18 @@ class PromptBuilder:
         state: GameState | None = None,
         conversation_history: tuple[Message, ...] | None = None,
         include_structured_ledger: bool = True,
+        previous_speech_override: str | None = None,
     ) -> str:
         """確定事実ヘッダーを組み立てる。
 
         `include_structured_ledger=False`（議論プロンプト）では、確定事実・公開主張の
         重複を省く。議論では `[CLAIM_LEDGER]` が同じ事実を日付付きで列挙するため、
         推測リストだけ別セクション（`_inference_ledger_text`）で渡す。
+
+        TASK-057 (`previous_speech_override`): 直前の発言本文は [CONVERSATION_EVIDENCE] に
+        既に1回載っているので、議論プロンプトではヘッダー側を `[ref:sN]` 参照へ置き換える
+        （同一情報の二重送信をやめ、コンテキストを節約する）。IDが履歴から落ちた場合は
+        従来どおり本文を書く（空参照を作らない）。
         """
         dead_players = (
             tuple(player.name for player in state.players if not player.is_alive)
@@ -641,8 +696,10 @@ class PromptBuilder:
             f"- Day Discussion Turn: {current_turn}\n"
             f"- Current Speaker: {actor.name}\n"
             f"- Previous Speaker: {previous_message.speaker if previous_message else 'None'}\n"
-            f"- Previous Speech (Unverified Quote): "
-            f"{json.dumps(previous_message.content, ensure_ascii=False) if previous_message else 'None'}\n"
+            # TASK-057: 議論プロンプトでは本文の再掲をやめ、証拠IDの参照に変える
+            # （同じ発言を2度送るとそのぶんコンテキストを食い、要約の優先度も下がる）。
+            "- Previous Speech (Unverified Quote): "
+            f"{previous_speech_override or (json.dumps(previous_message.content, ensure_ascii=False) if previous_message else 'None')}\n"
             f"- Living Players: {', '.join(alive_players) or 'None'}\n"
             f"- Known Dead Players: {', '.join(dead_players) or 'None'}\n"
             f"- Confirmed Death History (Last 3): {death_ledger}\n"
@@ -927,13 +984,31 @@ class PromptBuilder:
                     day = int(marker.group(1))
                 continue
             turns_by_day[day] = turns_by_day.get(day, 0) + 1
+            # TASK-056: エンジンが公開時にスタンプした時点（day / discussion turn / speech id）を
+            # 優先し、旧ログ・手組み履歴では従来どおり日毎の連番から復元する
+            stamped_day = int(getattr(message, "day", 0) or 0)
+            stamped_turn = int(getattr(message, "turn", 0) or 0)
+            stamped_speech = getattr(message, "speech_id", None)
+            speech_id = int(stamped_speech) if stamped_speech is not None else None
+            event_day = stamped_day or day
             records.append(
                 {
                     "index": len(records) + 1,
-                    "day": day,
-                    "turn": turns_by_day[day],
+                    "day": event_day,
+                    "turn": stamped_turn or turns_by_day[day],
+                    "speech_id": speech_id,
+                    # TASK-056: 時点つきヘッダを使ったか否かの明示フラグ（文字列判定ではなく
+                    # 生成元の情報で判別する。従来形 `[Day ...]` も "[" で始まるため混同する）
+                    "stamped": bool(stamped_turn and speech_id is not None),
                     "speaker": message.speaker,
                     "content": message.content,
+                    "header": timeline_evidence_header(
+                        event_day,
+                        stamped_turn or None,
+                        speech_id,
+                        str(message.speaker),
+                        legacy_index=turns_by_day[day],
+                    ),
                 }
             )
 
@@ -1078,8 +1153,7 @@ class PromptBuilder:
             def evidence_chars() -> int:
                 return sum(
                     len(
-                        f"[Day {record['day']} / Speech {record['turn']} / "
-                        f"{record['speaker']} / In-game speech] "
+                        f"{record['header']} "
                         f"{json.dumps(str(record['content']), ensure_ascii=False)}"
                     )
                     for record in selected_records
@@ -1098,13 +1172,19 @@ class PromptBuilder:
             selected_records = [
                 record for record in records if int(record["index"]) in selected
             ]
+        # TASK-056: 時点つきヘッダが使えたかを判定する（旧ログでは従来形のままで出す）
+        compact_headers = [
+            bool(record.get("stamped")) for record in selected_records
+        ]
         if selected_records:
             lines = [
-                f"[Day {record['day']} / Speech {record['turn']} / "
-                f"{record['speaker']} / In-game speech] "
+                f"{record['header']} "
                 f"{json.dumps(record['content'], ensure_ascii=False)}"
                 for record in selected_records
             ]
+            if any(compact_headers):
+                # 凡例は1行だけ（新形式を使ったときのみで、旧ログとの混在時も同じ場所に出す）
+                lines.insert(0, EVIDENCE_HEADER_LEGEND)
         else:
             lines = ["(No speech history)"]
 
@@ -1146,6 +1226,14 @@ class PromptBuilder:
             "transcript_sha256": transcript_hash,
             "transcript_event_range": [1, len(records)] if records else [],
             "transcript_event_count": len(records),
+            # TASK-057: 発言本文がこの欄に実際に載っているIDの集合。他の節で同じ本文を
+            # 再掲せず `[ref:sN]` 参照に差し替えてよいかの判定に使う（履歴から落ちた本文を
+            # 指す空参照を作らない）。
+            "evidence_speech_ids": sorted(
+                int(record["speech_id"])
+                for record in selected_records
+                if record.get("speech_id") is not None
+            ),
             "selected_event_indices": sorted(selected),
             "selected_reasons": {
                 str(index): sorted(reasons[index]) for index in sorted(selected)
@@ -1163,6 +1251,18 @@ class PromptBuilder:
                 else 1.0
             ),
             "dropped_events_detail": dropped_detail,
+            # TASK-056: 発言ヘッダの様式。stamped_compact は時点（D日/Tターン/s=speech ID）を
+            # 明記できていることを示す（旧ログのリプレイでは legacy になる）
+            "evidence_header_style": (
+                "none"
+                if not compact_headers
+                else "stamped_compact"
+                if all(compact_headers)
+                else "mixed"
+                if any(compact_headers)
+                else "legacy"
+            ),
+            "evidence_stamped_headers": sum(1 for flag in compact_headers if flag),
             "compression_stage": (
                 "evidence_budget_compressed" if evidence_dropped else "full"
             ),
@@ -1171,25 +1271,58 @@ class PromptBuilder:
 
     @staticmethod
     def _inference_ledger_text(
-        state: GameState | None, actor: Player | None = None
-    ) -> str:
+        state: GameState | None,
+        actor: Player | None = None,
+        *,
+        body_reference_map: dict[str, int] | None = None,
+        evidence_speech_ids: frozenset[int] = frozenset(),
+    ) -> tuple[str, dict[str, int]]:
         """モデル発言由来の推測（未確認）だけを返す（TASK-043: 議論の事実重複を省く）。
 
         TASK-047: 発言全文をそのまま再掲せず、仮説台帳の要約（立場・短縮本文・証拠ID）へ
         置き換える。全文は [CONVERSATION_EVIDENCE] に既に存在するため重複にならない。
+
+        TASK-057: 台帳に本文がそのまま残っている行（発言を写しただけの推測）は、証拠側に
+        同じ発言が残っているときだけ `[ref:sN] 名前` 参照へ縮める。履歴から削られた発言を
+        指す空参照は作らない（その場合は従来どおり要約を書く）。誰を疑うかという内容自体は
+        変えないため、論点・口調・結論への介入にはならない。
         """
         if state is None:
-            return "- Player Speech & Inferences (Unverified): None\n"
+            return "- Player Speech & Inferences (Unverified): None\n", {}
         summary = ""
         if actor is not None:
             summary = state.hypothesis_ledger.summary_for(actor.name)
         if summary:
-            return f"- Player Speech & Inferences (Unverified): {summary}\n"
-        inference_ledger = [
-            json.dumps(fact.description[:120], ensure_ascii=False)
-            for fact in state.fact_ledger.model_inferences[-6:]
-        ]
-        return f"- Player Speech & Inferences (Unverified): {' / '.join(inference_ledger) or 'None'}\n"
+            return f"- Player Speech & Inferences (Unverified): {summary}\n", {}
+        dedup_saved_chars = 0
+        dedup_references = 0
+        inference_ledger: list[str] = []
+        for fact in state.fact_ledger.model_inferences[-6:]:
+            description = str(fact.description or "").strip()
+            speech_id = (
+                body_reference_map.get(description) if body_reference_map else None
+            )
+            if (
+                isinstance(speech_id, int)
+                and not isinstance(speech_id, bool)
+                and int(speech_id) in evidence_speech_ids
+            ):
+                speaker = f" {fact.actor}" if fact.actor else ""
+                reference = f"{evidence_reference(int(speech_id))}{speaker} (same speech)"
+                quoted = json.dumps(description[:120], ensure_ascii=False)
+                dedup_saved_chars += max(0, len(quoted) - len(reference))
+                dedup_references += 1
+                inference_ledger.append(reference)
+                continue
+            inference_ledger.append(json.dumps(description[:120], ensure_ascii=False))
+        joined = " / ".join(inference_ledger) or "None"
+        return (
+            f"- Player Speech & Inferences (Unverified): {joined}\n",
+            {
+                "dedup_saved_chars": dedup_saved_chars,
+                "dedup_references": dedup_references,
+            },
+        )
 
     @staticmethod
     def _hypothesis_section(
@@ -1279,9 +1412,13 @@ class PromptBuilder:
             for death_day, player in state.executions
         )
         public_seer_results = [
-            f"- Public Seer Result [seer_claim:{index}] Day {claim.day}: {claim.claimant} "
-            f"publicly claimed {claim.target} is "
-            f"{'Werewolf' if claim.result == 'wolf' else 'Human'} (unverified)"
+            # TASK-055: 結果行は全員一律で「そのプレイヤー自身の申告」だと明示する。
+            # エンジンが発行した判定と一致するか否かをここへ書くと真偽が漏れるため、
+            # 区別は管理者台帳（role_provenance / private ログ）だけで持つ。
+            f"- Self-reported Verdict [seer_claim:{index}] Day {claim.day}: {claim.claimant} "
+            f"states that {claim.target} is "
+            f"{'Werewolf' if claim.result == 'wolf' else 'Human'} "
+            "(claimed by this player only)"
             for index, claim in enumerate(state.seer_claims, 1)
             if claim.target is not None and claim.result is not None
         ]
@@ -1290,6 +1427,12 @@ class PromptBuilder:
             *claims,
             *public_seer_results,
         ]
+        if claims or public_seer_results:
+            lines.append(
+                "- Provenance: COs and verdicts above are statements made by their claimant, "
+                "not information issued by the game engine. No one in-game can confirm who really "
+                "holds divination results; judge each claim by consistency, votes, deaths, and timing."
+            )
         if public_seer_results:
             lines.append(
                 "- Interpretation: a Madman is divined as Human, so a public 'Human' verdict does not "
@@ -1299,13 +1442,69 @@ class PromptBuilder:
 
     @staticmethod
     def _self_action_memory_text(
-        actor: Player, state: GameState | None, *, public_phase: bool = False
+        actor: Player,
+        state: GameState | None,
+        *,
+        public_phase: bool = False,
+        body_reference_map: dict[str, int] | None = None,
+        evidence_speech_ids: frozenset[int] = frozenset(),
+        use_id_references: bool = False,
+        dedup_tally: list[int] | None = None,
     ) -> str:
         """Present the player's own confirmed action history.
 
         In public phases night-action entries are labelled internal, so a weak
         model cannot paraphrase an attack target into daytime speech.
+
+        TASK-057 (`use_id_references` / `body_reference_map`): 自分の発言要約は本文そのものなので、
+        [CONVERSATION_EVIDENCE] に同じ発言が載っているなら `[ref:sN]` 参照に置き換える（同じ文を
+        2度送るとそのぶん予算を食う）。IDが履歴から落ちた発言（＝要約しか残っていない古い発言）は
+        従来どおり要約を書く。投票・占い・襲撃の行はエンジンの記録で本文を持たないため変えない。
+        一日の行動順と立場の一貫性（何を言い、どこへ投票したか）はどの設定でも同じ形で見せる。
         """
+        reference_map = body_reference_map or {}
+
+        def statement_reference(summary: str) -> tuple[str, int] | None:
+            """要約が履歴の実在発言と同一文なら `[ref:sN]`（証拠に残っているIDだけ）。"""
+            if not use_id_references or not summary or not reference_map:
+                return None
+            candidate = summary.strip()
+            if not candidate:
+                return None
+            speech_id = reference_map.get(candidate)
+            if speech_id is None or int(speech_id) not in evidence_speech_ids:
+                return None
+            saved = max(
+                0, len(candidate[:200]) - len(evidence_reference(int(speech_id)))
+            )
+            if dedup_tally is not None:
+                dedup_tally.append(saved)
+            return evidence_reference(int(speech_id)), saved
+
+        def embed_reference(text: str) -> tuple[str, int] | None:
+            """エンジンが記録した理由文の中に自分の発言本文が入っているとき、そこだけ参照へ縮める。
+
+            投票・占いの理由としてエンジンが発言全文をコピーする形式になっているため、ここを
+            直さないと [CONVERSATION_EVIDENCE] とまったく同じ文を2度送ることになる。前後の
+            誘導文（「投票前に述べた内容」等）はそのまま残すので、要旨の読み方は変わらない。
+            """
+            if not use_id_references or not text or not reference_map:
+                return None
+            best: tuple[str, int] | None = None
+            for body, speech_id in reference_map.items():
+                needle = body.strip()
+                if len(needle) < 24 or needle not in text:
+                    continue
+                if int(speech_id) not in evidence_speech_ids:
+                    continue
+                if best is None or len(needle) > len(best[0]):
+                    best = (needle, int(speech_id))
+            if best is None:
+                return None
+            replacement = evidence_reference(best[1])
+            saved = max(0, len(best[0]) - len(replacement))
+            # 実際に差し替えた側で計上する（使われなかった節約を水増ししないため）
+            return text.replace(best[0], replacement), saved
         if state is None:
             return ""
         memories = tuple(state.player_action_memories.get(actor.name, ()))
@@ -1315,18 +1514,44 @@ class PromptBuilder:
                 "- There are no recorded actions, votes, or statements for you in this game yet.\n"
                 "Do not invent unrecorded vote targets, reasons, or statements. State 'Not in record, cannot determine' if asked.\n\n"
             )
+        dead_names = (
+            frozenset(player.name for player in state.players if not player.is_alive)
+            if state is not None
+            else frozenset()
+        )
         lines: list[str] = []
+        # 同じ理由文を複数の行動行が拾うことがあるので、2度目以降は上の行への短い印にする
+        recorded_reasons: dict[str, str] = {}
         for memory in memories[-8:]:
             action_type = getattr(memory, "action_type", "")
             day = getattr(memory, "day", 1)
             reason = getattr(memory, "reasoning_summary", "") or ""
+            embedded_reason = embed_reference(reason)
+            if embedded_reason is not None:
+                reason = embedded_reason[0]
+                if dedup_tally is not None:
+                    dedup_tally.append(embedded_reason[1])
+            if reason and use_id_references:
+                # 同じ理由文が2度目の行に現れたら、上の行を指す短い印に変える（同じ文の再送を防ぐ）
+                first_label = recorded_reasons.get(reason)
+                if first_label is not None:
+                    saved = max(0, len(reason) - len("(same reason as above)"))
+                    if dedup_tally is not None:
+                        dedup_tally.append(saved)
+                    reason = f"(same reason as the {first_label} entry)"
+                else:
+                    recorded_reasons[reason] = f"Day {day} {action_type}"
             if action_type == "vote":
                 target = getattr(memory, "vote_target", "") or "Unknown"
-                entry = f"- Day {day} Vote: for {target}"
+                dead_tag = " [dead: historical record]" if target in dead_names else ""
+                entry = f"- Day {day} Vote: for {target}{dead_tag}"
                 previous = getattr(memory, "previous_position", "") or ""
                 if previous and previous != target:
                     entry += f" (previously for {previous})"
                     change_reason = getattr(memory, "position_change_reason", "") or ""
+                    embedded_change = embed_reference(change_reason)
+                    if embedded_change is not None:
+                        change_reason = embedded_change[0]
                     entry += (
                         f" Reason for change: {change_reason}"
                         if change_reason
@@ -1335,20 +1560,48 @@ class PromptBuilder:
                 entry += f" Reason: {reason}" if reason else " Original reason was not recorded"
             elif action_type == "seer":
                 target = getattr(memory, "selected_target", "") or "Unknown"
-                entry = f"- Day {day} Divination: {target}"
+                dead_tag = " [dead: historical record]" if target in dead_names else ""
+                entry = f"- Day {day} Divination: {target}{dead_tag}"
                 entry += f" Reason: {reason}" if reason else " Original reason was not recorded"
             elif action_type == "attack":
                 target = getattr(memory, "selected_target", "") or "Unknown"
+                dead_tag = " [dead: historical record]" if target in dead_names else ""
                 entry = (
-                    f"- Day {day} Attack: {target} [internal - never mention in public speech]"
+                    f"- Day {day} Attack: {target}{dead_tag} [internal - never mention in public speech]"
                 )
                 entry += f" Reason: {reason}" if reason else " Original reason was not recorded"
             elif action_type == "claim":
                 summary = getattr(memory, "public_statement_summary", "") or ""
-                entry = f"- Day {day} Public claim: {summary[:200] or 'Recorded'}"
+                claimed = statement_reference(summary)
+                if claimed is None:
+                    # CO行の記録はマーカー除去後の文章なので完全一致しなくても、中に含まれる
+                    # 発言本文の一部だけを参照へ縮める（CO・判定の内容自体は行に残す）
+                    embedded_claim = embed_reference(summary)
+                    if embedded_claim is not None and len(embedded_claim[0]) < len(summary[:200]):
+                        claimed = (embedded_claim[0], embedded_claim[1])
+                        if dedup_tally is not None:
+                            dedup_tally.append(embedded_claim[1])
+                entry = (
+                    f"- Day {day} Public claim: {claimed[0]} [text in [CONVERSATION_EVIDENCE]]"
+                    if claimed
+                    else f"- Day {day} Public claim: {summary[:200] or 'Recorded'}"
+                )
             elif action_type == "discussion":
                 summary = getattr(memory, "public_statement_summary", "") or ""
-                entry = f"- Day {day} Your speech: {summary[:200] or 'Recorded'}"
+                spoken = statement_reference(summary)
+                if spoken is None:
+                    embedded_spoken = embed_reference(summary)
+                    if embedded_spoken is not None and len(embedded_spoken[0]) < len(
+                        summary[:200]
+                    ):
+                        spoken = (embedded_spoken[0], embedded_spoken[1])
+                        if dedup_tally is not None:
+                            dedup_tally.append(embedded_spoken[1])
+                entry = (
+                    f"- Day {day} Your speech: {spoken[0]} (same text as [CONVERSATION_EVIDENCE])"
+                    if spoken
+                    else f"- Day {day} Your speech: {summary[:200] or 'Recorded'}"
+                )
             elif action_type == "pass":
                 entry = f"- Day {day} Speech: Pass"
             else:
@@ -1356,7 +1609,14 @@ class PromptBuilder:
                 entry += f" Reason: {reason}" if reason else ""
             questions = list(getattr(memory, "unanswered_questions", ()) or ())
             if questions:
-                entry += f" Unanswered questions: {', '.join(str(q)[:80] for q in questions[:2])}"
+                formatted_questions = []
+                for q in questions[:2]:
+                    q_str = str(q)[:80]
+                    if any(dead in q_str for dead in dead_names):
+                        formatted_questions.append(f"{q_str} [cannot_answer: dead player]")
+                    else:
+                        formatted_questions.append(q_str)
+                entry += f" Unanswered questions: {', '.join(formatted_questions)}"
             lines.append(entry)
         return (
             "[SELF_ACTION_MEMORY: Your Confirmed Action History (Private - Yourself Only)]\n"
@@ -1372,11 +1632,21 @@ class PromptBuilder:
 
     @staticmethod
     def _own_speech_text(
-        actor: Player, current_day_history: tuple[Message, ...]
-    ) -> str:
-        """List what the player actually said today to preserve consistency."""
+        actor: Player,
+        current_day_history: tuple[Message, ...],
+        *,
+        evidence_speech_ids: frozenset[int] = frozenset(),
+        simplified: bool = False,
+    ) -> tuple[str, dict[str, int]]:
+        """List what the player actually said today to preserve consistency.
+
+        TASK-057 (`simplified`): 同じ発言本文は [CONVERSATION_EVIDENCE] に既に1回載っている。
+ その IDが履歴に残っている限りは本文を再掲せず `[ref:sN]` だけに出す（一貫性のanchorは
+        IDで保たれる）。履歴から落ちた発言を指す空参照は作らないので、その場合は従来どおり書く。
+        返り値は (節のテキスト, 節約診断)。診断は `dedup_saved_chars` / `dedup_references`。
+        """
         own_speeches = [
-            message.content
+            (message.content, getattr(message, "speech_id", None))
             for message in current_day_history
             if message.speaker == actor.name and message.content.strip()
         ]
@@ -1385,17 +1655,135 @@ class PromptBuilder:
                 "[Your Speeches Today (What you said today)]\n"
                 "- None of your speeches are recorded today yet (this turn is your first speech today).\n"
                 "Refer to SELF_ACTION_MEMORY for past statements, votes, and reasons. Do not fabricate unrecorded past actions or 'yesterday's speech'.\n\n"
+            ), {}
+        recent = own_speeches[-3:]
+        ids = [speech_id for _, speech_id in recent]
+        referencable = simplified and bool(ids) and all(
+            isinstance(speech_id, int)
+            and not isinstance(speech_id, bool)
+            and int(speech_id) in evidence_speech_ids
+            for speech_id in ids
+        )
+        if referencable:
+            references = " ".join(
+                evidence_reference(int(speech_id))
+                for speech_id in ids
+                if isinstance(speech_id, int)
             )
+            text = (
+                "[Your Speeches Today (id reference - full text in [CONVERSATION_EVIDENCE])]\n"
+                f"- Your earlier speeches today: {references}.\n"
+                "Do not contradict what you already said; add new evidence, an answer, "
+                "or a point to check rather than repeating it.\n\n"
+            )
+            quoted_chars = sum(len(str(content)[:220]) for content, _ in recent)
+            saved = max(0, quoted_chars - len(references) - 60)
+            return text, {
+                "dedup_saved_chars": saved,
+                "dedup_references": len(ids),
+            }
         lines = [
-            f"- Today speech {index}: {speech[:220]}"
-            for index, speech in enumerate(own_speeches[-3:], start=1)
+            f"- Today speech {index}: {str(content)[:220]}"
+            for index, (content, _) in enumerate(recent, start=1)
         ]
         return (
             "[Your Speeches Today (What you said today - Unverified content)]\n"
             + "\n".join(lines)
             + "\nDo not contradict your past statements or invent statements you never made. "
             "Avoid repeating the exact same points; add new evidence, answers, or points to check.\n\n"
+        ), {}
+
+    @staticmethod
+    def _info_boundary_section(actor: Player, state: GameState | None) -> str:
+        """TASK-055: 「実際に知っている非公開情報」「自分が公開した主張」を短い別欄で分ける。
+
+        情報は3行前後にまとめ、本文の再掲はしない（コンテキスト節約）。
+        役職を明かすか、ブラフするか、誰を疑うかはモデルの判断に委ね、
+        この欄で口調・論点・結論を指定することはない。
+        """
+        if state is None:
+            return ""
+        allow_bluff = bool(getattr(state, "allow_bluff_role_claim", True))
+        own_claims = [claim for claim in state.public_role_claims if claim.claimant == actor.name]
+        role_label_by_value = {role.value: name for role, name in ROLE_NAMES_EN.items()}
+        claimed_roles = ", ".join(
+            role_label_by_value.get(claim.claimed_role, claim.claimed_role)
+            for claim in own_claims
+        ) or "none yet"
+        claimed_verdicts = "; ".join(
+            f"{claim.target}={'Werewolf' if claim.result == 'wolf' else 'Human'}"
+            for claim in own_claims
+            if claim.target is not None and claim.result is not None
         )
+        claimed_parts = f"roles CO: {claimed_roles}"
+        if claimed_verdicts:
+            claimed_parts += f"; verdicts stated: {claimed_verdicts}"
+        if is_japanese_language(actor.response_language):
+            lines = [
+                "[情報の境界: 実際に知っている情報 / 公開済みの自分の主張]",
+                "- 本人だけに発行された非公開情報: 自分の役職と、自分が実際に行った夜行動の結果（エンジンが発行したもの）。",
+                f"- これまでにあなたが公開した主張（未検証）: {claimed_parts}。",
+                (
+                    "- この設定ではどの役職のCOも自由（実際の占い結果を持たないまま判定を申告してもよい）。"
+                    "ただし申告はあなたの発言として記録され、エンジンの発行情報としては登録されない。"
+                    if allow_bluff
+                    else "- この設定では、その役職の実保有者だけがCOと判定を公開できる。"
+                    "非保有者のCO・結果行は公開前に除去され、本文はそのまま残る。"
+                ),
+                "- 公開するか、ブラフするか、黙るか、誰を疑うかはあなたの判断で選べる。この欄は口調・論点・結論を決めない。",
+            ]
+        else:
+            lines = [
+                "[INFO_BOUNDARIES: what you actually know vs. what you have claimed]",
+                "- Issued to you alone by the engine: your role and the outcomes of your own night actions.",
+                f"- What you already published (unverified): {claimed_parts}.",
+                (
+                    "- Current rule: any role CO is free, including a Seer verdict you do not actually hold. "
+                    "Such a line is recorded as your public statement, never as engine-issued evidence."
+                    if allow_bluff
+                    else "- Current rule: only the true holder of a role may publish its CO or verdict; "
+                    "lines from non-holders are removed before publishing while your body stays intact."
+                ),
+                "- Revealing, bluffing, staying silent, and whom to suspect remain your own choice; "
+                "this section prescribes no tone, points, or conclusion.",
+            ]
+        return "\n".join(lines) + "\n\n"
+
+    @staticmethod
+    def _day_timeline_section(
+        actor: Player, state: GameState | None
+    ) -> tuple[str, dict[str, object]]:
+        """TASK-056: 発言時点の時系列欄を作る（既知の先行発言と未発生イベントを分ける）。
+
+        全文は再掲せず、時点・ID・短い要約だけを上限内に収める。`timeline_policy=\"off\"`
+        では節自体を出さない（A/B比較用の旧挙動）。口調・論点・結論を決める指示は含めず、
+        本文の是正や再生成要求も行わない（観測のための境界表示のみ）。
+        """
+        diagnostics: dict[str, object] = {
+            "day_timeline_chars": 0,
+            "day_timeline_lines": 0,
+            "day_timeline_policy": DAY_TIMELINE_POLICY_OFF,
+        }
+        if state is None:
+            return "", diagnostics
+        policy = normalize_day_timeline_policy(
+            getattr(state, "timeline_policy", DAY_TIMELINE_POLICY_DEFAULT)
+        )
+        diagnostics["day_timeline_policy"] = policy
+        if policy == DAY_TIMELINE_POLICY_OFF:
+            return "", diagnostics
+        block, rendered = render_timeline_section(
+            state.timeline_snapshot(actor.name), language=actor.response_language
+        )
+        diagnostics.update(rendered)
+        diagnostics["day_timeline_policy"] = policy
+        timeline = getattr(state, "public_timeline", None)
+        if timeline is not None:
+            # プロンプト組み立てごとに計上する（予算再構築でもう一度作る場合は2回分になる）
+            timeline.section_chars_total += int(rendered.get("day_timeline_chars") or 0)
+            timeline.section_lines_total += int(rendered.get("day_timeline_lines") or 0)
+            timeline.section_requests += 1
+        return block, diagnostics
 
     @staticmethod
     def _private_seer_block(
@@ -1481,14 +1869,35 @@ class PromptBuilder:
         return "\n".join(lines) + "\n\n"
 
     @staticmethod
-    def _reasoning_memo_text(actor: Player, state: GameState | None) -> str:
+    def _reasoning_memo_text(
+        actor: Player,
+        state: GameState | None,
+        *,
+        evidence_speech_ids: frozenset[int] = frozenset(),
+        reference_round_evidence: bool = False,
+    ) -> tuple[str, dict[str, int]]:
+        """派生推理メモを組み立てる（本人のメモはそのまま、参考行だけ参照化する）。
+
+        TASK-057 (`reference_round_evidence`): `current_round_evidence` は各発言の本文を
+        そのまま持っており、[CONVERSATION_EVIDENCE] とまったく同じ文を2度送っていた。
+        IDが履歴に残っている発言だけは `[speech:N] 名前 [ref:sN]` に縮める（どの発言を
+        根拠にしたかはIDで追えるので、議論の一貫性は落ちない）。
+        返り値は (節のテキスト, 節約診断)。
+        """
         if state is None or not state.reasoning_memory_enabled:
-            return ""
+            return "", {}
         if actor.name not in state.reasoning_memos:
             state.refresh_reasoning_memos()
         memo = state.reasoning_memos.get(actor.name)
         if memo is None:
             memo = ReasoningMemo()
+        round_evidence, memo_dedup = (
+            evidence_entries_to_references(
+                memo.current_round_evidence, evidence_speech_ids
+            )
+            if reference_round_evidence
+            else (list(memo.current_round_evidence), {})
+        )
         payload = {
             # TASK-047: 確定事実・公開主張の本文は [CLAIM_LEDGER] に1回だけ存在する。
             # ここはIDのみ渡し、同じ証拠の再掲を省く（追跡性はIDで維持される）。
@@ -1498,7 +1907,7 @@ class PromptBuilder:
             "unanswered_questions": memo.unresolved_questions,
             "next_targets_to_check": memo.next_targets,
             "updates_since_previous_turn": memo.updates,
-            "current_round_evidence": memo.current_round_evidence,
+            "current_round_evidence": round_evidence,
         }
         private_payload = _internalize_private_facts(memo.private_role_facts)
         # モデル自身の推理メモ（本人限定）をプロンプトに含める
@@ -1533,7 +1942,7 @@ class PromptBuilder:
             f"{json.dumps(private_payload, ensure_ascii=False)}\n"
             + own_memo_block
             + "\n"
-        )
+        ), memo_dedup
 
     @classmethod
     def build_discussion_prompt(
@@ -1549,12 +1958,19 @@ class PromptBuilder:
         free_form_priority: bool = False,
         question_hint_mode: str = DEFAULT_QUESTION_HINT_MODE,
         include_topic_summary: bool = True,
+        prompt_contract_policy: str = PROMPT_CONTRACT_POLICY_DEFAULT,
+        optional_sections_dropped: tuple[str, ...] = (),
     ) -> PromptContext:
         if not actor.is_alive:
             raise ValueError(f"Dead player {actor.name} cannot act.")
 
         player_history = tuple(
             message for message in conversation_history if message.speaker != "system"
+        )
+        dead_players = (
+            tuple(player.name for player in state.players if not player.is_alive)
+            if state is not None
+            else ()
         )
         conversation_evidence, context_diagnostics = cls._discussion_evidence(
             conversation_history, context_strategy, state, evidence_char_budget
@@ -1577,6 +1993,31 @@ class PromptBuilder:
         directly_addressed = cls._is_directed_to_player(
             actor, previous_message, current_day_history
         )
+        # TASK-057: 契約ポリシーと「発言本文が実際に履歴へ載っているID」を決める。
+        # simplified では同じ本文を他の節で再掲せず `[ref:sN]` に差し替える（節約）。
+        contract_policy = normalize_prompt_contract_policy(prompt_contract_policy)
+        simplified = contract_policy != PROMPT_CONTRACT_POLICY_LEGACY
+        evidence_speech_ids = frozenset(
+            int(speech_id)
+            for speech_id in (context_diagnostics.get("evidence_speech_ids") or ())
+            if isinstance(speech_id, int) and not isinstance(speech_id, bool)
+        )
+        dedup_saved_chars = 0
+        dedup_references = 0
+        quoted_previous_speech = (
+            json.dumps(previous_message.content, ensure_ascii=False)
+            if previous_message is not None
+            else ""
+        )
+        if previous_message is not None and simplified:
+            quoted_previous_speech, referenced, saved = quote_or_reference(
+                json.dumps(previous_message.content, ensure_ascii=False),
+                getattr(previous_message, "speech_id", None),
+                evidence_speech_ids,
+            )
+            if referenced:
+                dedup_references += 1
+                dedup_saved_chars += saved
         own_seer_results = (
             state.seer_results
             if actor.role is Role.SEER and state is not None
@@ -1632,8 +2073,10 @@ class PromptBuilder:
                 "- Use '[CO] None' if not claiming and '[CO] Hold' if holding a Seer CO.\n"
                 "- Publish a Seer verdict only as '[CO] Seer CO' plus '[RESULT] ...'; a verdict without a CO is rejected.\n"
                 "- Never leave [BODY] empty and never merge CO and body into one block.\n"
-                "- [REASONING] is optional and private to you. Write your inner thoughts about suspicion, concerns, and strategy.\n"
-                "- Do NOT include [REASONING] content in [BODY]. Only in-game dialogue goes in [BODY].\n"
+                # TASK-057: 「[REASONING] を [BODY] に書かない」は [BEHAVIOR_CONTRACT] が1度だけ
+                # 書くので、simplified ではここでは繰り返さない（本文必須の記述は出力形式の一部として残す）。
+                + "- [REASONING] is optional and private to you. Write your inner thoughts about suspicion, concerns, and strategy.\n"
+                + ("" if simplified else "- Do NOT include [REASONING] content in [BODY]. Only in-game dialogue goes in [BODY].\n")
             )
         else:
             output_format_instruction = (
@@ -1651,12 +2094,24 @@ class PromptBuilder:
             # TASK-043: 確定事実・公開主張は [CLAIM_LEDGER] が日付付きで列挙するため、
             # FactLedgerの同じリストは議論プロンプトから省く（推測リストは別セクションで維持）。
             include_structured_ledger=False,
+            # TASK-057: 直前の発言本文は [CONVERSATION_EVIDENCE] に1回だけ載せる。
+            # 同じ発言をヘッダーで繰り返すと、そのぶん予算を食い、注意も分散する。
+            previous_speech_override=(
+                quoted_previous_speech
+                if simplified and quoted_previous_speech.startswith(REFERENCE_PREFIX)
+                else None
+            ),
         )
         if fact_header.startswith(RULE_CARD):
             fact_header = fact_header[len(RULE_CARD) :]
         current_question = (
             f"- Questioner: {previous_message.speaker}\n"
-            f"- Quoted Speech: {json.dumps(previous_message.content, ensure_ascii=False)}\n"
+            f"- Quoted Speech: {quoted_previous_speech}\n"
+            + (
+                "- Note: Questioner is dead [cannot_answer: historical_only]\n"
+                if previous_message is not None and previous_message.speaker in dead_players
+                else ""
+            )
             if previous_message is not None
             and previous_message.speaker != actor.name
             and (
@@ -1688,8 +2143,23 @@ class PromptBuilder:
             if actor.role is Role.SEER and state is not None
             else ""
         )
+        # TASK-057: 「自分が実際に言った文 / 誰の発言か」を指すID対応表は複数の節で使うため
+        # ここで1回だけ作る（本文の二重掲載を ID参照へ変える判定に使う）。
+        speech_id_by_body = {
+            message.content.strip(): int(message.speech_id)
+            for message in player_history
+            if isinstance(getattr(message, "speech_id", None), int)
+            and not isinstance(getattr(message, "speech_id", None), bool)
+        }
         claim_ledger_text = cls._discussion_claim_ledger(state)
-        inference_text = cls._inference_ledger_text(state, actor)
+        inference_text, inference_dedup = cls._inference_ledger_text(
+            state,
+            actor,
+            body_reference_map=speech_id_by_body if simplified else None,
+            evidence_speech_ids=evidence_speech_ids,
+        )
+        dedup_saved_chars += int(inference_dedup.get("dedup_saved_chars") or 0)
+        dedup_references += int(inference_dedup.get("dedup_references") or 0)
         hypothesis_block, hypothesis_diagnostics = cls._hypothesis_section(state, actor, day)
         # TASK-048: 既出論点の要約は観測情報として1回だけ添える（論点・口調の強制しない）。
         topic_block, topic_diagnostics = (
@@ -1697,7 +2167,18 @@ class PromptBuilder:
             if include_topic_summary
             else ("", {})
         )
-        continuity_memo = cls._reasoning_memo_text(actor, state)
+        continuity_memo, memo_dedup = cls._reasoning_memo_text(
+            actor,
+            state,
+            evidence_speech_ids=evidence_speech_ids,
+            reference_round_evidence=simplified,
+        )
+        dedup_saved_chars += int(memo_dedup.get("dedup_saved_chars") or 0)
+        dedup_references += int(memo_dedup.get("dedup_references") or 0)
+        # TASK-055: 実際に知っている情報と自分の公開主張を分ける短い欄（本文の再掲はしない）
+        info_boundary_text = cls._info_boundary_section(actor, state)
+        # TASK-056: 発言時点の時系列欄（既知の先行発言と、まだ起きていないイベントを分ける）
+        timeline_block, timeline_diagnostics = cls._day_timeline_section(actor, state)
         context_diagnostics.update(hypothesis_diagnostics)
         context_diagnostics.update(topic_diagnostics)
         context_diagnostics["claim_ledger_chars"] = len(claim_ledger_text)
@@ -1705,6 +2186,48 @@ class PromptBuilder:
         context_diagnostics["hypothesis_ledger_chars"] = len(hypothesis_block)
         context_diagnostics["topic_summary_chars"] = len(topic_block)
         context_diagnostics["continuity_memo_chars"] = len(continuity_memo)
+        context_diagnostics["info_boundary_chars"] = len(info_boundary_text)
+        # TASK-056: 時系列欄の診断（時点・先行発言数・未発生イベント数）をマージする
+        context_diagnostics.update(timeline_diagnostics)
+        # TASK-057: 自分の発言欄は履歴のIDで参照できるなら本文を再掲しない（節約と一貫性の両立）
+        own_speech_text, own_speech_dedup = cls._own_speech_text(
+            actor,
+            current_day_history,
+            evidence_speech_ids=evidence_speech_ids,
+            simplified=simplified,
+        )
+        dedup_saved_chars += int(own_speech_dedup.get("dedup_saved_chars") or 0)
+        dedup_references += int(own_speech_dedup.get("dedup_references") or 0)
+        context_diagnostics["own_speech_chars"] = len(own_speech_text)
+        # TASK-057: 自分の行動記録は「自分が実際に言った文」をそのまま持つため、証拠に同じ発言が
+        # 残っているなら ID参照へ変えて二重送信を防ぐ（投票・占いの行はエンジン記録なので不変）。
+        # ID対応表 speech_id_by_body は推測行と同じものを使い回す（同じ表を2度作らない）。
+        self_action_dedup: list[int] = []
+        self_action_text = cls._self_action_memory_text(
+            actor,
+            state,
+            public_phase=True,
+            body_reference_map=speech_id_by_body if simplified else None,
+            evidence_speech_ids=evidence_speech_ids,
+            use_id_references=simplified,
+            dedup_tally=self_action_dedup,
+        )
+        dedup_saved_chars += sum(self_action_dedup)
+        dedup_references += len(self_action_dedup)
+        context_diagnostics["self_action_memory_chars"] = len(self_action_text)
+        # simplified では [BEHAVIOR_CONTRACT] が強い制約を1度だけ書き、下の節で繰り返していた
+        # 同じ命令（三人称禁止・記録外の情報を使わない・[REASONING]を[BODY]に書かない等）を落とす。
+        # 口調・文量・論点・結論の自由はそのまま（むしろ自由行で明示する）。
+        behavior_contract_block, behavior_contract_diagnostics = (
+            render_behavior_contract(
+                language=actor.response_language,
+                hint_mode=hint_mode,
+                include_claim=include_claim,
+                free_personality=is_free_personality(actor.personality_profile),
+            )
+            if simplified
+            else ("", {})
+        )
         user_prompt = (
             "[SYSTEM_RULES]\n"
             + RULE_CARD
@@ -1723,11 +2246,13 @@ class PromptBuilder:
             + "\n\n"
             + hypothesis_block
             + topic_block
-            + cls._self_action_memory_text(actor, state, public_phase=True)
+            + self_action_text
             + private_seer_block
+            + info_boundary_text
             + continuity_memo
-            + cls._own_speech_text(actor, current_day_history)
+            + own_speech_text
             + day1_first_turn_block
+            + timeline_block
             + (
                 "[Full Current Round Dialogue]\n"
                 "Review the unshortened public speech from this round; reflect anomalies, counter-evidence, and new reasons into your inferences.\n"
@@ -1749,13 +2274,16 @@ class PromptBuilder:
             + (
                 "[Direct Answer to Previous Question]\n"
                 f"- Target: {previous_message.speaker}\n"
-                f"- Question: {json.dumps(previous_message.content, ensure_ascii=False)}\n\n"
+                f"- Question: {quoted_previous_speech}\n\n"
                 if hint_mode == QUESTION_HINT_STRICT
                 and directly_addressed
                 and previous_message is not None
                 else ""
             )
-            + leak_boundary_block(actor, actor.response_language)
+            + leak_boundary_block(
+                actor, actor.response_language, lean=simplified
+            )
+            + behavior_contract_block
             + output_format_instruction
             + (
                 "[REASONING_MEMO_GUIDANCE]\n"
@@ -1765,7 +2293,8 @@ class PromptBuilder:
                 "- Who appears to be defending whom and why that matters\n"
                 "- Your planned approach going forward (what to ask, what to vote on)\n"
                 "- Build on YOUR_PREVIOUS_REASONING_MEMO if present; update rather than repeat\n"
-                "Keep [REASONING] concise (2-5 sentences). Do NOT put reasoning in [BODY].\n"
+                "Keep [REASONING] concise (2-5 sentences).\n"
+                + ("" if simplified else "Do NOT put reasoning in [BODY].\n")
             )
             + f"Based on the above, state your thoughts on the current situation in {actor.response_language}.\n"
             + "[Discussion Guidelines & Logical Reasoning]\n"
@@ -1786,20 +2315,40 @@ class PromptBuilder:
                 else ""
             )
             + "- If you cannot answer, you may output only 'Pass' instead of staying silent.\n"
-            "- Do not describe yourself as a third person or invent statements or events that did not occur.\n"
-            f"- Your name '{actor.name}' refers to yourself. Refer to yourself in the first person (I/me/my); "
-            f"avoid third-person self-references like '{actor.name} is suspected'.\n"
-            "- Use only information presented in this game. Do not base claims on past games, prior roles, training data, or real-world individuals.\n"
-            "- Refer only to past votes recorded in the ledger.\n"
+            # TASK-057: 下の3行は [BEHAVIOR_CONTRACT] が1度だけ書く制約（一人称・記録外の
+            # 情報を使わない）と同じ内容なので、simplified では繰り返さない。
+            + (
+                ""
+                if simplified
+                else (
+                    "- Do not describe yourself as a third person or invent statements or events that did not occur.\n"
+                    f"- Your name '{actor.name}' refers to yourself. Refer to yourself in the first person (I/me/my); "
+                    f"avoid third-person self-references like '{actor.name} is suspected'.\n"
+                    "- Use only information presented in this game. Do not base claims on past games, prior roles, training data, or real-world individuals.\n"
+                )
+            )
+            + "- Refer only to past votes recorded in the ledger.\n"
             "- COs and divination results are public claims. Mention dead players' roles only as speculation.\n"
             "- Do not ask dead players questions or demand answers from them.\n"
             "- Even with limited info, avoid repeated empty wait-and-see statements.\n"
             + cls._discussion_body_line(actor, hint_mode)
-            + "- [BODY] must contain only in-game dialogue. Do not include meta-talk about system settings, generation parameters, or discussion progress, or template quotes.\n"
-            "- Match your votes, divination results, and past statements against SELF_ACTION_MEMORY and your speech record. Do not fabricate unrecorded past actions.\n"
-            "- Speak naturally in your own style.\n"
-            "- If you pass, output only 'Pass' without punctuation or explanation.\n"
-            "- Prioritize your team's victory above all else.\n"
+            + (
+                "- [BODY] holds only in-game dialogue; no template quotes.\n"
+                if simplified
+                else "- [BODY] must contain only in-game dialogue. Do not include meta-talk about system settings, generation parameters, or discussion progress, or template quotes.\n"
+            )
+            + (
+                "- Match your votes and past statements against SELF_ACTION_MEMORY rather than inventing actions.\n"
+                if simplified
+                else "- Match your votes, divination results, and past statements against SELF_ACTION_MEMORY and your speech record. Do not fabricate unrecorded past actions.\n"
+            )
+            + "- Speak naturally in your own style.\n"
+            + (
+                ""
+                if simplified
+                else "- If you pass, output only 'Pass' without punctuation or explanation.\n"
+            )
+            + "- Prioritize your team's victory above all else.\n"
             + (
                 "- If making a role CO, include the standard format in your message. claim_role tool is secondary; do not omit written CO in dialogue.\n"
                 "- Non-Seer format: Claimed role followed by 'CO: Reason=reason' (e.g., Madman CO: Reason=counter-claim). "
@@ -1831,6 +2380,42 @@ class PromptBuilder:
             )
             + language_tail(actor.response_language)
         )
+        # TASK-057: ここで optional 節の段階除去を適用する（core の本文には触れない）。
+        # そのあと組み上がりプロンプトを1回だけ測って契約診断にまとめる。
+        removed_sections: tuple[str, ...] = ()
+        removed_chars = 0
+        if simplified and optional_sections_dropped:
+            user_prompt, removed_sections, removed_chars = drop_sections(
+                user_prompt, optional_sections_dropped
+            )
+        if (
+            simplified
+            and previous_message is not None
+            and quoted_previous_speech.startswith(REFERENCE_PREFIX)
+        ):
+            # TASK-057: 直前の発言は [Game System Confirmed Facts]・[Current Question]・
+            # (strict時) [Direct Answer to Previous Question] の各箇所に同じ本文が出ていた。
+            # 参照へ置き換えたので、出現回数ぶんが実節約になる（1箇所目は上で計上済み）。
+            sites = max(0, user_prompt.count(quoted_previous_speech) - 1)
+            raw_body = json.dumps(previous_message.content, ensure_ascii=False)
+            saved_per_site = max(0, len(raw_body) - len(quoted_previous_speech))
+            dedup_saved_chars += saved_per_site * sites
+            dedup_references += sites
+        context_diagnostics["optional_removed_chars"] = int(removed_chars)
+        current_turn = int(getattr(state, "discussion_turn", 1) or 1) if state else 1
+        context_diagnostics["expired_temporary_guidance"] = list(
+            expired_sections_present(user_prompt, day, current_turn)
+        )
+        context_diagnostics.update(
+            ContractDiagnostics(
+                policy=contract_policy,
+                dropped=removed_sections,
+                dedup_saved_chars=dedup_saved_chars,
+                dedup_references=dedup_references,
+                contract_findings=behavior_contract_diagnostics,
+            ).apply_to(user_prompt)
+        )
+
         return PromptContext(
             system_prompt=cls.build_system_prompt(
                 actor, include_personality=True
@@ -1875,6 +2460,15 @@ class PromptBuilder:
             )
             or "None"
         )
+        # TASK-055: ブラフCOを許すかはルール設定（allow_bluff_role_claim）で決める。
+        # 既定は許可で、どの役職のCO・対抗COも自由。不許可の設定では保有者だけが公開できる。
+        allow_bluff_claim = bool(getattr(state, "allow_bluff_role_claim", True))
+        claim_freedom_line = (
+            "Anyone may claim or counter-claim in Werewolf."
+            if allow_bluff_claim
+            else "Under this rule only the true holder of a role may publish its CO or verdict; "
+            "a claim from a non-holder is removed before publishing."
+        )
         user_prompt = (
             language_directive(actor.response_language)
             + f"[Day CO Decision] Day {day}. Living players: {', '.join(alive_players)}\n"
@@ -1884,8 +2478,10 @@ class PromptBuilder:
                 if actor.role is Role.SEER
                 else ""
             )
-            + "[Instructions] Before writing your discussion body, decide on your public role claim. Anyone may claim or counter-claim in Werewolf.\n"
-            f"Output at most 2 lines from the following options strictly in {actor.response_language}:\n"
+            + "[Instructions] Before writing your discussion body, decide on your public role claim. "
+            + claim_freedom_line
+            + "\n"
+            + f"Output at most 2 lines from the following options strictly in {actor.response_language}:\n"
             "No CO: '[CO] None' / Hold: '[CO] Hold' / To claim: "
             "'[CO] Seer CO', '[CO] Werewolf CO', '[CO] Madman CO', or '[CO] Villager CO'.\n"
             "Only if claiming Seer AND publishing your verdict simultaneously, add a 2nd line: "

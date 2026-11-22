@@ -52,6 +52,17 @@ from .discussion_novelty import (
     classify_novelty,
     normalize_novelty_policy,
 )
+# TASK-057: プロンプト契約（セクション台帳・証拠ID参照・段階除去・静的検査）
+from .prompt_contract import (
+    PROMPT_CONTRACT_POLICIES,
+    PROMPT_CONTRACT_POLICY_DEFAULT,
+    PROMPT_CONTRACT_POLICY_LEGACY,
+    PROMPT_CONTRACT_POLICY_SIMPLIFIED,
+    PROMPT_SECTIONS,
+    PromptSectionMeta,
+    normalize_prompt_contract_policy,
+    prompt_contract_policy_label,
+)
 from .models import (
     ActionCandidateSet,
     ClaimLedger,
@@ -102,6 +113,14 @@ __all__ = [
     "NOVELTY_CLASSES",
     "NOVELTY_POLICIES",
     "NOVELTY_MEASURED_ISSUES",
+    "PROMPT_CONTRACT_POLICIES",
+    "PROMPT_CONTRACT_POLICY_DEFAULT",
+    "PROMPT_CONTRACT_POLICY_LEGACY",
+    "PROMPT_CONTRACT_POLICY_SIMPLIFIED",
+    "PROMPT_SECTIONS",
+    "PromptSectionMeta",
+    "normalize_prompt_contract_policy",
+    "prompt_contract_policy_label",
     "UNVERIFIED_HYPOTHESIS_AS_FACT",
     "ActionKind",
     "ActionParser",

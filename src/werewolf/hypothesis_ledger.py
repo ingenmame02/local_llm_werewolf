@@ -116,6 +116,9 @@ class HypothesisRecord:
     first_day: int = 1
     last_updated_day: int = 1
     actionable: bool = True
+    # TASK-056: この解釈が「いつ」上がってきたか（D日Tターン#時系列順）。同じ論点の
+    # 要約が新しい事実として読み替えられないための発生時点だが、本文の追記はしない。
+    observed_at: str = ""
 
     def signature(self) -> tuple[object, ...]:
         """前回提示からの差分判定用（立場・本文・確信度・反証状態・証拠集合）。"""
@@ -158,6 +161,7 @@ class HypothesisLedger:
         evidence_ids: tuple[str, ...] | list[str],
         confidence: str = "medium",
         visibility: str = VISIBILITY_PUBLIC,
+        observed_at: str = "",
     ) -> bool:
         """仮説を登録する。同一生成者・対象・立場・本文の再掲は証拠IDの統合のみ行う。"""
         key = self.record_key(actor, subject, stance)
@@ -200,6 +204,7 @@ class HypothesisLedger:
             visibility=visibility,
             first_day=day,
             last_updated_day=day,
+            observed_at=observed_at or f"D{day}T{turn}",
         )
         return True
 
@@ -354,6 +359,11 @@ class HypothesisLedger:
                 "counter-evidence "
                 + ", ".join(record.counter_evidence_ids[:EVIDENCE_MAX_PER_LINE])
             )
+        if record.observed_at:
+            # TASK-056: 観測時点を示す（古い解釈を新しい事実として扱わないための補助）
+            parts.append(f"observed {record.observed_at}")
+        if record.refutation_status == REFUTATION_HISTORICAL:
+            parts.append("[historical_only]")
         return "- " + "; ".join(parts)
 
     def render_for(self, actor_name: str) -> tuple[str, dict[str, object]]:
@@ -378,7 +388,8 @@ class HypothesisLedger:
         lines = [
             "[HYPOTHESIS_LEDGER: unverified interpretations, never confirmed facts]",
             "Confidence is a reference hint only - your conclusion, tone and reasoning stay yours. "
-            "IDs point to [CLAIM_LEDGER] / [CONVERSATION_EVIDENCE] above.",
+            "IDs point to [CLAIM_LEDGER] / [CONVERSATION_EVIDENCE] above. An `observed DdTt` "
+            "stamp marks when the item was raised, so an older line is never a new fact.",
         ]
         # 初回のみ自分の仮説一覧を渡す。以降は「前回から変わった仮説」の差分だけ示す
         # （同じ状態の再掲を省く。モデルの論点・口調には干渉しない）。
@@ -432,6 +443,10 @@ class HypothesisLedger:
             "hypothesis_dead_references_suppressed": self.dead_references_suppressed,
             "hypothesis_private_references_suppressed": len(self._private_suppressed_ids),
             "hypothesis_contradictions": len(self.contradictions),
+            # TASK-056: 発生時点つきのレコード数（古い要約を新事実として扱わないための観測）
+            "hypothesis_records_with_observed_time": sum(
+                1 for record in self.records.values() if record.observed_at
+            ),
             "hypothesis_status_counts": {
                 status: statuses.count(status)
                 for status in (
@@ -469,6 +484,7 @@ class HypothesisLedger:
                     "turn": record.turn,
                     "first_day": record.first_day,
                     "last_updated_day": record.last_updated_day,
+                    "observed_at": record.observed_at,
                     "evidence_ids": list(record.evidence_ids),
                     "confidence": record.confidence,
                     "confidence_score": record.confidence_score,

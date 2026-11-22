@@ -309,7 +309,9 @@ def test_duplicate_evidence_suppressed_while_traceable() -> None:
     ]
     assert len(claim_lines) == 2
     assert sum("Player 3=Human" in line for line in claim_lines) == 0
-    assert "Day 1: Player 1 publicly claimed Player 3 is Human" in context.user_prompt
+    # TASK-055: 公開された占い結果行は全員一律「そのプレイヤー自身の申告」として表示される
+    assert "Day 1: Player 1 states that Player 3 is Human" in context.user_prompt
+    assert "(claimed by this player only)" in context.user_prompt
 
 
 def test_hypothesis_block_does_not_constrain_conclusion_or_tone() -> None:
