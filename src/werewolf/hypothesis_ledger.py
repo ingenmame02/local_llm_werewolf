@@ -388,7 +388,7 @@ class HypothesisLedger:
         lines = [
             "[HYPOTHESIS_LEDGER: unverified interpretations, never confirmed facts]",
             "Confidence is a reference hint only - your conclusion, tone and reasoning stay yours. "
-            "IDs point to [CLAIM_LEDGER] / [CONVERSATION_EVIDENCE] above. An `observed DdTt` "
+            "IDs point to [CLAIM_LEDGER] / the speech section below. An `observed DdTt` "
             "stamp marks when the item was raised, so an older line is never a new fact.",
         ]
         # 初回のみ自分の仮説一覧を渡す。以降は「前回から変わった仮説」の差分だけ示す

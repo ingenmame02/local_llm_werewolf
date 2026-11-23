@@ -2503,14 +2503,27 @@ class GameEngine:
             tuple(player.name for player in self.state.players),
         )
         timeline = self.state.public_timeline
-        timeline.reference_checks += 1
-        timeline.bodies_checked += 1
+        # TASK-059: 本文が空のときは検査そのものが空振りなので、検査対象には数えず
+        # 「なぜ数えなかったか」だけを積む（誤検出率を分母込みで正確に見るため）。
+        if str(message.content or "").strip():
+            timeline.reference_checks += 1
+            timeline.bodies_checked += 1
+        else:
+            timeline.checks_skipped_empty_body += 1
         # この検査は本文を触っていない（公開文字列＝モデル応答から抽出した本文そのもの）
         timeline.bodies_kept_unmodified += 1
         timeline.future_reference_findings += len(report.findings)
         timeline.attributed_references += report.attributed_references
         timeline.unresolvable_references += report.unresolvable_references
+        # TASK-059: 引用時点の内訳と観察専用カウンタ（婉曲・一般名指し）を台帳へ積む
+        timeline.record_observation(report)
         fields: dict[str, object] = {"timeline_observed": True, "timeline_policy": policy}
+        # TASK-059: 公開本文が空だった場合は検査自体が空振りなので、その理由をイベントへ
+        # 残す（検査対象数を水増しせず「なぜ数えなかったか」を説明できるようにする）。
+        # 引用時点の内訳と観察値（婉曲での仮定引用・未発言者名の一般言及）は report側が持つ。
+        fields["timeline_checks_skipped_empty_body"] = bool(
+            not str(message.content or "").strip()
+        )
         fields.update(snapshot.to_log_fields())
         fields.update(report.to_log_fields())
         return fields

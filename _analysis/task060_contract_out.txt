@@ -1,0 +1,25 @@
+theory head: "[Werewolf Theory Card (Guidelines for inference, not confirmed facts)]\n- A 'Huma"
+theory len: 2300
+rule head: '[Rules]\nAll players are AI. Stay calm and avoid hallucinations.\n8 players: 2 Wer'
+tier: optional
+stage 1 ('previous_topics', 'reasoning_guidance')
+stage 2 ('previous_topics', 'reasoning_guidance', 'hypothesis_ledger', 'inference_line', 'werewolf_theory_card')
+stage 3 ('previous_topics', 'reasoning_guidance', 'hypothesis_ledger', 'inference_line', 'werewolf_theory_card', 'day1_first_turn_guidance', 'first_night_guidance', 'direct_answer')
+stage 4 ('previous_topics', 'reasoning_guidance', 'hypothesis_ledger', 'inference_line', 'werewolf_theory_card', 'day1_first_turn_guidance', 'first_night_guidance', 'direct_answer', 'integrity_alerts', 'continuity_memo')
+--- contract lines (default) ---
+[secrecy] - Strong: your true role or camp, unpublished verdicts, night actions and your ally never enter public speech.
+[secrecy] - Verdict words belong only inside the CO and RESULT blocks.
+[source_discipline] - Strong: speak only from the ledger and evidence in this prompt. For anything absent say 'Not in record, cannot determine'; invent no statements or events, and never use past games or outside knowledge as evidence.
+[self_reference] - Strong: talk about yourself in first person, never as a third party or another player.
+[format] - Strong: keep the required output blocks in the order given below.
+[format] - Strong: write the discussion body in the language requested below.
+[format] - Strong: what you write in [REASONING] stays out of [BODY].
+[source_discipline] - Strong: talking about system settings, prompt instructions or generation conditions is not in-game speech.
+[pass] - Only when passing, output exactly 'Pass' or縲後ヱ繧ｹ縲溝lone with nothing else.
+[format] - A written CO line stays in its own block and never merges into the body.
+[format] - Never leave the discussion body empty unless you pass.
+[expression] - Free: tone, length, structure, which points to raise, whom to suspect and what you conclude are yours to choose and may change every turn.
+[structure] - This block lists only the minimal strong contract; it sets no reasoning order and no speaking template.
+[consistency] - Consistency: your past speeches, COs and votes are recorded above; prefer updating them with new evidence over repeating or contradicting them.
+--- rendered in Japanese ---
+("[BEHAVIOR_CONTRACT - 蠑ｷ縺丞ｮ医ｋ螂醍ｴ・・縺薙％縺縺・/ 縺昴ｌ莉･螟悶・閾ｪ逕ｱ]\n- 蠑ｷ縺・･醍ｴ・ 閾ｪ蛻・・逵溘・蠖ｹ閨ｷ繝ｻ髯｣蝟ｶ縲∵悴蜈ｬ髢九・蛻､螳壹∝､懊・陦悟虚縲∽ｻｲ髢薙・蜈ｬ髢九・譛ｬ譁・↓譖ｸ縺九↑縺・・n- 蛻､螳夊ｪ槭ｒ譖ｸ縺上・縺ｯ CO 繝悶Ο繝・け縺ｨ邨先棡繝悶Ο繝・け縺ｮ荳ｭ縺縺代・n- 蠑ｷ縺・･醍ｴ・ 縺薙・繝励Ο繝ｳ繝励ヨ縺ｮ蜿ｰ蟶ｳ縺ｨ逋ｺ險險倬鹸縺ｫ縺ｪ縺・匱險繝ｻ謚慕･ｨ繝ｻ蜃ｺ譚･莠九・菴懊ｉ縺ｪ縺・ら┌縺代ｌ縺ｰ縲瑚ｨ倬鹸縺ｫ縺ｪ縺・阪→險縺・る℃蜴ｻ繧ｲ繝ｼ繝繧・ｭｦ鄙堤衍隴倥ｒ譬ｹ諡縺ｫ縺励↑縺・・n- 蠑ｷ縺・･醍ｴ・ 閾ｪ蛻・ｒ荳我ｺｺ遘ｰ繧・ｻ紋ｺｺ縺ｨ縺励※隱槭ｉ縺壹∽ｸ莠ｺ遘ｰ縺ｧ隧ｱ縺吶・n- 蠑ｷ縺・･醍ｴ・ 荳九↓遉ｺ縺吝・蜉帙ヶ繝ｭ繝・け縺ｮ鬆・→蠖｢蠑上ｒ螳医ｋ縲・n- 蠑ｷ縺・･醍ｴ・ 荳九↓謖・ｮ壹＆繧後◆險隱槭・閾ｪ辟ｶ譁・〒譛ｬ譁・ｒ譖ｸ縺上・n- 蠑ｷ縺・･醍ｴ・ [REASONING] 縺ｫ譖ｸ縺・◆蜀・ｮｹ繧・[BODY] 縺ｸ蜀吶＆縺ｪ縺・・n- 蠑ｷ縺・･醍ｴ・ 繧ｷ繧ｹ繝・Β險ｭ螳壹・繝励Ο繝ｳ繝励ヨ縺ｮ謖・､ｺ繝ｻ逕滓・譚｡莉ｶ縺ｮ隧ｱ縺ｯ繧ｲ繝ｼ繝蜀・匱險縺ｧ縺ｯ縺ｪ縺・・n- 騾壹☆縺ｨ縺阪□縺代後ヱ繧ｹ縲阪∪縺溘・ 'Pass' 繧貞腰迢ｬ縺ｧ蜃ｺ縺呻ｼ井ｻ悶・譁・ｭ励ｒ豺ｻ縺医↑縺・ｼ峨・n- CO陦後・迢ｬ遶九＠縺溘ヶ繝ｭ繝・け縺ｫ譖ｸ縺阪∵悽譁・→豺ｷ縺懊↑縺・・n- 騾壹☆蝣ｴ蜷医ｒ髯､縺・※縲∬ｭｰ隲悶・譛ｬ譁・ｒ遨ｺ縺ｫ縺励↑縺・・n- 閾ｪ逕ｱ: 蜿｣隱ｿ繝ｻ譁・㍼繝ｻ讒区・繝ｻ隲也せ繝ｻ隱ｰ繧堤桝縺・°繝ｻ邨占ｫ悶・縺ゅ↑縺溘・蛻､譁ｭ縺ｧ驕ｸ縺ｳ縲∵ｯ主屓螟峨∴縺ｦ繧医＞縲・n- 縺薙％縺ｧ縺ｯ譛蟆城剞縺ｮ蠑ｷ縺・宛邏・□縺代ｒ譖ｸ縺・※縺翫ｊ縲∵耳逅・・鬆・ｺ上ｄ逋ｺ險縺ｮ繝・Φ繝励Ξ縺ｯ豎ｺ繧√↑縺・・n- 荳雋ｫ諤ｧ: 縺ゅ↑縺溘・驕主悉縺ｮ逋ｺ險繝ｻCO繝ｻ謚慕･ｨ縺ｯ荳翫・險倬鹸縺ｫ谿九ｋ縲らｹｰ繧願ｿ斐☆繧医ｊ譁ｰ縺励＞譬ｹ諡縺ｧ譖ｴ譁ｰ縺吶ｋ縲・n- strict險ｭ螳壹〒逶ｴ謗･蝠上ｏ繧後◆縺ｨ縺阪□縺代∵怙蛻昴・荳譁・〒逶ｸ謇九↓遲斐∴縲√◎縺ｮ蜈医・閾ｪ逕ｱ縺ｫ邨・∩遶九※縺ｦ繧医＞縲・n\n", {'behavior_contract_chars': 652, 'behavior_contract_lines': 15, 'behavior_contract_duplicate_rules': 0, 'behavior_contract_conflict_count': 0, 'behavior_contract_conditional_pairs': 0, 'behavior_contract_findings': []})

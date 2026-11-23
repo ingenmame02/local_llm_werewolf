@@ -1,0 +1,47 @@
+=== task057_legacy === winner=village requests=104 speeches=42
+  policy: legacy | selections: 42
+  avg_prompt_user_chars: 17497.4 | max: 21657 | avg_core: 11489.9 | avg_optional: 6007.5
+  dedup_refs: 0 | dedup_saved: 0 | dup_constraints: 436 | optional_removed: 0
+  removal_stages: {'0': 42} | dropped_sections: none
+  parse_failures: 74 | retries: 45 | discussion_seconds: 0.394
+  髱槫・髢九く繝ｼ縺ｮ繝ｭ繧ｰ豺ｷ蜈･: none
+=== task057_simplified === winner=village requests=104 speeches=42
+  policy: simplified | selections: 42
+  avg_prompt_user_chars: 16173.0 | max: 18918 | avg_core: 10708.6 | avg_optional: 5464.4
+  dedup_refs: 582 | dedup_saved: 21874 | dup_constraints: 100 | optional_removed: 2573
+  removal_stages: {'0': 40, '1': 2} | dropped_sections: {'previous_topics': 2, 'reasoning_guidance': 2}
+  parse_failures: 74 | retries: 45 | discussion_seconds: 0.395
+  髱槫・髢九く繝ｼ縺ｮ繝ｭ繧ｰ豺ｷ蜈･: none
+== same-history A/B ==
+  legacy     n=5
+    chars   avg=   21538  max= 23192 | tokens avg=   15008  max= 17719
+    core    avg=   14455 | optional avg=   7083 removed_optional=     0
+    dup     rule_kinds= 8.20  extra_lines=12.20 | id_refs= 0.00  saved=    0.0
+    restate outside evidence: places=20.60 chars=  1245.6 | contract_conflicts=0.00
+  simplified n=5
+    chars   avg=   19927  max= 21494 | tokens avg=   14202  max= 16870
+    core    avg=   13359 | optional avg=   6568 removed_optional=     0
+    dup     rule_kinds= 3.20  extra_lines= 4.20 | id_refs=19.20  saved=  783.6
+    restate outside evidence: places= 0.60 chars=    37.8 | contract_conflicts=0.00
+  豁｣蜻ｳ蟾ｮ: chars +8057 (7.5%貂・ | tokens +4030 | core譛蟆丞､ legacy=14081 simplified=13028
+-- 蜷後§譛ｬ譁・ｒ2蠎ｦ莉･荳願ｼ峨○縺ｦ縺・ｋ遽 (legacy) actor=Player 2 --
+   conversation_evidence: 8邂・園 / 484蟄・・郁ｨｼ諡・晄悽譚･縺ｮ1邂・園・・
+   self_action_memory: 6邂・園 / 372蟄・
+   inference_line: 6邂・園 / 360蟄・
+   continuity_memo: 5邂・園 / 301蟄・
+   own_speeches: 3邂・園 / 183蟄・
+   fact_ledger: 1邂・園 / 59蟄・
+   question_block: 1邂・園 / 59蟄・
+   direct_answer: 1邂・園 / 59蟄・
+-- 蜷後§譛ｬ譁・ｒ2蠎ｦ莉･荳願ｼ峨○縺ｦ縺・ｋ遽 (simplified) actor=Player 2 --
+== [ref:sN] 繧剃ｽｿ縺・｡鯉ｼ・implified・・==
+    [ref:s25] (text quoted once below)
+    - Day 2 Your speech: [ref:s25] (same text quoted once below)
+    - Day 2 Vote: for Player 4 [dead: historical record] (previously for Player 3) Reason for change: What the player stated before voting (no explicit reason): [ref:s25] Rea
+    - Previous Speech (Unverified Quote): [ref:s42] (same speech, quoted below)
+    - Player Speech & Inferences (Unverified): [ref:s37] Player 2 (same speech) / [ref:s38] Player 4 (same speech) / [ref:s39] Player 5 (same speech) / [ref:s40] Player 6 (sa
+    {"confirmed_fact_ids": ["[vote:1:initial:Player 1]", "[vote:1:initial:Player 2]", "[vote:1:initial:Player 3]", "[vote:1:initial:Player 4]", "[vote:1:initial:Player 5]", "
+   legacy 縺ｮ蜷御ｸ邂・園縺ｫ譛ｬ譁・′谿九▲縺ｦ縺・ｋ萓・    蜷後§譛ｬ譁・・謗ｲ霈臥ｮ・園・亥ｮ溷惠縺吶ｋ逋ｺ險縺ｮ縺ｿ・・
+     螟懊・蜊縺・ｨｭ螳壹ｒ謨ｴ逅・＠縺溘＞縲１layer 2縺輔ｓ縺悟・縺ｫ霑ｰ縺ｹ縺滓ｹ諡縺ｯ蠑ｱ縺・.. legacy=1邂・園 simplified=1邂・園
+     Player 1縺輔ｓ縺ｫ遒ｺ隱阪＠縺溘＞縲ょ､懊・蜊縺・ｨｭ螳壹↓縺､縺・※Player ... legacy=1邂・園 simplified=1邂・園
+     謚慕･ｨ縺ｮ譬ｹ諡繧呈紛逅・＠縺溘＞縲１layer 3縺輔ｓ縺悟・縺ｫ霑ｰ縺ｹ縺滓ｹ諡縺ｯ蠑ｱ縺・→... legacy=2邂・園 simplified=1邂・園

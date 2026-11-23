@@ -1,0 +1,2 @@
+FROM werewolf-mistral-small-8k:latest
+PARAMETER num_ctx 16384

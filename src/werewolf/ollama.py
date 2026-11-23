@@ -48,6 +48,30 @@ NON_RETRYABLE_HTTP_MARKERS: tuple[str, ...] = (
     "model not found",
 )
 
+_HARMONY_ANALYSIS_HEADER = re.compile(
+    r"<\|channel\|>\s*analysis\s*<\|message\|>", re.IGNORECASE
+)
+_HARMONY_FINAL_BLOCK = re.compile(
+    r"<\|channel\|>\s*final\s*<\|message\|>"
+    r"(.*?)(?=<\|(?:end|return)\|>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def normalize_harmony_response(content: str) -> tuple[str, bool]:
+    """Extract the final answer from LLM-jp/OpenAI Harmony channel output.
+
+    Older Ollama/model packages may return Harmony tags in ``message.content``
+    instead of populating the API's separate ``thinking`` field.
+    """
+    if not isinstance(content, str):
+        return "" if content is None else str(content), False
+    has_analysis = bool(_HARMONY_ANALYSIS_HEADER.search(content))
+    final_match = _HARMONY_FINAL_BLOCK.search(content)
+    if final_match is None:
+        return ("" if has_analysis else content), has_analysis
+    return final_match.group(1).strip(), True
+
 
 def is_non_retryable_http_error(message: str, status_code: int | None) -> bool:
     """HTTPステータスとメッセージから、再試行しても同じ結果になるエラーかを判定する。"""
@@ -222,6 +246,8 @@ class OllamaClient:
                 content = message["content"]
                 if not isinstance(content, str):
                     raise ValueError("The response message content is not a string.")
+                raw_content = content
+                content, harmony_thinking = normalize_harmony_response(content)
                 raw_tool_calls = message.get("tool_calls", [])
                 if not isinstance(raw_tool_calls, list):
                     raise ValueError("The response message tool_calls is not an array.")
@@ -254,7 +280,11 @@ class OllamaClient:
                     attempts=attempt,
                     done_reason=done_reason if isinstance(done_reason, str) else None,
                     content_length=len(content),
-                    thinking_present=bool(thinking) or "<think" in content.casefold(),
+                    thinking_present=(
+                        bool(thinking)
+                        or "<think" in raw_content.casefold()
+                        or harmony_thinking
+                    ),
                     tool_calls=tuple(tool_calls),
                     eval_count=(
                         eval_count

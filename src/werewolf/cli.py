@@ -68,7 +68,9 @@ from werewolf.role_provenance import (
 # TASK-056: Day内イベントの時系列明示と未来参照の観測（本文は書き換えない）
 from werewolf.day_timeline import (
     DAY_TIMELINE_POLICY_DEFAULT,
+    CITATION_STATUSES,
     FUTURE_REFERENCE_CATEGORIES,
+    REFERENCE_TOKEN_CAUSES,
     day_timeline_policy_label,
     normalize_day_timeline_policy,
 )
@@ -78,6 +80,24 @@ from werewolf.prompt_contract import (
     PROMPT_CONTRACT_POLICY_DEFAULT,
     prompt_contract_policy_label,
     normalize_prompt_contract_policy,
+)
+# TASK-058: core予算の段階圧縮（layered/off）。保持層（anchor/recent/historical）の字数と、
+# 過去の低優先発言の本文を短い行へ畳んだ実績をログで比較できるようにする。発言の口調・
+# 論点・推理順には干渉しない設定で、レイアウト（legacy_v1 / v2_attention）も区別して数える。
+from werewolf.core_compression import (
+    CORE_COMPRESSION_POLICY_DEFAULT,
+    PROMPT_LAYOUT_LEGACY,
+    PROMPT_LAYOUT_V2,
+    core_compression_policy_label,
+    normalize_core_compression_policy,
+)
+# TASK-060: 議論プロンプトの節順（layout）。実測した帯字数・隣接距離・重複行の削減を
+# ログで比べられるようにし、同じseedで v3 / v2 / auto を切り替えてA/B評価できるようにする。
+from werewolf.prompt_layout import (
+    PROMPT_LAYOUT_POLICY_DEFAULT,
+    PROMPT_LAYOUT_V3,
+    normalize_prompt_layout_policy,
+    prompt_layout_policy_label,
 )
 
 # フェーズ表示用ラベル
@@ -240,11 +260,57 @@ class GameLogger:
             "contract_stage2_removals": 0,
             "contract_stage3_removals": 0,
             "contract_stage4_removals": 0,
+            # TASK-058: core保持層の字数と、過去の発言を短い行へ畳んだ実績（削除とは別に、
+            # 本文は公開ログに残ったままプロンプトだけ圧縮した量を追跡する）
+            "core_anchor_char_total": 0,
+            "core_recent_char_total": 0,
+            "core_historical_char_total": 0,
+            "evidence_withheld_body_total": 0,
+            "evidence_withheld_saved_chars_total": 0,
+            "layered_compression_requests": 0,
+            # TASK-060: attention 帯（先頭／中部／終端）の字数、出力形式の後ろに載る字数、
+            # 中部へ沈んだ「いま使う」字数、隣接距離（質問↔証拠など）の合計と件数、
+            # セオリーカードの同字符数。配置変更が節約と一貫性にどう効いたかをA/Bで読む。
+            "prompt_zone_primacy_char_total": 0,
+            "prompt_zone_middle_char_total": 0,
+            "prompt_zone_recency_char_total": 0,
+            "prompt_instructions_to_end_char_total": 0,
+            "prompt_weak_middle_must_use_char_total": 0,
+            "prompt_theory_card_char_total": 0,
+            "prompt_gap_question_to_evidence_sum": 0.0,
+            "prompt_gap_timeline_to_evidence_sum": 0.0,
+            "prompt_gap_own_speeches_to_question_sum": 0.0,
         }
         # TASK-056: 未来参照カテゴリ別の指摘数（公開本文は修正していない観測値）
         self._timeline_category_counts: dict[str, int] = {
             category: 0 for category in FUTURE_REFERENCE_CATEGORIES
         }
+        # TASK-059: 引用された相手の時点別内訳（同一ターン先行／別ターン既発言／
+        # 死亡後履歴／未発言）。違反の指摘ではなく「どの証拠を引こうとしたか」の分解。
+        self._citation_status_counts: dict[str, int] = {
+            status: 0 for status in CITATION_STATUSES
+        }
+        # TASK-059: 違反には数えない観察値（婉曲での仮定引用・未発言者名の一般言及）と、
+        # 検査が飛んだ理由別の件数（空本文など。検査対象数の説明に使う）
+        self._hedged_pending_citations = 0
+        self._unattributed_name_mentions = 0
+        self._timeline_checks_skipped_empty_body = 0
+        # TASK-059: 証拠ID参照 `[speech:N]` / `[ref:sN]` の解決結果（原因別）。未解決参照の
+        # 「ID欠落・旧ログ互換・実際の未来参照」を分解するために観測する（本文は触らない）。
+        self._reference_cause_counts: dict[str, int] = {
+            cause: 0 for cause in REFERENCE_TOKEN_CAUSES
+        }
+        # TASK-059: 公開情報の入力経路別の検査数（発言／CO行／投票／死亡）。検査対象外も
+        # 理由付きで数えることで「なぜ53件だけだったのか」を説明できるようにする。
+        self._timeline_public_path_counts: dict[str, int] = {}
+        # TASK-058 / TASK-060: レイアウト別のプロンプト構築数（legacy_v1 / v2_attention / v3_grounding）
+        self._prompt_layout_counts: dict[str, int] = {
+            PROMPT_LAYOUT_LEGACY: 0,
+            PROMPT_LAYOUT_V2: 0,
+            PROMPT_LAYOUT_V3: 0,
+        }
+        # v2の節順が崩れた回数（編集ミスの静的検査。0を維持する）
+        self._prompt_layout_violations = 0
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
         # 1行目にゲーム開始メタデータを書き込み
@@ -258,6 +324,12 @@ class GameLogger:
             key: value for key, value in init_record.items() if key != "seed"
         }
         self.append_record(public_init_record, init_record)
+
+    def _bump_public_path(self, path: str) -> None:
+        """TASK-059: 公開情報の入力経路別の件数を1増やす（観測専用・本文は触らない）。"""
+        self._timeline_public_path_counts[path] = (
+            self._timeline_public_path_counts.get(path, 0) + 1
+        )
 
     def append_record(
         self,
@@ -365,6 +437,27 @@ class GameLogger:
         if event_type == "role_claim_disallowed":
             # TASK-055: allow_bluff_role_claim=False の設定で受理しなかった行
             self._ledger_metrics["role_claims_disallowed"] += 1
+        # TASK-059: 公開情報の入力経路別のカウント。発言本文は文中検査へかけ、CO行・投票・
+        # 死亡の通知は台帳登録のみ（本文検査の外）。未検査も理由付きで数えることで、
+        # 「議論54件のうち検査53件」のような内訳を後から説明できるようにする。
+        if event_type == "discussion_message":
+            if bool(diagnostic_record.get("timeline_observed")):
+                self._bump_public_path("public_speech_body_inspected")
+            elif diagnostic_record.get("timeline_observed") is False:
+                self._bump_public_path("public_speech_uninspected_timeline_off")
+        elif event_type in {
+            "claim_role_published",
+            "claim_role_corrected",
+            "seer_result_claim",
+            "seer_result_corrected",
+            "seer_claim",
+            "seer_results",
+        }:
+            self._bump_public_path("public_claim_or_verdict_line_ledger_only")
+        elif event_type in {"voting_result", "vote_completed", "voting_phase_ended"}:
+            self._bump_public_path("public_vote_outcome_ledger_only")
+        elif event_type in {"morning_casualty", "first_night_no_attack"}:
+            self._bump_public_path("public_death_notice_ledger_only")
         # TASK-056: 公開発言に添えた時系列検査を集計する（観測専用で本文は修正されない）
         if (
             event_type == "discussion_message"
@@ -387,10 +480,61 @@ class GameLogger:
                         self._timeline_category_counts[category] = (
                             self._timeline_category_counts.get(category, 0) + count
                         )
+            # TASK-059: 引用時点の内訳を積む（どの時点の発言を根拠にしようとしたかの分解）。
+            # future_event_reference（違反の指摘）とは別枠で、本文の書き換えは行わない。
+            citation_counts = diagnostic_record.get("citation_status_counts")
+            if isinstance(citation_counts, dict):
+                for status in CITATION_STATUSES:
+                    count = int(citation_counts.get(status) or 0)
+                    if count:
+                        self._citation_status_counts[status] = (
+                            self._citation_status_counts.get(status, 0) + count
+                        )
+            self._hedged_pending_citations += int(
+                diagnostic_record.get("hedged_pending_citations_observed") or 0
+            )
+            self._unattributed_name_mentions += int(
+                diagnostic_record.get("mentions_without_attribution_observed") or 0
+            )
+            if diagnostic_record.get("timeline_checks_skipped_empty_body"):
+                self._timeline_checks_skipped_empty_body += 1
+                self._bump_public_path("public_speech_body_empty_skipped")
+            # TASK-059: 本文の証拠ID参照を原因別に積む（解決済み／まだ存在しないID／
+            # 旧ログ互換で検証不能／帰属なのにIDなし）。誤検出を増やさない観測値。
+            reference_counts = diagnostic_record.get("evidence_reference_counts")
+            if isinstance(reference_counts, dict):
+                for cause in REFERENCE_TOKEN_CAUSES:
+                    count = int(reference_counts.get(cause) or 0)
+                    if count:
+                        self._reference_cause_counts[cause] = (
+                            self._reference_cause_counts.get(cause, 0) + count
+                        )
             if isinstance(model, str):
                 stats = self._model_stats.setdefault(model, self._new_model_stats())
                 stats["timeline_reference_checks"] += 1
                 stats["timeline_future_references"] += findings
+                if isinstance(citation_counts, dict):
+                    model_citations = stats["citation_status_counts"]
+                    for status in CITATION_STATUSES:
+                        count = int(citation_counts.get(status) or 0)
+                        if count:
+                            model_citations[status] = int(
+                                model_citations.get(status, 0)
+                            ) + count
+                stats["hedged_pending_citations"] += int(
+                    diagnostic_record.get("hedged_pending_citations_observed") or 0
+                )
+                stats["unattributed_name_mentions"] += int(
+                    diagnostic_record.get("mentions_without_attribution_observed") or 0
+                )
+                if isinstance(reference_counts, dict):
+                    model_references = stats["evidence_reference_cause_counts"]
+                    for cause in REFERENCE_TOKEN_CAUSES:
+                        count = int(reference_counts.get(cause) or 0)
+                        if count:
+                            model_references[cause] = int(
+                                model_references.get(cause, 0)
+                            ) + count
         if event_type == "discussion_context_selected":
             self._ledger_metrics["discussion_context_selections"] += 1
             # TASK-056: 時系列欄と発言履歴の文字数を積む。新しい節を増やしながら全体量を
@@ -439,10 +583,64 @@ class GameLogger:
                 ("optional_removed_chars", "prompt_optional_removed_chars_total"),
                 ("prompt_build_calls", "prompt_build_calls_total"),
                 ("contract_stage_attempts", "contract_stage_attempts_total"),
+                # TASK-058: core保持層の字数と、過去の発言を畳んだ実績（削除ではなく圧縮）
+                ("core_anchor_chars", "core_anchor_char_total"),
+                ("core_recent_chars", "core_recent_char_total"),
+                ("core_historical_chars", "core_historical_char_total"),
+                ("evidence_withheld_body_count", "evidence_withheld_body_total"),
+                (
+                    "evidence_withheld_saved_chars",
+                    "evidence_withheld_saved_chars_total",
+                ),
             ):
                 value = diagnostic_record.get(key)
                 if isinstance(value, int) and not isinstance(value, bool):
                     self._ledger_metrics[metric] += max(0, int(value))
+            # TASK-058: 実際に使われたレイアウトと、レイアウト崩れ（節順の逆転）を観測する。
+            layout = diagnostic_record.get("prompt_layout")
+            if isinstance(layout, str):
+                self._prompt_layout_counts[layout] = (
+                    self._prompt_layout_counts.get(layout, 0) + 1
+                )
+            # TASK-060: attention 帯の字数・出力形式以降の字数・中部へ沈んだ「いま使う」字数・
+            # 隣接距離（割合）を集計する。同じseedで v3 / v2 を比べたときに、配置が実際に
+            # 「質問が証拠の近くにあるか」「形式仕様が終端にあるか」を数値で示すため。
+            for key, metric in (
+                ("prompt_zone_primacy_chars", "prompt_zone_primacy_char_total"),
+                ("prompt_zone_middle_chars", "prompt_zone_middle_char_total"),
+                ("prompt_zone_recency_chars", "prompt_zone_recency_char_total"),
+                ("prompt_instructions_to_end_chars", "prompt_instructions_to_end_char_total"),
+                (
+                    "prompt_weak_middle_must_use_chars",
+                    "prompt_weak_middle_must_use_char_total",
+                ),
+                ("prompt_theory_card_chars", "prompt_theory_card_char_total"),
+            ):
+                value = diagnostic_record.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    self._ledger_metrics[metric] += max(0, int(value))
+            for key, metric in (
+                (
+                    "prompt_gap_question_to_evidence",
+                    "prompt_gap_question_to_evidence_sum",
+                ),
+                (
+                    "prompt_gap_timeline_to_evidence",
+                    "prompt_gap_timeline_to_evidence_sum",
+                ),
+                (
+                    "prompt_gap_own_speeches_to_question",
+                    "prompt_gap_own_speeches_to_question_sum",
+                ),
+            ):
+                value = diagnostic_record.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    self._ledger_metrics[metric] += max(0.0, float(value))
+            if bool(diagnostic_record.get("core_compression_applied")):
+                self._ledger_metrics["layered_compression_requests"] += 1
+            violations = diagnostic_record.get("prompt_layout_violations")
+            if isinstance(violations, list) and violations:
+                self._prompt_layout_violations += len(violations)
             dedup_refs = diagnostic_record.get("dedup_reference_count")
             if isinstance(dedup_refs, int) and not isinstance(dedup_refs, bool):
                 self._ledger_metrics["prompt_dedup_references"] += max(0, int(dedup_refs))
@@ -470,6 +668,7 @@ class GameLogger:
                 if isinstance(model_user_chars, int) and not isinstance(
                     model_user_chars, bool
                 ):
+                    stats["prompt_contracted_requests"] += 1
                     stats["prompt_user_char_total"] += max(0, int(model_user_chars))
                     if int(model_user_chars) > int(stats["prompt_user_char_max"]):
                         stats["prompt_user_char_max"] = max(0, int(model_user_chars))
@@ -481,10 +680,60 @@ class GameLogger:
                         "prompt_duplicate_constraint_count",
                         "prompt_duplicate_constraint_total",
                     ),
+                    # TASK-058: モデル別のcore保持層と圧縮実績（8k系でどこまで削れたかを比べる）
+                    ("core_anchor_chars", "core_anchor_char_total"),
+                    ("core_recent_chars", "core_recent_char_total"),
+                    ("core_historical_chars", "core_historical_char_total"),
+                    ("evidence_withheld_body_count", "evidence_withheld_body_total"),
+                    (
+                        "evidence_withheld_saved_chars",
+                        "evidence_withheld_saved_chars_total",
+                    ),
                 ):
                     value = diagnostic_record.get(key)
                     if isinstance(value, int) and not isinstance(value, bool):
                         stats[metric] += max(0, int(value))
+                model_layout = diagnostic_record.get("prompt_layout")
+                if isinstance(model_layout, str):
+                    layouts = stats["prompt_layout_counts"]
+                    layouts[model_layout] = int(layouts.get(model_layout, 0)) + 1
+                # TASK-060: モデル別の配置品質（帯字数・出力形式以降の字数・隣接距離）。
+                # 同じ盤面を v3 / v2 で走らせたときに、どのモデルが終端の質問と証拠の
+                # 近さから利益を受けるかを比較する。
+                for key, metric in (
+                    ("prompt_zone_primacy_chars", "prompt_zone_primacy_char_total"),
+                    ("prompt_zone_middle_chars", "prompt_zone_middle_char_total"),
+                    ("prompt_zone_recency_chars", "prompt_zone_recency_char_total"),
+                    (
+                        "prompt_instructions_to_end_chars",
+                        "prompt_instructions_to_end_char_total",
+                    ),
+                    (
+                        "prompt_weak_middle_must_use_chars",
+                        "prompt_weak_middle_must_use_char_total",
+                    ),
+                    ("prompt_theory_card_chars", "prompt_theory_card_char_total"),
+                ):
+                    value = diagnostic_record.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        stats[metric] += max(0, int(value))
+                for key, metric in (
+                    (
+                        "prompt_gap_question_to_evidence",
+                        "prompt_gap_question_to_evidence_sum",
+                    ),
+                    (
+                        "prompt_gap_timeline_to_evidence",
+                        "prompt_gap_timeline_to_evidence_sum",
+                    ),
+                    (
+                        "prompt_gap_own_speeches_to_question",
+                        "prompt_gap_own_speeches_to_question_sum",
+                    ),
+                ):
+                    value = diagnostic_record.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        stats[metric] += max(0.0, float(value))
                 model_stage = diagnostic_record.get("contract_removal_stage")
                 if isinstance(model_stage, int) and not isinstance(model_stage, bool):
                     limited = min(max(0, int(model_stage)), 4)
@@ -790,11 +1039,37 @@ class GameLogger:
             # 削除段階の内訳）。モデルごとに違う命令の受け取り方を比較できる。
             "prompt_user_char_total": 0,
             "prompt_user_char_max": 0,
+            "prompt_contracted_requests": 0,
             "prompt_core_char_total": 0,
             "prompt_optional_char_total": 0,
             "prompt_dedup_saved_chars_total": 0,
             "prompt_duplicate_constraint_total": 0,
             "contract_removal_stage_counts": {},
+            # TASK-058: モデル別のcore保持層（anchor/recent/historical）と、過去の発言を
+            # 短い行へ畳んだ実績、使われたレイアウト（A/Bで入力量と挙動を比べる）
+            "core_anchor_char_total": 0,
+            "core_recent_char_total": 0,
+            "core_historical_char_total": 0,
+            "evidence_withheld_body_total": 0,
+            "evidence_withheld_saved_chars_total": 0,
+            "prompt_layout_counts": {},
+            # TASK-060: モデル別のattention帯字数・出力形式以降の字数・中部に沈んだ「いま使う」
+            # 字数・隣接距離（平均）。8k系で質問と証拠が離れていると回答率が下がるため、配置の
+            # 効果をモデルごとに比べる。
+            "prompt_zone_primacy_char_total": 0,
+            "prompt_zone_middle_char_total": 0,
+            "prompt_zone_recency_char_total": 0,
+            "prompt_instructions_to_end_char_total": 0,
+            "prompt_weak_middle_must_use_char_total": 0,
+            "prompt_theory_card_char_total": 0,
+            "prompt_gap_question_to_evidence_sum": 0.0,
+            "prompt_gap_timeline_to_evidence_sum": 0.0,
+            "prompt_gap_own_speeches_to_question_sum": 0.0,
+            # TASK-059: 引用時点の内訳と、違反には数えない観察値（婉曲・一般名指し）
+            "citation_status_counts": {},
+            "hedged_pending_citations": 0,
+            "unattributed_name_mentions": 0,
+            "evidence_reference_cause_counts": {},
             # 思考生成非対応と判明して think=off へ切り替えたモデルの数
             "thinking_capability_fallbacks": 0,
             # 思考が生成上限を消費して切り詰め、think=offへ自動切替した回数
@@ -958,6 +1233,45 @@ class GameLogger:
 
         # TASK-054: モデル別の漏洩率・誤検出率・本文保持率を算出する
         self._finalize_leak_stats(state)
+        # TASK-060: モデル別の配置品質（送信プロンプト量・attention帯・隣接距離の平均）。
+        # 同じseedで --prompt-layout v3 / v2 を走らせたログをモデル単位で突き合わせられる。
+        for stats in self._model_stats.values():
+            prompts = int(stats.get("prompt_contracted_requests", 0))
+            if not prompts:
+                continue
+            stats["avg_prompt_user_chars"] = round(
+                int(stats["prompt_user_char_total"]) / prompts, 1
+            )
+            stats["avg_prompt_core_chars"] = round(
+                int(stats["prompt_core_char_total"]) / prompts, 1
+            )
+            stats["avg_prompt_zone_primacy_chars"] = round(
+                int(stats["prompt_zone_primacy_char_total"]) / prompts, 1
+            )
+            stats["avg_prompt_zone_middle_chars"] = round(
+                int(stats["prompt_zone_middle_char_total"]) / prompts, 1
+            )
+            stats["avg_prompt_zone_recency_chars"] = round(
+                int(stats["prompt_zone_recency_char_total"]) / prompts, 1
+            )
+            stats["avg_prompt_instructions_to_end_chars"] = round(
+                int(stats["prompt_instructions_to_end_char_total"]) / prompts, 1
+            )
+            stats["avg_prompt_weak_middle_must_use_chars"] = round(
+                int(stats["prompt_weak_middle_must_use_char_total"]) / prompts, 1
+            )
+            stats["avg_prompt_theory_card_chars"] = round(
+                int(stats["prompt_theory_card_char_total"]) / prompts, 1
+            )
+            stats["avg_gap_question_to_evidence"] = round(
+                float(stats["prompt_gap_question_to_evidence_sum"]) / prompts, 4
+            )
+            stats["avg_gap_timeline_to_evidence"] = round(
+                float(stats["prompt_gap_timeline_to_evidence_sum"]) / prompts, 4
+            )
+            stats["avg_gap_own_speeches_to_question"] = round(
+                float(stats["prompt_gap_own_speeches_to_question_sum"]) / prompts, 4
+            )
 
         public_players_data = [
             {
@@ -1062,6 +1376,16 @@ class GameLogger:
             "prompt_contract_policy": prompt_contract_policy_label(
                 getattr(state, "prompt_contract_policy", PROMPT_CONTRACT_POLICY_DEFAULT)
             ),
+            # TASK-058: core予算の段階圧縮（layered/off）。どの保持層を畳んだかを上の
+            # ledger_metrics で追跡できるようにし、自由人格・契約・秘匿ガードの意味は変えない。
+            "core_compression_policy": core_compression_policy_label(
+                getattr(state, "core_compression_policy", CORE_COMPRESSION_POLICY_DEFAULT)
+            ),
+            # TASK-060: 議論プロンプトの節順ポリシー（v3/v2/auto）。発言証拠・時点・現在
+            # 質問・自分の連続性アンカーの位置と、同じ制約の言い換え行数にだけ効く設定。
+            "prompt_layout_policy": prompt_layout_policy_label(
+                getattr(state, "prompt_layout_policy", PROMPT_LAYOUT_POLICY_DEFAULT)
+            ),
             "unverified_hypothesis_as_fact_alerts": sum(
                 alert.category == UNVERIFIED_HYPOTHESIS_AS_FACT
                 for alert in state.integrity_alerts
@@ -1123,6 +1447,98 @@ class GameLogger:
                 "optional_removed_chars_total": int(
                     self._ledger_metrics["prompt_optional_removed_chars_total"]
                 ),
+                # TASK-058: core保持層（anchor/recent/historical）の平均字数と、過去の発言を
+                # 短い行へ畳んだ実績。削除ではなく「本文は公開ログに残したままプロンプトだけ
+                # 省略」した量なので、future_event_reference や根拠追跡率と突き合わせて読む。
+                "avg_core_anchor_chars": round(
+                    int(self._ledger_metrics["core_anchor_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_core_recent_chars": round(
+                    int(self._ledger_metrics["core_recent_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_core_historical_chars": round(
+                    int(self._ledger_metrics["core_historical_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "evidence_withheld_body_total": int(
+                    self._ledger_metrics["evidence_withheld_body_total"]
+                ),
+                "evidence_withheld_saved_chars_total": int(
+                    self._ledger_metrics["evidence_withheld_saved_chars_total"]
+                ),
+                "layered_compression_requests": int(
+                    self._ledger_metrics["layered_compression_requests"]
+                ),
+                # 実際に使われた組み立て順（legacy_v1 / v2_attention / v3_grounding）と節順の崩れ
+                "prompt_layout_counts": dict(self._prompt_layout_counts),
+                "prompt_layout_violations": int(self._prompt_layout_violations),
+                # TASK-060: 配置品質の実測平均（A/B比較用）。v3では dilution=0、
+                # own_speeches↔質問 と day_timeline↔証拠 の距離が縮むはずで、それが
+                # 回答率・立場一貫性・誤帰属の改善と対応するかを見る。
+                "avg_prompt_zone_primacy_chars": round(
+                    int(self._ledger_metrics["prompt_zone_primacy_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_prompt_zone_middle_chars": round(
+                    int(self._ledger_metrics["prompt_zone_middle_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_prompt_zone_recency_chars": round(
+                    int(self._ledger_metrics["prompt_zone_recency_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_prompt_instructions_to_end_chars": round(
+                    int(self._ledger_metrics["prompt_instructions_to_end_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_prompt_weak_middle_must_use_chars": round(
+                    int(self._ledger_metrics["prompt_weak_middle_must_use_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_prompt_theory_card_chars": round(
+                    int(self._ledger_metrics["prompt_theory_card_char_total"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    1,
+                ),
+                "avg_gap_question_to_evidence": round(
+                    float(self._ledger_metrics["prompt_gap_question_to_evidence_sum"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    4,
+                ),
+                "avg_gap_timeline_to_evidence": round(
+                    float(self._ledger_metrics["prompt_gap_timeline_to_evidence_sum"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    4,
+                ),
+                "avg_gap_own_speeches_to_question": round(
+                    float(self._ledger_metrics["prompt_gap_own_speeches_to_question_sum"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    4,
+                ),
+                # TASK-059: 引用した相手の時点別内訳（同一ターン先行／別ターン既発言／
+                # 死亡後履歴／未発言）。違反指摘の future_event_reference_categories とは
+                # 別枠で、婉曲な仮定引用・未発言者名の一般言及はここへ逃がして数える。
+                "citation_status_counts": dict(self._citation_status_counts),
+                "hedged_pending_citations_observed": int(self._hedged_pending_citations),
+                "mentions_without_attribution_observed": int(
+                    self._unattributed_name_mentions
+                ),
+                "timeline_checks_skipped_empty_body": int(
+                    self._timeline_checks_skipped_empty_body
+                ),
+                # TASK-059: 証拠ID参照の解決内訳と、公開情報の入力経路別の検査数
+                "evidence_reference_cause_counts": dict(self._reference_cause_counts),
+                "timeline_public_info_paths": dict(self._timeline_public_path_counts),
                 # ローカル側の構築コスト（段階除去の組み直し回数を確かめる指標）
                 "avg_prompt_build_calls": round(
                     int(self._ledger_metrics["prompt_build_calls_total"])
@@ -1417,6 +1833,16 @@ def run_cli_game(args: argparse.Namespace) -> int:
         getattr(args, "prompt_contract", PROMPT_CONTRACT_POLICY_DEFAULT)
     )
     options["prompt_contract_policy"] = prompt_contract_policy
+    # TASK-058: core予算の段階圧縮（既定 layered。off はA/B比較用の旧挙動＝従来削除のみ）
+    core_compression_policy = normalize_core_compression_policy(
+        getattr(args, "core_compression", CORE_COMPRESSION_POLICY_DEFAULT)
+    )
+    options["core_compression_policy"] = core_compression_policy
+    # TASK-060: 議論プロンプトの節順（既定 v3）。配置と重複行だけ変わり、発言内容の自由は不変。
+    prompt_layout_policy = normalize_prompt_layout_policy(
+        getattr(args, "prompt_layout", PROMPT_LAYOUT_POLICY_DEFAULT)
+    )
+    options["prompt_layout_policy"] = prompt_layout_policy
     if args.thinking in {"on", "off"}:
         options["thinking"] = args.thinking == "on"
     for key, value in action_num_predict.items():
@@ -1447,6 +1873,10 @@ def run_cli_game(args: argparse.Namespace) -> int:
     state.public_timeline.policy = day_timeline_policy
     # TASK-057: プロンプト契約のポリシーをstateへ反映する（llm_actions が state から読む）
     state.prompt_contract_policy = prompt_contract_policy
+    # TASK-058: core圧縮のポリシーもstateへ反映する（プロンプト構築側が証拠欄の畳み方を選ぶ）
+    state.core_compression_policy = core_compression_policy
+    # TASK-060: 節順のポリシーもstateへ反映する（llm_actions が state から読んでbuilderへ渡す）
+    state.prompt_layout_policy = prompt_layout_policy
 
     meta = {
         "mode": args.mode,
@@ -1479,6 +1909,11 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "day_timeline_policy": day_timeline_policy,
         # TASK-057: プロンプト契約の簡素化（simplified/legacy）をログへ残す（A/B比較の判別用）
         "prompt_contract_policy": prompt_contract_policy,
+        # TASK-058: core圧縮の段階（layered/off）をログへ残す（A/B比較の判別用）
+        "core_compression_policy": core_compression_policy,
+        # TASK-060: 議論プロンプトの節順（v3/v2/auto）をログへ残す（A/B比較の判別用）。
+        # 配置と重複行の変更のみで、発言の口調・論点・結論には干渉しない設定である。
+        "prompt_layout_policy": prompt_layout_policy,
         "base_url": args.base_url,
         "show_private": args.show_private,
         "response_language": getattr(args, "language", None),
@@ -2160,6 +2595,48 @@ def build_parser() -> argparse.ArgumentParser:
             "a role may publish its CO or verdict; such lines are dropped before "
             "publishing while the rest of the body is kept word for word (no "
             "regeneration). Use this for A/B runs of bluff freedom."
+        ),
+    )
+    # TASK-058: core予算の段階圧縮（anchor/recent/historical に分け、歴史情報の本文だけを短い行へ畳む）
+    parser.add_argument(
+        "--core-compression",
+        dest="core_compression",
+        choices=["layered", "off"],
+        default="layered",
+        help=(
+            "How discussion prompts spend their core budget. layered (default): evidence keeps "
+            "three retention layers - anchor (rules, secret boundaries, the current question, the "
+            "action format, your own action record) always stays in full, recent holds this turn's "
+            "prior speech and live claims, and historical collapses older public speech that is "
+            "already normalized into the ledger into a short line that keeps the point, speaker "
+            "and [speech:N] id instead of the body (the body never leaves the public log). Plain "
+            "tail-truncation is disabled: the question target, counter-evidence, role COs and their "
+            "reasons are withheld last. off: pre-TASK-058 behaviour (drop whole records only) for "
+            "A/B comparison of prompt size, thinking-only output and truncations. Neither mode "
+            "prescribes tone, topics or reasoning order."
+        ),
+    )
+    # TASK-060: 議論プロンプトの節順（配置だけ変え、内容と発言の自由は変えない）
+    parser.add_argument(
+        "--prompt-layout",
+        dest="prompt_layout",
+        choices=["v3", "v2", "auto"],
+        default=PROMPT_LAYOUT_POLICY_DEFAULT,
+        help=(
+            "Where each information block sits inside the discussion prompt. Only positions and "
+            "duplicate wording change - tone, length, topics, conclusions and reasoning order stay "
+            "the model's own. v3 (default): your action record, board facts and engine-issued "
+            "private info sit early; weak-middle band holds only droppable derived content (theory "
+            "card, topic digest, hypothesis diff, temporary guidance, round header); the tail runs "
+            "claim index -> timeline -> speech evidence -> current question -> your speeches and "
+            "your reasoning memo -> neutral guidelines -> secrecy boundary -> behavior contract -> "
+            "output format -> final checklist, so the format spec is no longer buried behind "
+            "advice, and header lines that restate a rule written once elsewhere (first person, "
+            "response language, off-record discipline, dead-player handling) are dropped. "
+            "v2: TASK-058 ordering. auto: follow --prompt-contract (legacy keeps the old byte "
+            "order). Compare one seed with prompt_zone_*_chars, prompt_gap_*, "
+            "prompt_instructions_to_end_chars, prompt_theory_card_chars and "
+            "duplicate_constraint_total."
         ),
     )
     # TASK-057: プロンプト契約の簡素化（同じ制約・発言本文の再掲を減らし、不足時は optional だけ落とす）

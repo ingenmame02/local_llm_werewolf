@@ -1,0 +1,2 @@
+FROM werewolf-gpt-oss-20b-8k:latest
+PARAMETER num_ctx 16384

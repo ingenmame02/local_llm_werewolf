@@ -1,0 +1,2 @@
+FROM werewolf-deepseek-r1-8k:latest
+PARAMETER num_ctx 16384

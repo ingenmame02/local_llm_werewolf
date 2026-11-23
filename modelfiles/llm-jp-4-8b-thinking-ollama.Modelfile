@@ -1,0 +1,7 @@
+FROM hf.co/llm-jp/llm-jp-4-8b-thinking-gguf:Q4_K_M
+
+TEMPLATE """{{ if .System }}<|start|>system<|message|>{{ .System }}<|end|>{{ end }}<|start|>user<|message|>{{ .Prompt }}<|end|><|start|>assistant<|channel|>final<|message|>"""
+
+PARAMETER stop <|start|>
+PARAMETER stop <|end|>
+PARAMETER stop <|return|>

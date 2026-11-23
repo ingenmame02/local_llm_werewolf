@@ -1,0 +1,7 @@
+FROM FieldMouse-AI/llm-jp-4.1:33b-q4_k_m-thinking
+
+# LLM-jp-4.1 Harmony prompt: let the model emit analysis and final channels.
+TEMPLATE """{{ if .System }}<|start|>system<|message|>{{ .System }}<|end|>{{ end }}<|start|>user<|message|>{{ .Prompt }}<|end|><|start|>assistant"""
+
+PARAMETER num_ctx 4096
+PARAMETER stop <|return|>

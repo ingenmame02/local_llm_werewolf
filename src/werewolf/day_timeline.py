@@ -71,6 +71,69 @@ FUTURE_REFERENCE_CATEGORIES: tuple[str, ...] = (
     FUTURE_NIGHT_ACTION,
 )
 
+# TASK-059: 引用された人物の「その時点での発言履歴」状態。誤帰属の内訳を分けることで、
+# 実際の未来参照と、歴史参照・別ターン既発言の混同を区別し、婉曲や一般名指しを
+# 違反として数えないための分類軸にする（本文の書き換えは一切しない）。
+CITATION_SAME_TURN = "already_spoken_same_turn"
+CITATION_EARLIER_TURN = "spoken_in_earlier_turn_or_day"
+CITATION_DEAD_HISTORY = "dead_player_public_history"
+CITATION_NEVER_SPOKEN_YET = "no_public_speech_at_point"
+CITATION_STATUSES: tuple[str, ...] = (
+    CITATION_SAME_TURN,
+    CITATION_EARLIER_TURN,
+    CITATION_DEAD_HISTORY,
+    CITATION_NEVER_SPOKEN_YET,
+)
+
+# speech_from_unspoken_player の副型（TASK-059実装案2）。観測専用のタグで、本文は触らない。
+SUBTYPE_ATTRIBUTION_NEVER_SPOKEN = "attribution_to_never_spoken_player"
+SUBTYPE_GENERAL_MENTION_UNSPOKEN = "general_mention_without_attribution_observed"
+SUBTYPE_HEDGED_CITATION_PENDING = "hedged_citation_of_pending_speech_observed"
+CAUSE_NO_PUBLIC_SPEECH_AT_POINT = "actor_had_no_public_speech_at_this_point"
+
+# TASK-059（実装案3）: 本文に現れる証拠ID参照 `[speech:N]` / `[ref:sN]` を数え、未解決の
+# 原因を分類する（ID欠落・旧ログ互換＝時点情報なし履歴・まだ存在しないID＝実際の未来
+# 参照）。誤検出を増やさないため、この分類は観測だけで future_event_reference は増やさない。
+REFERENCE_TOKEN_RE = re.compile(r"\[(?:speech|ref:s)\s*:?\s*(\d+)\]", re.IGNORECASE)
+REFERENCE_RESOLVED_AT_POINT = "resolved_at_point"
+REFERENCE_CAUSE_MISSING_ID = "citation_without_evidence_id"
+REFERENCE_CAUSE_LEGACY_HISTORY = "unverifiable_history_without_stamps"
+REFERENCE_CAUSE_ID_NOT_SPOKEN_YET = "id_not_spoken_at_this_point"
+REFERENCE_TOKEN_CAUSES: tuple[str, ...] = (
+    REFERENCE_RESOLVED_AT_POINT,
+    REFERENCE_CAUSE_MISSING_ID,
+    REFERENCE_CAUSE_LEGACY_HISTORY,
+    REFERENCE_CAUSE_ID_NOT_SPOKEN_YET,
+)
+
+
+def classify_reference_tokens(
+    sentence: str,
+    snapshot: "TurnSnapshot",
+) -> dict[str, int]:
+    """1文の中の `[speech:N]` / `[ref:sN]` 参照を時点照合して分類する（観測専用）。
+
+    - `resolved_at_point`: そのIDはこの時点で既に公開済み（発言順として追える）
+    - `id_not_spoken_at_this_point`: まだ登られていないID（実際の未来参照）
+    - `unverifiable_history_without_stamps`: 履歴に時点情報がなく検証不能（旧ログ互換）
+    """
+    counts: dict[str, int] = {}
+    tokens = [int(value) for value in REFERENCE_TOKEN_RE.findall(sentence)]
+    if not tokens:
+        return counts
+    known_ids = {point[3] for point in snapshot.all_speech_points if point[3]}
+    legacy_history = not snapshot.all_speech_points
+    for token in tokens:
+        if token in known_ids:
+            key = REFERENCE_RESOLVED_AT_POINT
+        elif legacy_history:
+            key = REFERENCE_CAUSE_LEGACY_HISTORY
+        else:
+            key = REFERENCE_CAUSE_ID_NOT_SPOKEN_YET
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 
 def normalize_day_timeline_policy(value: object) -> str:
     """設定値を \"explicit\" / \"off\" へ正規化する（不明値は既定の明示）。"""
@@ -179,6 +242,10 @@ class TurnSnapshot:
     night_pending: bool
     # この時点で次回発言に割り当てられる [speech:N] の番号（発言順の基準点）
     next_speech_id: int = 0
+    # TASK-059: これまでの全公開発言のポイント (話者, day, turn, speech_id)。引用が
+    # 「同一ターンの先行発言」「別ターン/別日の既発言」「死亡者の履歴」のどれかを
+    # 判定するために使う（プロンプト本文や時系列欄の見た目はこの変更で変わらない）。
+    all_speech_points: tuple[tuple[str, int, int, int], ...] = ()
 
     def point(self) -> str:
         return f"D{self.day}T{self.turn}#{self.sequence}"
@@ -188,6 +255,24 @@ class TurnSnapshot:
 
     def was_alive(self, name: str) -> bool:
         return name in self.alive_players
+
+    def citation_status(self, name: str) -> str:
+        """TASK-059: この時点での引用可能状態を返す（観測専用の分類）。
+
+        - 死亡が公開済みの人は、発言の有無に関わらず「履歴としての参照」（死後参照）へ寄せる
+          （同一ターンの先行発言でも、その人物はもう発言できない立場だから）
+        - 別ターン・別日に既に発言済みか
+        - まだ公開発言が無いのか（実際の未来参照候補はこの状態だけ）
+        """
+        points = [point for point in self.all_speech_points if point[0] == name]
+        dead = name in dict(self.known_dead)
+        if dead:
+            return CITATION_DEAD_HISTORY if points else CITATION_NEVER_SPOKEN_YET
+        if any(point[1] == self.day and point[2] == self.turn for point in points):
+            return CITATION_SAME_TURN
+        if points:
+            return CITATION_EARLIER_TURN
+        return CITATION_NEVER_SPOKEN_YET
 
     def to_log_fields(self) -> dict[str, object]:
         """ログへ載せる最小集合（本文・非公開情報は含まない）。"""
@@ -220,6 +305,17 @@ class PublicTimeline:
     section_chars_total: int = 0
     section_lines_total: int = 0
     section_requests: int = 0
+    # TASK-059: 引用された相手の時点別内訳（違反の指摘ではなく「どの時点の証拠を
+    # 引いたか」の観測）。婉曲での仮定引用・未発言者名の一般言及は自由な議論なので
+    # future_event_referenceとは別枠に数える。本文は書き換えない。
+    citations_same_turn: int = 0
+    citations_earlier_turn: int = 0
+    citations_dead_history: int = 0
+    citations_never_spoken: int = 0
+    hedged_pending_citations_observed: int = 0
+    mentions_without_attribution_observed: int = 0
+    checks_skipped_empty_body: int = 0
+    reference_cause_counts: dict[str, int] = field(default_factory=dict)
     _seen_keys: set[tuple[object, ...]] = field(
         default_factory=set, repr=False, compare=False
     )
@@ -347,6 +443,9 @@ class PublicTimeline:
                 1.0 - (self.unresolvable_references / attributed), 4
             ),
             "future_events_withheld": self.future_events_withheld,
+            # TASK-059の観測値（引用時点の内訳・観察カウンタ）は here では公開しない。
+            # 台帳の公開面はTASK-056で固定した中立カウンタの形を保ち、内訳はイベント側
+            # （report.to_log_fields）と observation_metrics() だけで見る。
             "day_timeline_chars_avg": round(
                 self.section_chars_total / max(1, self.section_requests), 1
             ),
@@ -354,6 +453,56 @@ class PublicTimeline:
                 self.section_lines_total / max(1, self.section_requests), 2
             ),
         }
+
+    def observation_metrics(self) -> dict[str, object]:
+        """TASK-059の観測専用メトリクス（公開台帳の serialize には載せない内訳）。
+
+        未来参照の指摘件数とは別枠で、「誰のどの時点の発言を根拠にしたかったのか」の
+        分解と、違反に数えなかった観察（婉曲での仮定引用・未発言者名の一般言及）を出す。
+        cli の診断ログ側（非公開面）でのみ使い、実機の議論の自由度へは干渉しない。
+        """
+        return {
+            "citation_status_counts": {
+                CITATION_SAME_TURN: self.citations_same_turn,
+                CITATION_EARLIER_TURN: self.citations_earlier_turn,
+                CITATION_DEAD_HISTORY: self.citations_dead_history,
+                CITATION_NEVER_SPOKEN_YET: self.citations_never_spoken,
+            },
+            "hedged_pending_citations_observed": int(
+                self.hedged_pending_citations_observed
+            ),
+            "mentions_without_attribution_observed": int(
+                self.mentions_without_attribution_observed
+            ),
+            "timeline_checks_skipped_empty_body": int(self.checks_skipped_empty_body),
+            "evidence_reference_cause_counts": dict(self.reference_cause_counts),
+        }
+
+    def record_observation(self, report: "TimelineReferenceReport") -> None:
+        """TASK-059: 1検査分の観測値を台帳へ積む（本文・発言内容の修正は一切しない）。
+
+        未来参照の指摘（findings）とは別に、引用された相手の時点別内訳と
+        「違反に数えなかった観察」（婉曲での仮定引用・未発言者名の一般言及）を積む。
+        """
+        status_map = {
+            CITATION_SAME_TURN: "citations_same_turn",
+            CITATION_EARLIER_TURN: "citations_earlier_turn",
+            CITATION_DEAD_HISTORY: "citations_dead_history",
+            CITATION_NEVER_SPOKEN_YET: "citations_never_spoken",
+        }
+        for status, count in dict(report.citation_status_counts or {}).items():
+            attribute = status_map.get(str(status))
+            if attribute is not None:
+                setattr(self, attribute, int(getattr(self, attribute)) + int(count))
+        self.hedged_pending_citations_observed += int(report.hedged_pending_citations)
+        self.mentions_without_attribution_observed += int(
+            report.mentions_without_attribution
+        )
+        for cause, count in dict(report.reference_token_counts or {}).items():
+            key = str(cause)
+            self.reference_cause_counts[key] = (
+                int(self.reference_cause_counts.get(key, 0)) + int(count)
+            )
 
     def serialize(self) -> dict[str, object]:
         """ログ用の逐列表現（時点・ID・要約のみ。本文と非公開情報は含まれない）。"""
@@ -478,6 +627,12 @@ def build_turn_snapshot(state: object, actor_name: str) -> TurnSnapshot:
         today_vote_done=getattr(state, "voting_completed_day", None) == day,
         night_pending=winner is None and phase_value in {"day_discussion", "voting"},
         next_speech_id=_next_speech_id(state),
+        # TASK-059: 全公開発言のポイント（話者, day, turn, speech_id）。引用の時点判定に使う。
+        all_speech_points=tuple(
+            (str(event.actor or ""), int(event.day), int(event.turn), int(event.speech_id or 0))
+            for event in all_speeches
+            if event.actor
+        ),
     )
 
 
@@ -811,16 +966,24 @@ class FutureReferenceFinding:
     sentence: str
     names: tuple[str, ...]
     reason: str
+    # TASK-059: speech_from_unspoken_player の内訳分類（観測専用タグ）。判定は変えない。
+    subtype: str = ""
+    cause: str = ""
 
     def to_dict(self) -> dict[str, object]:
         digest = hashlib.sha256(self.sentence.encode("utf-8")).hexdigest()[:16]
-        return {
+        payload: dict[str, object] = {
             "category": self.category,
             "names": list(self.names),
             "reason": self.reason,
             "sentence_excerpt": self.sentence[:80],
             "sentence_sha256": digest,
         }
+        if self.subtype:
+            payload["subtype"] = self.subtype
+        if self.cause:
+            payload["cause"] = self.cause
+        return payload
 
 
 @dataclass(frozen=True)
@@ -831,6 +994,14 @@ class TimelineReferenceReport:
     attributed_references: int
     unresolvable_references: int
     body_char_count: int
+    # TASK-059: 引用された相手の時点別内訳と、違反には数えない観察カウンタ。
+    # （婉曲での仮定引用・未発言者名の一般言及は自由な議論なので区別して数える）
+    citation_status_counts: dict = field(default_factory=dict)
+    hedged_pending_citations: int = 0
+    mentions_without_attribution: int = 0
+    # TASK-059: 本文の `[speech:N]` / `[ref:sN]` 参照を時点照合した内訳（解決済み・
+    # まだ存在しないID・旧ログ互換で検証不能・IDなしの帰属）
+    reference_token_counts: dict = field(default_factory=dict)
 
     @property
     def grounding_rate(self) -> float:
@@ -855,6 +1026,16 @@ class TimelineReferenceReport:
             "attributed_references_observed": self.attributed_references,
             "unresolvable_references": self.unresolvable_references,
             "evidence_grounding_rate_at_speech_time": self.grounding_rate,
+            # TASK-059: 引用の時点状態と観察専用カウンタ（誤検出率の監視に使う。
+            # future_event_reference_categories と違い、これは違反の指摘ではない）。
+            "citation_status_counts": dict(self.citation_status_counts),
+            "hedged_pending_citations_observed": int(self.hedged_pending_citations),
+            "mentions_without_attribution_observed": int(
+                self.mentions_without_attribution
+            ),
+            # TASK-059: 証拠ID参照の時点照合結果（原因別の内訳）。実在しないIDを指して
+            # いないかを実機ログで分解するために使う（本文は変えない）。
+            "evidence_reference_counts": dict(self.reference_token_counts),
             # 観測専用であることの証跡（自動修正・再生成要求は行わない）
             "body_modified": False,
         }
@@ -878,6 +1059,11 @@ def inspect_public_body(
     findings: list[FutureReferenceFinding] = []
     attributed = 0
     unresolvable = 0
+    # TASK-059: 時点別の引用状態カウントと、違反扱いしない観察値（婉曲・一般名指し）
+    citation_counts: dict[str, int] = {}
+    hedged_pending = 0
+    mentions_no_attribution = 0
+    reference_counts: dict[str, int] = {}
     dead_known = dict(snapshot.known_dead)
     for sentence in sentences:
         norm = _normalize_text(sentence)
@@ -887,8 +1073,36 @@ def inspect_public_body(
         others = tuple(name for name in names if name != snapshot.actor)
         hedged = _is_hedged(norm)
         cites_speech = any(term in norm for term in _ATTRIBUTION_TERMS)
+        # TASK-059: 本文に書かれた証拠ID参照（`[speech:N]` / `[ref:sN]`）を時点照合する。
+        # ここは分類だけで future_event_reference の件数も本文も変えない（誤検出を増やさない）。
+        sentence_reference = classify_reference_tokens(sentence, snapshot)
+        for reference_key, reference_count in sentence_reference.items():
+            reference_counts[reference_key] = (
+                reference_counts.get(reference_key, 0) + reference_count
+            )
         if cites_speech and names:
             attributed += 1
+            if others and not sentence_reference:
+                # 発言の帰属なのに証拠IDが付いていない（追跡の糸口が本文しかない）ケース
+                reference_counts[REFERENCE_CAUSE_MISSING_ID] = (
+                    reference_counts.get(REFERENCE_CAUSE_MISSING_ID, 0) + 1
+                )
+        # TASK-059: 引用された相手それぞれの時点での発言履歴を分類して記録する。
+        # 判定（future_event_reference）はこの追記では変えない — 数えるのは従来どおり
+        # 「未発言者を断定した場合」だけで、婉曲と一般名指しは観察専用にする。
+        if others:
+            statuses = {name: snapshot.citation_status(name) for name in others}
+            for status in statuses.values():
+                citation_counts[status] = citation_counts.get(status, 0) + 1
+            all_without_speech = all(
+                status == CITATION_NEVER_SPOKEN_YET for status in statuses.values()
+            )
+            if cites_speech and hedged and all_without_speech:
+                # 「もし Player X が言っていたなら」式の仮定は自由な議論なので指摘しない
+                hedged_pending += 1
+            elif not cites_speech and all_without_speech:
+                # 未発言者の名前を一般論として挙げただけ（誤帰属ではない）を観察する
+                mentions_no_attribution += 1
         category: str | None = None
         reason = ""
         # 1) まだ投票していない日の投票結果を断定していないか
@@ -936,12 +1150,29 @@ def inspect_public_body(
             category = FUTURE_SPEECH_FROM_UNSPOKEN
             reason = "no public speech by them existed at this point"
         if category is not None:
+            subtype = ""
+            cause = ""
+            if category == FUTURE_SPEECH_FROM_UNSPOKEN:
+                # TASK-059: 実際に未発言者への断定だった場合の内訳タグ（観測専用で、
+                # 判定の緩和・強化はこのフィールドでは行わない）。ID参照の実在まで見る。
+                subtype = SUBTYPE_ATTRIBUTION_NEVER_SPOKEN
+                if REFERENCE_CAUSE_ID_NOT_SPOKEN_YET in sentence_reference:
+                    # 本文がまだ登られていないIDを引いていた（実際の未来参照）
+                    cause = REFERENCE_CAUSE_ID_NOT_SPOKEN_YET
+                elif REFERENCE_CAUSE_LEGACY_HISTORY in sentence_reference:
+                    # 時点情報がない履歴（旧ログ互換）では検証不能だった、と分ける
+                    cause = REFERENCE_CAUSE_LEGACY_HISTORY
+                else:
+                    # IDなしに言及しただけ／そもそもその人物の公開発言が存在しない
+                    cause = CAUSE_NO_PUBLIC_SPEECH_AT_POINT
             findings.append(
                 FutureReferenceFinding(
                     category=category,
                     sentence=sentence.strip()[:200],
                     names=names,
                     reason=reason,
+                    subtype=subtype,
+                    cause=cause,
                 )
             )
             # 根拠追跡率の分母は「他者の発言を引用した参照」だけ。投票・死亡・夜行動の
@@ -953,6 +1184,10 @@ def inspect_public_body(
         attributed_references=attributed,
         unresolvable_references=unresolvable,
         body_char_count=len(body),
+        citation_status_counts=dict(citation_counts),
+        hedged_pending_citations=int(hedged_pending),
+        mentions_without_attribution=int(mentions_no_attribution),
+        reference_token_counts=dict(reference_counts),
     )
 
 

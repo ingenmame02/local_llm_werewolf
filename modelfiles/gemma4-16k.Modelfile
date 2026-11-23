@@ -1,0 +1,2 @@
+FROM werewolf-gemma4-8k:latest
+PARAMETER num_ctx 16384

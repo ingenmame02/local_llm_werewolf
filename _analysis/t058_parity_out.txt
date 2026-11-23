@@ -1,0 +1,3 @@
+hint=strict: legacy parity -> OK
+hint=soft: legacy parity -> OK
+[DONE] all-legacy-parity-ok

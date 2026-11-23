@@ -1,0 +1,17 @@
+prompt_layout_policy(init): v3
+log: game_f3d0ad3ff21e.jsonl | diagnostics layout counts: {}
+   avg_prompt_user_chars = 0.0
+   avg_prompt_zone_primacy_chars = 0.0
+   avg_prompt_zone_middle_chars = 0.0
+   avg_prompt_zone_recency_chars = 0.0
+   avg_prompt_instructions_to_end_chars = 0.0
+   avg_prompt_weak_middle_must_use_chars = 0.0
+   avg_prompt_theory_card_chars = 0.0
+   avg_gap_question_to_evidence = 0.0
+   avg_gap_timeline_to_evidence = 0.0
+   avg_gap_own_speeches_to_question = 0.0
+   duplicate_constraint_total = 0
+   prompt_layout_counts = {'legacy_v1': 0, 'v2_attention': 0, 'v3_grounding': 0}
+   prompt_layout_violations = 0
+   dedup_saved_chars_total = 0
+[OK]

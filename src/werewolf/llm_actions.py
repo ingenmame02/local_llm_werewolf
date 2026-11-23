@@ -96,6 +96,12 @@ from .prompt_contract import (
     normalize_prompt_contract_policy,
     optional_names_dropped_up_to,
 )
+# TASK-058: core予算の段階圧縮ポリシー（layered/off）。証拠本文の stub 化は prompts.py が行うが、
+# 同じポリシーを builder へ通す必要がある（発言の口調・論点には干渉しない）。
+from .core_compression import normalize_core_compression_policy
+# TASK-060: 議論プロンプトの節順（layout v2 / v3）をstateから解決してbuilderへ渡す。
+# 内容（発言の口調・論点・結論）には干渉せず、情報の載る位置と重複行だけを変える設定。
+from .prompt_layout import normalize_prompt_layout_policy
 from .leak_gate_policy import (
     DEFAULT_LEAK_GUARD_POLICY,
     RULE_INTERNAL_CONFIG,
@@ -926,6 +932,15 @@ class OllamaActions(ActionPolicy):
         contract_policy = normalize_prompt_contract_policy(
             getattr(self.state, "prompt_contract_policy", None)
         )
+        # TASK-058: core圧縮のポリシーもstateから解決する（未知値は既定のlayered）。
+        core_policy = normalize_core_compression_policy(
+            getattr(self.state, "core_compression_policy", None)
+        )
+        # TASK-060: 節順（layout）もstateから解決する。contract=legacy のときは builder 内
+        # で旧バイト順へ寄せるため、ここでの指定はA/B比較の切り替えにしか使わない。
+        layout_policy = normalize_prompt_layout_policy(
+            getattr(self.state, "prompt_layout_policy", None)
+        )
         stage_limit = (
             OPTIONAL_REMOVAL_MAX_STAGE
             if contract_policy != PROMPT_CONTRACT_POLICY_LEGACY
@@ -947,6 +962,8 @@ class OllamaActions(ActionPolicy):
                 free_form_priority=free_form_priority,
                 question_hint_mode=self.question_hint_mode,
                 prompt_contract_policy=contract_policy,
+                core_compression_policy=core_policy,
+                prompt_layout_policy=layout_policy,
                 optional_sections_dropped=dropped,
             )
 
@@ -4998,6 +5015,10 @@ class OllamaActions(ActionPolicy):
                     # TASK-057: プロンプト契約の選択はプロンプト構築側（state）で使う設定なので、
                     # サーバーへは送らない（送信オプションに未知のキーを混ぜない）。
                     "prompt_contract_policy",
+                    # TASK-058: core圧縮の選択も送信オプションではなく構築側の設定。
+                    "core_compression_policy",
+                    # TASK-060: 節順（layout）も構築側の設定で、Ollamaへは送らない。
+                    "prompt_layout_policy",
                 }
             }
             if self.options is not None

@@ -1,0 +1,10 @@
+[0] score=52.75 eff=0.7718 adj=3.95 dil=0.0 wm=20.47 clutter=0.0
+     violations: []
+     zones: {'primacy': 1910, 'weak_middle': 16850, 'recency': 6480}
+     order: system_rules, output_language, self_action_memory, fact_ledger, private_seer_result, actor_private_memo, info_boundaries, werewolf_theory_card, inference_line, hypothesis_ledger, previous_topics, continuity_memo, integrity_alerts, day1_first_turn_guidance, first_night_guidance, round_transcript, claim_ledger, day_timeline, conversation_evidence, current_task, question_block, direct_answer, own_speeches, reasoning_memo_own, reasoning_guidance, discussion_guidelines, leak_boundary, behavior_contract, instructions, output_checklist
+[1] score=52.75 eff=0.7718 adj=3.95 dil=0.0 wm=20.47 clutter=0.0
+     violations: []
+     zones: {'primacy': 1910, 'weak_middle': 16850, 'recency': 6480}
+     order: system_rules, output_language, self_action_memory, fact_ledger, round_transcript, private_seer_result, actor_private_memo, info_boundaries, werewolf_theory_card, inference_line, hypothesis_ledger, previous_topics, continuity_memo, integrity_alerts, day1_first_turn_guidance, first_night_guidance, claim_ledger, day_timeline, conversation_evidence, current_task, question_block, direct_answer, own_speeches, reasoning_memo_own, reasoning_guidance, discussion_guidelines, leak_boundary, behavior_contract, instructions, output_checklist
+frozen v3 : 52.75 () {'primacy': 1910, 'weak_middle': 16850, 'recency': 6480}
+v2 order  : -153.07 ({'kind': 'anchor_split', 'name': 'own_speeches|reasoning_memo_own'}, {'kind': 'guidelines_after_format', 'name': 'discussion_guidelines'}) {'primacy': 2730, 'weak_middle': 14650, 'recency': 5180}

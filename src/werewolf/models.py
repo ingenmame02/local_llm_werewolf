@@ -41,6 +41,19 @@ from .prompt_contract import (
     PROMPT_CONTRACT_POLICY_DEFAULT,
     normalize_prompt_contract_policy,
 )
+# TASK-058: core予算の段階圧縮（layered / off）。core節を anchor / recent / historical の
+# 保持層に分け、歴史情報の本文だけを短い行へ畳む。発言の口調・論点には干渉しない。
+from .core_compression import (
+    CORE_COMPRESSION_POLICY_DEFAULT,
+    normalize_core_compression_policy,
+)
+# TASK-060: 議論プロンプトの節順（layout）。v3 は発言証拠・時点・現在質問・自分の連続性
+# アンカーを終端帯へ、誘導の強い節（人狼セオリーカード）は中部帯へ寄せる設定で、
+# 口調・論点・結論や推理の順番は決めない。v2 / auto で従来配置とのA/B比較が可能。
+from .prompt_layout import (
+    PROMPT_LAYOUT_POLICY_DEFAULT,
+    normalize_prompt_layout_policy,
+)
 
 
 class Role(str, Enum):
@@ -513,6 +526,16 @@ class GameState:
     # 発言本文の再掲を1箇所に集め、コンテキスト不足時に optional 節だけを段階的に落とす。
     # legacy はA/B比較用の旧挙動（重複した命令文のまま）で、発言の口調・論点には干渉しない。
     prompt_contract_policy: str = PROMPT_CONTRACT_POLICY_DEFAULT
+    # TASK-058: core予算の段階圧縮（"layered" / "off"）。layered は証拠欄の中で
+    # 「既に台帳へ正規化済みの過去の低優先発言」の本文だけを短い行へ畳む。anchor
+    # （ルール・現在質問・自分の行動記録など）は常に全文保持し、削除ではなく
+    # 役割を保った圧縮だけ行う。off はA/B比較用の旧挙動（従来削除のみ）。
+    core_compression_policy: str = CORE_COMPRESSION_POLICY_DEFAULT
+    # TASK-060: 議論プロンプトの節順ポリシー（"v3" / "v2" / "auto"）。v3（既定）は発言証拠・
+    # 時点・現在質問・自分の連続性アンカーを終端帯へ寄せ、誘導の強いセオリーカードを中部帯
+    # （optional化＝割り当て不足時に第2段階で落ちる）へ下げる。口調・論点・結論は自由のまま。
+    # v2 はTASK-058の配置、auto は契約ポリシーに追随（legacy契約では旧バイト順）。
+    prompt_layout_policy: str = PROMPT_LAYOUT_POLICY_DEFAULT
 
     def __post_init__(self) -> None:
         if self.day < 0:
@@ -524,6 +547,13 @@ class GameState:
         self.prompt_contract_policy = normalize_prompt_contract_policy(
             self.prompt_contract_policy
         )
+        # TASK-058: core圧縮ポリシーも正規化する（未知値は既定の layered）
+        self.core_compression_policy = normalize_core_compression_policy(
+            self.core_compression_policy
+        )
+        # TASK-060: 節順ポリシーも正規化する（未知値は既定の v3）。legacy 契約のときは
+        # プロンプト構築側（PromptBuilder）で旧バイト順へ寄せられる。
+        self.prompt_layout_policy = normalize_prompt_layout_policy(self.prompt_layout_policy)
         if not 0 <= self.discussion_turn <= 3:
             raise ValueError("Discussion turn must be between zero and three.")
         names = [player.name for player in self.players]

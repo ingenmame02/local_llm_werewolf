@@ -1,0 +1,2 @@
+FROM werewolf-glm-4.7-flash-8k:latest
+PARAMETER num_ctx 16384

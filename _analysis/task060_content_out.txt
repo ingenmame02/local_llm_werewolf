@@ -1,0 +1,46 @@
+------------------------------------------------------------ v3
+   count[- Self-Reference:] = 0
+   count[- Response Language:] = 0
+   count[ask dead players] = 1
+   count[recorded in the ledger] = 0
+   count[True Roles of Dead Players] = 1
+   count[[OUTPUT_LANGUAGE]] = 1
+   count[Free:] = 0
+   count[[BEHAVIOR_CONTRACT] = 1
+   count[- Separate engine-confirmed facts] = 1
+   dup_constraints: 3
+   core_anchor_chars: 5771 recent: 1125 historical: 0
+   dedup_refs: 4
+------------------------------------------------------------ v2
+   count[- Self-Reference:] = 1
+   count[- Response Language:] = 1
+   count[ask dead players] = 2
+   count[recorded in the ledger] = 1
+   count[True Roles of Dead Players] = 1
+   count[[OUTPUT_LANGUAGE]] = 1
+   count[Free:] = 0
+   count[[BEHAVIOR_CONTRACT] = 1
+   count[- Separate engine-confirmed facts] = 0
+   dup_constraints: 5
+   core_anchor_chars: 6417 recent: 1133 historical: 0
+   dedup_refs: 4
+------------------------------------------------------------ legacy
+   count[- Self-Reference:] = 1
+   count[- Response Language:] = 1
+   count[ask dead players] = 2
+   count[recorded in the ledger] = 1
+   count[True Roles of Dead Players] = 1
+   count[[OUTPUT_LANGUAGE]] = 1
+   count[Free:] = 0
+   count[[BEHAVIOR_CONTRACT] = 0
+   count[- Separate engine-confirmed facts] = 0
+   dup_constraints: 11
+   core_anchor_chars: 6005 recent: 1087 historical: 0
+   dedup_refs: 0
+system_prompt identical v2/v3: True
+v3 dead names present: ()
+v3 body counts: (1, 1, 1, 1)
+v3 guidelines span: (9031, 10856) evidence chars: 785
+v2 dead names present: ()
+v2 body counts: (1, 1, 1, 1)
+v2 guidelines span: (11203, 13007) evidence chars: 793

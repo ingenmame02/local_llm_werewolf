@@ -1,0 +1,13 @@
+day1T1 strict budget=None layout=v2_attention
+  chars=13873 anchor=6188 recent=688 historical=0 withheld=0 stage=full
+  v3 layout=v3_grounding chars=13236 violations=0 dilution=1752->0 own_question_gap=0.2948->0.0000 dup=4->2
+day1T2 strict budget=4200 layout=v2_attention
+  chars=14171 anchor=6333 recent=1778 historical=0 withheld=0 stage=full
+  v3 layout=v3_grounding chars=13534 violations=0 dilution=1752->0 own_question_gap=0.3095->0.0000 dup=4->2
+day2T1 soft budget=2600 layout=v2_attention
+  chars=14162 anchor=6266 recent=1820 historical=0 withheld=0 stage=full
+  v3 layout=v3_grounding chars=13525 violations=0 dilution=1768->0 own_question_gap=0.3127->0.0000 dup=4->2
+day3T3 none budget=1800 layout=v2_attention
+  chars=13835 anchor=6155 recent=1862 historical=0 withheld=0 stage=full
+  v3 layout=v3_grounding chars=13198 violations=0 dilution=1510->0 own_question_gap=0.0000->0.0000 dup=4->2
+[DONE] LAYOUT-OK

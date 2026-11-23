@@ -125,6 +125,18 @@ PROMPT_SECTIONS: tuple[PromptSectionMeta, ...] = (
         source=AUTHORITY_ENGINE,
         authority=AUTHORITY_ENGINE,
     ),
+    # TASK-060: 人狼セオリーカードは `_fact_header()` の末尾に貼り付いていたが、台帳へ
+    # 登録しないと [FACT_LEDGER] のスパンに吸われて anchor 字数に計上され、段階除去も
+    # 効かなかった。役割（推論の目安＝確定事実ではない）を明示して optional にする。
+    PromptSectionMeta(
+        name="werewolf_theory_card",
+        markers=("[Werewolf Theory Card",),
+        tier=TIER_OPTIONAL,
+        purpose="role heuristics for CO and verdict interpretation (advisory, not facts)",
+        source=AUTHORITY_TEMPORARY,
+        authority=AUTHORITY_TEMPORARY,
+        expires_at=None,
+    ),
     PromptSectionMeta(
         name="claim_ledger",
         markers=("[CLAIM_LEDGER]",),
@@ -364,7 +376,9 @@ def tier_of(name: str) -> str:
 # エンジン発行情報・発言本文・現在の質問はどの段階でも削らない（一貫性优先）。
 OPTIONAL_REMOVAL_STAGES: tuple[tuple[str, ...], ...] = (
     ("previous_topics", "reasoning_guidance"),
-    ("hypothesis_ledger", "inference_line"),
+    # TASK-060: セオリーカード（推論の目安）は確定事実でも証拠でもないため、未検証の派生
+    # 情報と同じ第2段階で落とす。ここを削ると約2.7k字が浮き、発言証拠と質問の領域が守れる。
+    ("hypothesis_ledger", "inference_line", "werewolf_theory_card"),
     ("day1_first_turn_guidance", "first_night_guidance", "direct_answer"),
     ("integrity_alerts", "continuity_memo"),
 )
@@ -426,18 +440,38 @@ def drop_sections(text: str, names: Iterable[str]) -> tuple[str, tuple[str, ...]
     return pruned, tuple(sorted(removed_names)), max(0, saved)
 
 
+def _first_marker_hit(text: str, marker: str) -> int:
+    """マーカーの「見出しとしての出現位置」を求める（行頭 or プロンプト先頭を優先する）。
+
+    TASK-060で必要になった修正。派生節の説明文が他の見出しトークンを本文中に再掲する
+    ことがある（例: `[CONTINUITY_MEMO]` の案内が `[CLAIM_LEDGER]` に言及する）。素朴な
+    `str.find()` だとその言及を節の開始と見誤り、スパン・節順検査・`drop_sections` が
+    ずれる。ここでは行頭（または文頭）の出現を優先し、そうした出現が無い場合だけ従来どおり
+    最初の出現へ戻る（既存プロンプトの後方互換）。
+    """
+    pattern = re.compile(re.escape(marker))
+    for match in pattern.finditer(text):
+        index = match.start()
+        if index == 0 or text[index - 1] == "\n":
+            return index
+    return text.find(marker)
+
+
 def _marker_positions(text: str) -> list[tuple[int, str]]:
     """台帳の全マーカー出现位置を (位置, 節名) の先頭順で返す（重複マーカーは除外）。"""
     found: list[tuple[int, str]] = []
     for section in PROMPT_SECTIONS:
+        best_index = -1
         for marker in section.markers:
-            index = text.find(marker)
-            if index >= 0:
-                found.append((index, section.name, -len(marker)))
+            index = _first_marker_hit(text, marker)
+            if index >= 0 and (best_index < 0 or index < best_index):
+                best_index = index
+        if best_index >= 0:
+            found.append((best_index, section.name, 0))
     found.sort()
     seen_indexes: set[int] = set()
     deduped: list[tuple[int, str]] = []
-    for index, name, _negative_length in found:
+    for index, name, _tiebreak in found:
         if index in seen_indexes:
             continue
         seen_indexes.add(index)
@@ -535,7 +569,7 @@ def quote_or_reference(
     speech_id: object,
     evidence_speech_ids: frozenset[int],
     *,
-    note: str = "(same speech as [CONVERSATION_EVIDENCE])",
+    note: str = "(same speech, quoted below)",
 ) -> tuple[str, bool, int]:
     """発言引用を「参照」へ差し替えられるかどうかを決める。
 

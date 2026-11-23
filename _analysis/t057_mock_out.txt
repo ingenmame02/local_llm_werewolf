@@ -1,0 +1,17 @@
+log: game_e866130f0d3c.jsonl
+prompt_contract_policy: simplified
+selections: 0
+selections_with_contract_diagnostics: 0 / 0
+stages: {}
+  avg_prompt_user_chars: 0.0
+  max_prompt_user_chars: 0
+  avg_prompt_core_chars: 0.0
+  avg_prompt_optional_chars: 0.0
+  dedup_references_total: 0
+  dedup_saved_chars_total: 0
+  duplicate_constraint_total: 0
+  optional_removed_chars_total: 0
+  avg_prompt_build_calls: 0.0
+  avg_contract_stage_attempts: 0.0
+  largest sections (chars across requests): []
+  髱槫・髢九く繝ｼ縺ｮ豺ｷ蜈･: none

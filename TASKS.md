@@ -2365,7 +2365,21 @@ Player 4の初回議論では、推定必要量が15,630 tokensに達し、後�
 
 ## TASK-058 最新ゲーム分析 — 実機8kモデル向けcore予算の段階圧縮
 
-状態：未着手（実機ログ `game_106015c79ec9` で課題を確認。実装・比較未実施）
+状態：実装完了（ローカル検証まで実施。同一seedの実機Ollama A/Bは未実施）
+
+### 実装概要（TASK-058）
+
+- `src/werewolf/core_compression.py` を新規追加。coreを保持層に分け、`anchor`（ルール・出力言語・確定事実台帳・現在の質問・行動形式指示・自分の行動記録・エンジン発行情報・秘匿境界・契約・チェックリスト）は常に全文、`recent`（主張台帳・自分の発言・発言証拠）は本文保持を優先、`historical`（既に台帳済みの過去の低優先発言）は時点・話者・`[speech:N]`だけを残す約70字のstub行（`HISTORICAL_STUB_MARK`）へ畳む。削除ではなく「役割を保った圧縮」で、公開ログの本文は一字も変わらない。
+- 証拠レコードの優先度を実装（`PRIORITY_CLAIM > PRIORITY_QUESTION > PRIORITY_COUNTER > PRIORITY_PLAIN`）。質問対象・反証・投票・役職主張と占い判定（`looks_like_claim` / `CLAIM_CONTENT_PATTERN`）はstub化候補から外し、同じ群では古い順に畳む（`sort_records_for_withholding`＝単純な末尾切り捨ての禁止）。直近`RECENT_KEEP_COUNT`件は低優先でも本文を残す。
+- プロンプトレイアウトv2（attention最適化）を `PROMPT_LAYOUT_V2_ORDER` として宣言し、`prompt_contract_policy=simplified` の組み立てを primacy（ルール→事実台帳→自分の一貫性アンカー）→中部（落としやすい派生節のみ）→pre-recency（発言証拠→現在質問）→recency（秘匿境界→契約→出力形式→チェックリスト）へ変更した。口調・論点・結論や推理順を決める節は追加していない（`test_compression_never_adds_instructions_about_tone_or_reasoning_order` で固定）。`legacy` ではTASK-057までの字节順を維持（`_analysis/task058_legacy_parity.py` が strict/soft 両モードでバイト一致を実測）。
+- 診断追加: `core_anchor_chars` / `core_recent_chars` / `core_historical_chars`、`prompt_layout`、`prompt_layout_violations`（`validate_prompt_layout` による節順の静的検査）、`evidence_withheld_body_count`、`evidence_withheld_saved_chars`、`core_compression_applied` を cli の診断ログへ集計する。
+- `--core-compression {layered,off}`（既定 layered）と `GameState.core_compression_policy` を追加。`off` はA/B基準の旧挙動（従来削除のみ・stub行なし）。
+
+### ローカル検証（実機LLM不使用・テスト218件パス）
+
+- `python -m pytest -q` → 218 passed（TASK-058専用12件を含む）。レイアウト崩れ検出、stub行の内容（時点・IDのみ／役職語・襲撃対象語を含まない）、古い低優先発言から畳み最新は本文で残ること、`anchor`字数が layered/off で完全に一致すること、公開ログ本文の不変を確認。
+- `_analysis/task058_legacy_parity.py`: `legacy` + `off` が改修前プロンプト（バックアップ比較）と strict/soft 両モードで完全一致 → A/B比較の基準が壊れていないことを実測。
+- 完了条件のうち実機A/B（同一seedでの平均・最大user prompt削減、モデル別thinking-only / truncation / 再要求率の比較）は未実施。実測時は `--prompt-contract simplified --core-compression layered` と `off` を同一seedで回し、`avg_prompt_user_chars`、`core_anchor_chars`、`evidence_withheld_body_total`、`contract_stage{1..4}_removals` で比較する。
 
 ### 背景
 
@@ -2396,7 +2410,21 @@ coreを「常に全文保持する情報」と「同じ意味を短い事実へ�
 
 ## TASK-059 最新ゲーム分析 — 時系列参照の未解決・誤帰属を根拠付きで解消
 
-状態：未着手（TASK-056の実機ログ評価で課題を確認）
+状態：実装完了（ローカル検証まで実施。実機ログの再現評価は未実施）
+
+### 実装概要（TASK-059）
+
+- `TurnSnapshot` に全公開発言のポイント `(話者, day, turn, speech_id)` を持つ `all_speech_points` を追加し、`citation_status()` で引用時点を実装した。`already_spoken_same_turn` / `spoken_in_earlier_turn_or_day` / `dead_player_public_history` / `no_public_speech_at_point` の4分類で、実際の未来参照候補は最後の状態だけに絞られる（死亡者は発言の有無に関わらず履歴参照側へ寄せる）。
+- 判定（`future_event_reference`）はTASK-056と同じ条件のまま不変。婉曲での仮定引用（「もし Player X が言っていたなら」）と、未発言者名の一般言及は違反に数えず観察専用カウンタ（`hedged_pending_citations_observed` / `mentions_without_attribution_observed`）へ逃がし、議論の自由を萎ませない。
+- `FutureReferenceFinding` に観測専用の `subtype` / `cause` を追加（`attribution_to_never_spoken_player` など）。本文の書き換え・自動修正・再生成要求は一切行わない（`body_modified: false` を維持）。
+- 本文中の `[speech:N]` / `[ref:sN]` を時点照合する `classify_reference_tokens` を追加し、`resolved_at_point` / `id_not_spoken_at_this_point`（実際の未来参照） / `unverifiable_history_without_stamps`（旧ログ互換） / `citation_without_evidence_id`（帰属なのにIDなし）へ分解した。
+- 検査スキップ理由を分離: 公開本文が空のリクエストは `reference_checks` / `bodies_checked` に数えず `timeline_checks_skipped_empty_body` として記録し、検査対象数を水増ししない。
+- 台帳の公開面は変えない方針を維持するため、引用内訳はイベント側の `citation_status_counts` / `evidence_reference_counts` と、`PublicTimeline.observation_metrics()`（診断専用）でのみ公開し、`serialize()["metrics"]` の形と字数はTASK-056のまま据え置いた（`test_public_ledger_metrics_keep_the_old_shape`）。`day_timeline=off` では検査も観測フィールドも行わない互換動作を維持。
+
+### ローカル検証（実機LLM不使用・テスト218件パス）
+
+- `tests/test_task059_citation_states.py` で、同一ターン先行／別ターン既発言／死亡後履歴／未発言の4分類、婉曲仮定と一般名指しが違反にならないこと、真の誤帰属だけが `subtype`/`cause` 付きで検出されること、ID参照の時点照合（旧ログでは検証不能扱い）、エンジン統合でも公開本文が一字も変わらないこと、空本文がスキップ扱いになることを固定した。
+- 未解決参照の原因分類（ID欠落・旧ログ互換・まだ存在しないID）はログ側で100%分解可能。`--timeline explicit` の実機ログで `citation_status_counts` と `evidence_reference_counts` をモデル別に集計し、`future_event_reference_rate` の内訳を実測する手順は未実行（実機テストは行っていない）。
 
 ### 背景
 
@@ -2423,3 +2451,133 @@ coreを「常に全文保持する情報」と「同じ意味を短い事実へ�
 - 実際の未来参照・誤帰属は減少し、婉曲表現・疑問文・自由な仮説の誤検出率は増加しない。
 - `evidence_grounding_rate_at_speech_time` と現在質問への回答率を維持または改善する。
 - 本文変更なし、公開台帳への秘匿情報混入なし、`day_timeline=off` の互換動作を維持する。
+
+## TASK-060 実装記録 — 8k派生モデルのModelfileコンテキストを16kへ拡張
+
+状態：派生モデル作成・設定切替完了（ゲーム品質の実機比較は未実施）
+
+TASK-058の検討に先行して、8k系8モデルの基盤モデル上限をOllamaで確認した。CALM3は16,384、Mistral Smallは32,768、その他は13万〜26万token級の公称コンテキスト長だったため、共通の安全値として16,384を採用した。
+
+既存の`werewolf-*-8k`は上書きせず、`modelfiles/*-16k.Modelfile`を追加し、以下の派生モデルを`ollama create`で作成した。
+
+- `werewolf-calm3-22b-16k`
+- `werewolf-muse-glimmer-16k`
+- `werewolf-mistral-small-16k`
+- `werewolf-glm-4.7-flash-16k`
+- `werewolf-qwen3.8-16k`
+- `werewolf-deepseek-r1-16k`
+- `werewolf-gpt-oss-20b-16k`
+- `werewolf-gemma4-16k`
+
+全モデルで`ollama show --modelfile`から`PARAMETER num_ctx 16384`を確認し、`config/players.json`と`config/players_free.json`のモデル名・`num_ctx`・推奨値を16,384へ切り替えた。元の8kモデルは残しているため、問題発生時は設定を戻せる。コンテキスト拡張によるパース失敗、thinking-only、推論品質、速度、VRAM使用量の改善効果は、TASK-058の同一seed A/Bで評価する。
+## TASK-061 実装記録 — 議論プロンプトの節順最適化（layout v3）・節約・一貫性
+
+状態：実装完了（オフライン検証のみ。実機LLMでのA/B評価は未実施）
+
+### 狙いと4つの設計思想
+
+TASK-057（契約統合）とTASK-058（core圧縮とlayout v2）を経た実機ログで、命令文の再掲・人狼セオリーカードの先頭常置・現在質問と発言証拠／自分の記録との離間・出力形式仕様の後ろへのめり込みが残っていた。今回の変更は「情報の載る位置」と「同じ制約の言い換え行数」だけ動かし、口調・論点・結論・推理の順番には干渉しない。
+
+| 設計思想 | 施策 |
+| --- | --- |
+| コンテキストを節約して性能を上げる | セオリーカード（2,300字）を独立節として台帳へ登録し optional 化（段階除去の第2段階で落ちる）。ヘッダの言い換え行（一人称・応答言語・投票台帳の参照限定）を削除。中部帯には落としやすい派生情報だけを置いた |
+| モデルの一貫性を保つ | 自分の一貫性アンカー（行動記録／今日の発言／自分の推理メモ）を連続配置し、`発言証拠 → 現在質問 → 自分の発言 → 自分の推理メモ → 案内 → 契約 → 出力形式` の順で終端へ寄せた（本文は無傷・削除しない） |
+| 合理的な議論をさせる | 中立な案内 `[Discussion Guidelines & Logical Reasoning]` を保持しつつ、`契約 → 出力形式 → 最終チェックリスト` を終端に固定。形式仕様の直後を空にした（旧配置では案内1,752字が形式指定の後ろに載っていた） |
+| 議論の自由を縛らない | 新しい指示文は追加していない（案内の各行はv2の文言の部分集合）。誘導の強いセオリーカードを先頭から外し、事実台帳より前に出さないハード制約を入れた。契約の自由行（口調・文量・論点・結論は毎回変えてよい）はそのまま |
+
+### 採用した節順（`PROMPT_LAYOUT_V3_ORDER`）
+
+```
+ルール → 応答言語 → 自分の行動記録 → 盤面の確定事実 → 本人限定情報（占い結果・エンジン発行メモ・情報の境界）
+→ [中部] セオリーカード / 未検証の派生情報（推測一覧・仮説差分・既出論点・連続性メモ・期限付き案内・ラウンド見出し）
+→ 公開主張の索引 → 時点（DAY_TIMELINE）→ 発言証拠 → 現在質問 → 自分の発言と自分の推理メモ
+→ 推理メモの指針 → 議論の案内（中立）→ 秘匿境界 → 強い契約 → 出力形式 → 最終チェックリスト
+```
+
+### 順序の決め方（実機を使わない最適化）
+
+`src/werewolf/prompt_layout.py` に attention prior（lost-in-the-middle のU字近似：先頭10%と末尾35%が見えやすく中部が底）と役割別 weight を置き、実プロンプトで実測した節字数（`REPRESENTATIVE_SECTION_CHARS`）を使って任意の節順をスコアリングした。ハード制約（ルール先頭・応答言語は上位3つ・本人限定情報は後半帯へ下げない・終端4節の相対順とチェックリスト末尾・自分の発言と推理メモは隣接・セオリーカードは事実台帳より前へ置かない・案内は証拠の後かつ出力形式の前・盤面事実は上位5つ）の下で、代表順序から単一ブロック移動と2ブロック入替を貪欲適用して最良順を求め、その結果を `PROMPT_LAYOUT_V3_ORDER` として凍結した（決定的・LL不使用）。`_analysis/task060_order_probe.py` が再現用プローブで、凍結順＝最良候補（スコア52.75、違反0）ことを確認する。比較として旧v2宣言順は同モデルで −153.07（anchor_split と guidelines_after_format で弾かれる）。
+
+### 実測した節約と配置（`_analysis/task058_layout_check.py` / `task060_layout_effect.py`）
+
+| 構成 | 送信字数 v2→v3 | 出力形式の後ろの非形式字数 | 質問↔自分の記録の距離 | 同じ制約の再掲 |
+| --- | --- | --- | --- | --- |
+| Day1 T1 strict（予算なし） | 13,873 → 13,236 | 1,752 → 0 | 0.2948 → 0.0000 | 4 → 2 |
+| Day1 T2 strict（4,200） | 14,171 → 13,534 | 1,752 → 0 | 0.3095 → 0.0000 | 4 → 2 |
+| Day2 T1 soft（2,600） | 14,162 → 13,525 | 1,768 → 0 | 0.3127 → 0.0000 | 4 → 2 |
+| Day3 T3 none（1,800） | 13,835 → 13,198 | 1,510 → 0 | 0.0000 → 0.0000 | 4 → 2 |
+
+Day1の実形（本人発言あり・直前に自分への質問）では anchor 層が 6,417 → 5,771字（セオリーカードの段階除去対象化でさらに2,300字が落ち得る）。節順の崩れを示す `prompt_layout_violations` は全構成で0。発言本文は配置が変わっても各1回のまま（二重送信も欠落もなし）、生存者名・死亡者名・台帳の事実はすべて残り、`[SYSTEM_RULES] / [CURRENT_TASK] / [BEHAVIOR_CONTRACT] / [Instructions]` も維持。契約ブロックとシステムプロンプトは v2/v2 と v3 でバイト一致（＝言い方の強制を増やしていない）。
+
+### 下回りの修正（配置測定の信頼性）
+
+- `prompt_contract.find_sections()`：マーカーを「行頭（先頭）の出現」から取るようにした。派生節の説明文が `[CLAIM_LEDGER]` などの見出しトークンを本文中に再掲するため、旧実装はその言及を節の開始と誤認し、節順検査・`drop_sections`・帯字数の実測がずれていた。
+- `weak_middle_must_use_chars()`：中心位置が中部というだけで長節全体を罰する方式をやめ、中部帯と重なった部分だけを数えるようにした（コストモデルの減点基準と揃えた）。
+- `_reasoning_memo_text()`：エンジン発行情報（`[ACTOR_PRIVATE_MEMO]`）と自分の推理メモ（`[YOUR_PREVIOUS_REASONING_MEMO]`）を分離し、v3では前者を前半帯・後者を現在質問の直後へ置いた。v1/v2では従来どおり連結して同じ字节順を再現する。
+- `PromptBuilder._fact_header()` に `include_theory_card` / `lean_redundant_lines` を追加（既定は従来動作で、v3のみ lean）。落とした制約は契約・ルール・案内のいずれか1箇所に正準として残ることをテストで固定。
+
+### ログとA/B手順
+
+- `--prompt-layout {v3,v2,auto}`（既定 v3）。`auto` は `--prompt-contract` に追随し、legacy ではTASK-057までの字节順を優先する（比較基準を壊さない）。
+- ゲームログの `ledger_metrics` に `avg_prompt_zone_primacy_chars / avg_prompt_zone_middle_chars / avg_prompt_zone_recency_chars / avg_prompt_instructions_to_end_chars / avg_prompt_weak_middle_must_use_chars / avg_prompt_theory_card_chars / avg_gap_question_to_evidence / avg_gap_timeline_to_evidence / avg_gap_own_speeches_to_question`、`prompt_layout_counts`（`v3_grounding` が増えた）、`duplicate_constraint_total`、`dedup_saved_chars_total` を追加。モデル別にも同名の平均を記録する。
+- 実機での評価は同じ seed・同じモデル群で `--prompt-layout v3` と `v2` を回し、上記の配置指標と照応率（現在質問への回答率）、立場の一貫性、`future_event_reference_rate`、投票の自己矛盾、parse失敗率を突き合わせる。
+
+### テスト（LL不使用）
+
+`tests/test_task060_prompt_layout.py` に17件を追加（ポリシー解決とlegacy契約の優先、U字attentionと長い節の実効値、凍結節順の合法性と貪欲探索による再現性、ハード制約の拒否、v3の連鎖配置と隣接距離、出力形式の終端固定、セオリーカードのoptional化と除去、言い換えの正準集約と契約の自由行、新規指示ゼロ、情報欠落なし、legacy字节順の維持、診断キー）。既存2ファイル（TASK-057/058）のv2前提アサーションは `layout="v2"` を明示して互換検証として残した。`python -m pytest -q` で 235 passed。
+
+## TASK-062 最新ゲーム分析 — 日をまたぐ論理状態の正規化と記憶減衰対策
+
+状態：未着手（実機ログ `game_e6b6c7cc3481` で課題を確認）
+
+### 背景
+
+今回のゲームでは、後半になるほどプロンプトとcoreが膨張した。`discussion_context_selected` 54件を日別に集計すると、平均user promptは Day 1 の約17,568字から Day 2 約20,233字、Day 3 約22,324字へ増加し、平均coreも約11,613字から約16,016字、約21,501字へ増加した。`core_historical_chars` は各日0で、古い論点・主張・推理の本文がrecent側へ蓄積され続けていた。
+
+全体では仮説の矛盾19件、ledger repair 6件、再要求20件が発生した。勝敗を直接決めたのはDay 3の投票だが、後半の判断で「過去に何が確定し、どの仮説が反証され、現在も有効なのか」を短く再構成できていないことが、論理の連続性を弱めた可能性が高い。これは生の会話をさらに長く保持する問題ではなく、日・ターンを越える状態を正規化して再提示する問題である。
+
+### 目的
+
+過去の全文を保持してコンテキストを増やすのではなく、各プレイヤーが次の発言時点で必要とする論理状態を、エンジン発行の短い状態差分として継続的に利用できるようにする。モデルの口調・論点・結論・推理順は固定せず、何を重視するかはモデルに委ねる。
+
+### 実装案
+
+1. プレイヤーごとに `ContinuityState`（確定事実、公開主張、現在の立場、支持・反証根拠、未解決の問い、直前からの変更、各項目の`observed_at`と`evidence_id`）を持つ。既存のFactLedger・ClaimLedger・HypothesisLedgerを再掲するのではなく、次のターンに必要な差分だけを生成する。
+2. 各日終了時と各投票前に、エンジン発行の`[CONTINUITY_CHECKPOINT]`を作る。内容は短いID付き行に限定し、モデルの過去推理本文をそのまま要約の事実として昇格させない。確定事実・未検証仮説・反証済み仮説を異なる権威レベルで表示する。
+3. 新しい発言・投票・死亡・役職主張・占い結果が入ったとき、影響を受ける状態だけを更新する。変更がない項目は再掲せず、`unchanged`として数える。これによりDay 3でもrecent層が単調増加しないようにする。
+4. プロンプトには「前回の結論を維持せよ」と命令せず、`current / changed / overturned / unresolved`の状態だけを提示する。モデルが自分の立場を変更する自由と、過去発言との矛盾を説明する自由を残す。
+5. `continuity_state_chars`、日別の状態増加量、状態から参照された証拠ID、仮説の更新・反証・放棄、同一論点の再導入回数を診断する。実機ではDay別の質問回答率、仮説矛盾率、投票理由の根拠保持率を比較する。
+
+### 完了条件
+
+- Day 1〜3で平均core/recentが単調増加せず、過去本文の再掲なしに必要な確定事実・主張・反証を保持できる。
+- `observed_at`・`evidence_id`・権威レベルが全チェックポイントに付与され、古い仮説が新しい確定事実として扱われない。
+- 仮説矛盾、ledger repair、同一理由の無根拠な再導入を現状と比較できる。
+- 現在質問への回答率、時系列根拠率、役職プロヴェナンス、秘密情報境界を悪化させない。
+- 口調・論点・結論・推理順を指定せず、LL不使用テスト、モックA/B、同一seedの実機比較を記録する。
+
+## TASK-063 最新ゲーム分析 — 強化モデルのthinking-only・timeoutと論理状態の分離
+
+状態：未着手（Player 1の強化モデルで実機課題を確認）
+
+### 背景
+
+Player 1を `llm-jp-4.1-33b-thinking-fixed` に変更した今回、17アクション中5件が失敗し、内訳はthinking-only 4件とtimeout 1件だった。全体でもthinking budget超過7件、再要求20件、平均議論時間100.14秒となった。強化モデルの採用自体は妥当だが、モデル固有のthinking挙動と出力予算が、論理状態の保持とは別の障害になっている。
+
+一方、Player 1の平均user promptは約21,046字、平均coreは約17,047字で、16k設定のモデルに対して後半ほど入力が大きかった。したがって、強化モデルが論理を維持できなかったのか、thinking-only・timeout・入力肥大によって発言機会や本文生成を失ったのかを分離して評価する必要がある。
+
+### 実装案
+
+1. モデル×アクション別に、thinking有無、thinking予算、body予約、入力推定token、`num_ctx`、生成時間、timeout、thinking-onlyを一つのトレースへまとめる。
+2. `thinking-fixed`系モデルでは、通常議論・投票・占い・CO補正ごとに本文最低量とthinking上限を分け、thinking-only時の再要求は同じ長いプロンプトを再送せず、TASK-062のcontinuity checkpointと現在質問を優先した短縮版で行う。
+3. timeoutとthinking budget超過を、プロンプト論理の失敗・出力形式失敗・モデル通信失敗から分離する。再要求で本文を失ったか、元の本文を保持できたかを記録する。
+4. 強化モデルをPlayer 1だけに置く場合と全員に置く場合を分け、同一seedで8k/16k/強化モデルの比較を行う。勝敗だけでなく、後半の状態参照率・仮説矛盾率・質問回答率・投票理由の継続性を評価する。
+5. モデルが自由に考える余地を残すため、thinkingを一律に無効化したり、推理手順を指定したりしない。必要な変更は出力予算・短縮再要求・状態提示の制御に限定する。
+
+### 完了条件
+
+- Player 1のthinking-only・timeout・再要求の原因を、入力長・thinking予算・通信・形式の各カテゴリへ分類できる。
+- 強化モデルの本文生成率と後半の論理状態参照率を、旧モデルと同一seedで比較できる。
+- thinking制御を変更しても、役職主張のプロヴェナンス、秘密情報ガード、時系列根拠、発言本文の自由を損なわない。
+- 速度・VRAM・失敗率と論理性のトレードオフをモデル別に記録し、既定設定を根拠付きで選択できる。
+

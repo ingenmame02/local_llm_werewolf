@@ -1,0 +1,68 @@
+==========================================================================
+layout=v3 label=v3_grounding chars=12644 duplicate_constraints=3 dedup_saved=128
+zones: {'primacy': 1321, 'weak_middle': 6944, 'recency': 4379, 'unregistered': 0} | instructions_to_end: 0
+gaps q->e: 0.0052 t->e: 0.0 own->q: 0.0084
+weak_middle_must_use: 1803 | theory_card_chars: 2300
+violations: []
+     0.0窶ｰ  [SYSTEM_RULES]
+   104.5窶ｰ  [OUTPUT_LANGUAGE]
+   117.3窶ｰ  [SELF_ACTION_MEMORY
+   137.5窶ｰ  [FACT_LEDGER]
+   221.8窶ｰ  [ACTOR_PRIVATE_MEMO
+   253.7窶ｰ  [Werewolf Theory Card
+   454.5窶ｰ  [CLAIM_LEDGER]
+   527.6窶ｰ  [DAY_TIMELINE]
+   552.3窶ｰ  [CONVERSATION_EVIDENCE
+   614.4窶ｰ  [CURRENT_TASK]
+   619.6窶ｰ  [Current Question]
+   635.6窶ｰ  [Your Speeches Today
+   653.7窶ｰ  [YOUR_PREVIOUS_REASONING_MEMO
+   677.4窶ｰ  [REASONING_MEMO_GUIDANCE]
+   714.3窶ｰ  [Discussion Guidelines & Logical Reasoning]
+   867.8窶ｰ  [BEHAVIOR_CONTRACT
+   919.4窶ｰ  [Instructions]
+==========================================================================
+layout=v2 label=v2_attention chars=13280 duplicate_constraints=5 dedup_saved=128
+zones: {'primacy': 1321, 'weak_middle': 7233, 'recency': 4726, 'unregistered': 0} | instructions_to_end: 1804
+gaps q->e: 0.005 t->e: 0.1144 own->q: 0.2555
+weak_middle_must_use: 1174 | theory_card_chars: 2300
+violations: []
+     0.0窶ｰ  [SYSTEM_RULES]
+    99.5窶ｰ  [OUTPUT_LANGUAGE]
+   111.7窶ｰ  [FACT_LEDGER]
+   235.2窶ｰ  [Werewolf Theory Card
+   408.4窶ｰ  [CLAIM_LEDGER]
+   416.9窶ｰ  [SELF_ACTION_MEMORY
+   436.1窶ｰ  [Your Speeches Today
+   453.3窶ｰ  [ACTOR_PRIVATE_MEMO
+   463.0窶ｰ  [YOUR_PREVIOUS_REASONING_MEMO
+   506.2窶ｰ  [DAY_TIMELINE]
+   608.9窶ｰ  [REASONING_MEMO_GUIDANCE]
+   644.1窶ｰ  [CONVERSATION_EVIDENCE
+   703.8窶ｰ  [CURRENT_TASK]
+   708.8窶ｰ  [Current Question]
+   732.9窶ｰ  [BEHAVIOR_CONTRACT
+   782.0窶ｰ  [Instructions]
+   843.6窶ｰ  [Discussion Guidelines & Logical Reasoning]
+==========================================================================
+layout=legacy label=legacy_v1 chars=13579 duplicate_constraints=11 dedup_saved=0
+zones: {'primacy': 1321, 'weak_middle': 7551, 'recency': 4707, 'unregistered': 0} | instructions_to_end: 2992
+gaps q->e: 0.0049 t->e: 0.0 own->q: 0.0752
+weak_middle_must_use: 1800 | theory_card_chars: 2300
+violations: []
+     0.0窶ｰ  [SYSTEM_RULES]
+    97.3窶ｰ  [OUTPUT_LANGUAGE]
+   109.2窶ｰ  [FACT_LEDGER]
+   232.6窶ｰ  [Werewolf Theory Card
+   402.1窶ｰ  [CLAIM_LEDGER]
+   441.1窶ｰ  [SELF_ACTION_MEMORY
+   526.8窶ｰ  [ACTOR_PRIVATE_MEMO
+   536.3窶ｰ  [YOUR_PREVIOUS_REASONING_MEMO
+   558.4窶ｰ  [Your Speeches Today
+   583.0窶ｰ  [DAY_TIMELINE]
+   606.2窶ｰ  [CONVERSATION_EVIDENCE
+   653.4窶ｰ  [CURRENT_TASK]
+   658.2窶ｰ  [Current Question]
+   698.7窶ｰ  [Instructions]
+   759.6窶ｰ  [REASONING_MEMO_GUIDANCE]
+   801.6窶ｰ  [Discussion Guidelines & Logical Reasoning]

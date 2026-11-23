@@ -1,0 +1,2 @@
+FROM werewolf-muse-glimmer-8k:latest
+PARAMETER num_ctx 16384
