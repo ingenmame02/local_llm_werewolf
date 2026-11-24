@@ -92,12 +92,21 @@ from werewolf.core_compression import (
     normalize_core_compression_policy,
 )
 # TASK-060: 議論プロンプトの節順（layout）。実測した帯字数・隣接距離・重複行の削減を
-# ログで比べられるようにし、同じseedで v3 / v2 / auto を切り替えてA/B評価できるようにする。
+# ログで比べられるようにし、同じseedで v4 / v3 / v2 / auto を切り替えてA/B評価できるようにする。
 from werewolf.prompt_layout import (
     PROMPT_LAYOUT_POLICY_DEFAULT,
     PROMPT_LAYOUT_V3,
+    PROMPT_LAYOUT_V4,
     normalize_prompt_layout_policy,
     prompt_layout_policy_label,
+)
+# TASK-062: 日をまたぐ論理状態の正規化（ContinuityState）。エンジン発行の状態差分だけを
+# 次の発言へ渡し、チェックポイントが正規化した日の平常発言本文をID行へ畳む。口調・論点・
+# 結論には干渉しない設定で、off にすると旧挙動（本文の積み増しのまま）との比較ができる。
+from werewolf.continuity_state import (
+    CONTINUITY_POLICY_DEFAULT,
+    continuity_policy_label,
+    normalize_continuity_policy,
 )
 
 # フェーズ表示用ラベル
@@ -280,6 +289,19 @@ class GameLogger:
             "prompt_gap_question_to_evidence_sum": 0.0,
             "prompt_gap_timeline_to_evidence_sum": 0.0,
             "prompt_gap_own_speeches_to_question_sum": 0.0,
+            # TASK-062: エンジン発行の論理状態（[CONTINUITY_CHECKPOINT]）の実測。差分として
+            # 提示した件数、再掲せず個数だけ示した件数、チェックポイント側で本文を畳んだ
+            # 節約字数。日をまたいでも状態が単調増加していない判断はこの合計と
+            # continuity_metrics() の日別推移で見る（口調・論点の数値ではない）。
+            "continuity_state_char_total": 0,
+            "continuity_sections": 0,
+            "continuity_items_changed_total": 0,
+            "continuity_items_unchanged_total": 0,
+            "continuity_open_questions_total": 0,
+            "evidence_continuity_folded_total": 0,
+            "continuity_fold_saved_chars_total": 0,
+            "prompt_gap_state_to_evidence_sum": 0.0,
+            "prompt_gap_state_to_question_sum": 0.0,
         }
         # TASK-056: 未来参照カテゴリ別の指摘数（公開本文は修正していない観測値）
         self._timeline_category_counts: dict[str, int] = {
@@ -303,11 +325,13 @@ class GameLogger:
         # TASK-059: 公開情報の入力経路別の検査数（発言／CO行／投票／死亡）。検査対象外も
         # 理由付きで数えることで「なぜ53件だけだったのか」を説明できるようにする。
         self._timeline_public_path_counts: dict[str, int] = {}
-        # TASK-058 / TASK-060: レイアウト別のプロンプト構築数（legacy_v1 / v2_attention / v3_grounding）
+        # TASK-058 / TASK-060 / TASK-062: レイアウト別のプロンプト構築数
+        # （legacy_v1 / v2_attention / v3_grounding / v4_continuity）
         self._prompt_layout_counts: dict[str, int] = {
             PROMPT_LAYOUT_LEGACY: 0,
             PROMPT_LAYOUT_V2: 0,
             PROMPT_LAYOUT_V3: 0,
+            PROMPT_LAYOUT_V4: 0,
         }
         # v2の節順が崩れた回数（編集ミスの静的検査。0を維持する）
         self._prompt_layout_violations = 0
@@ -615,10 +639,26 @@ class GameLogger:
                     "prompt_weak_middle_must_use_char_total",
                 ),
                 ("prompt_theory_card_chars", "prompt_theory_card_char_total"),
+                # TASK-062: 論理状態の提示量（状態節の字数・差分件数・畳んだ本文の実績）
+                ("continuity_state_chars", "continuity_state_char_total"),
+                ("continuity_items_changed", "continuity_items_changed_total"),
+                ("continuity_items_unchanged", "continuity_items_unchanged_total"),
+                ("continuity_open_questions", "continuity_open_questions_total"),
+                (
+                    "evidence_continuity_folded_count",
+                    "evidence_continuity_folded_total",
+                ),
+                (
+                    "evidence_continuity_fold_saved_chars",
+                    "continuity_fold_saved_chars_total",
+                ),
             ):
                 value = diagnostic_record.get(key)
                 if isinstance(value, int) and not isinstance(value, bool):
                     self._ledger_metrics[metric] += max(0, int(value))
+            if int(diagnostic_record.get("continuity_state_chars") or 0) > 0:
+                # 状態節を実際に載せたリクエスト数（off との比較で分母を揃える）
+                self._ledger_metrics["continuity_sections"] += 1
             for key, metric in (
                 (
                     "prompt_gap_question_to_evidence",
@@ -632,6 +672,9 @@ class GameLogger:
                     "prompt_gap_own_speeches_to_question",
                     "prompt_gap_own_speeches_to_question_sum",
                 ),
+                # TASK-062: 論理状態節が「発言証拠の直後・現在質問の直前」に居るかの距離
+                ("prompt_gap_state_to_evidence", "prompt_gap_state_to_evidence_sum"),
+                ("prompt_gap_state_to_question", "prompt_gap_state_to_question_sum"),
             ):
                 value = diagnostic_record.get(key)
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -713,10 +756,25 @@ class GameLogger:
                         "prompt_weak_middle_must_use_char_total",
                     ),
                     ("prompt_theory_card_chars", "prompt_theory_card_char_total"),
+                    # TASK-062: モデル別の論理状態提示量（差分件数・畳んだ本文の実績）
+                    ("continuity_state_chars", "continuity_state_char_total"),
+                    ("continuity_items_changed", "continuity_items_changed_total"),
+                    ("continuity_items_unchanged", "continuity_items_unchanged_total"),
+                    ("continuity_open_questions", "continuity_open_questions_total"),
+                    (
+                        "evidence_continuity_folded_count",
+                        "evidence_continuity_folded_total",
+                    ),
+                    (
+                        "evidence_continuity_fold_saved_chars",
+                        "continuity_fold_saved_chars_total",
+                    ),
                 ):
                     value = diagnostic_record.get(key)
                     if isinstance(value, int) and not isinstance(value, bool):
                         stats[metric] += max(0, int(value))
+                if int(diagnostic_record.get("continuity_state_chars") or 0) > 0:
+                    stats["continuity_sections"] += 1
                 for key, metric in (
                     (
                         "prompt_gap_question_to_evidence",
@@ -730,6 +788,9 @@ class GameLogger:
                         "prompt_gap_own_speeches_to_question",
                         "prompt_gap_own_speeches_to_question_sum",
                     ),
+                    # TASK-062: 論理状態節の隣接距離（証拠との距離／現在質問との距離）
+                    ("prompt_gap_state_to_evidence", "prompt_gap_state_to_evidence_sum"),
+                    ("prompt_gap_state_to_question", "prompt_gap_state_to_question_sum"),
                 ):
                     value = diagnostic_record.get(key)
                     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -895,6 +956,28 @@ class GameLogger:
                     entry["last_thinking_allowance_tokens"] = body_budget.get(
                         "thinking_allowance_tokens"
                     )
+                # TASK-063: 送信カテゴリ（thinking予算／timeout／生成上限／出力形式／通信／
+                # プロンプト論理）と入力実字数をアクション別に加算する。失敗を「モデルの
+                # 出力予算側」と「議論の論理側」へ分けて数えるための集計で、内容には干渉しない。
+                trace_row = diagnostic_record.get("output_budget")
+                if isinstance(trace_row, dict):
+                    category = trace_row.get("category")
+                    if isinstance(category, str) and category:
+                        counts = entry["output_budget_categories"]
+                        counts[category] = int(counts.get(category, 0)) + 1
+                    if bool(trace_row.get("budget_bound")):
+                        entry["budget_bound_failures"] += 1
+                    if bool(trace_row.get("logic_bound")):
+                        entry["logic_bound_failures"] += 1
+                    if bool(trace_row.get("short_retry")):
+                        entry["short_retry_requests"] += 1
+                    prompt_chars = trace_row.get("prompt_char_count")
+                    if isinstance(prompt_chars, int) and not isinstance(prompt_chars, bool):
+                        entry["prompt_char_total"] += max(0, prompt_chars)
+                        entry["prompt_char_count"] += 1
+                        entry["max_prompt_char_count"] = max(
+                            int(entry["max_prompt_char_count"]), max(0, prompt_chars)
+                        )
         if record.get("type") == "llm_action_completed":
             if isinstance(model, str):
                 stats = self._model_stats.setdefault(
@@ -1065,6 +1148,17 @@ class GameLogger:
             "prompt_gap_question_to_evidence_sum": 0.0,
             "prompt_gap_timeline_to_evidence_sum": 0.0,
             "prompt_gap_own_speeches_to_question_sum": 0.0,
+            # TASK-062: モデル別の論理状態提示量（差分件数・畳んだ字数）。状態節が中部へ沈んで
+            # いないか（距離）もここでモデルごとに比べる。
+            "continuity_state_char_total": 0,
+            "continuity_sections": 0,
+            "continuity_items_changed_total": 0,
+            "continuity_items_unchanged_total": 0,
+            "continuity_open_questions_total": 0,
+            "evidence_continuity_folded_total": 0,
+            "continuity_fold_saved_chars_total": 0,
+            "prompt_gap_state_to_evidence_sum": 0.0,
+            "prompt_gap_state_to_question_sum": 0.0,
             # TASK-059: 引用時点の内訳と、違反には数えない観察値（婉曲・一般名指し）
             "citation_status_counts": {},
             "hedged_pending_citations": 0,
@@ -1101,6 +1195,15 @@ class GameLogger:
             # 直近の検査値（本文最低予算とモデル別thinking余白の内訳）
             "last_body_min_tokens": None,
             "last_thinking_allowance_tokens": None,
+            # TASK-063: 送信の失敗カテゴリ内訳（thinking予算・timeout・生成上限・出力形式・
+            # 通信・プロンプト論理）と、入力実字数・短縮再要求・本文喪失の有無
+            "output_budget_categories": {},
+            "prompt_char_total": 0,
+            "prompt_char_count": 0,
+            "max_prompt_char_count": 0,
+            "short_retry_requests": 0,
+            "budget_bound_failures": 0,
+            "logic_bound_failures": 0,
             # finalize で算出する率・平均
             "empty_response_rate": 0.0,
             "thinking_only_rate": 0.0,
@@ -1230,6 +1333,24 @@ class GameLogger:
                 entry["avg_eval_count"] = round(
                     int(entry.get("eval_count_total", 0)) / requests, 2
                 )
+                # TASK-063: 入力実字数の平均・本文生成率・短縮再要求率と、失敗を出力予算側と
+                # 論理側へ分けた割合（強化モデルの事故を「論理の失敗」と取り違えないため）
+                seen_chars = int(entry.get("prompt_char_count", 0))
+                entry["avg_prompt_char_count"] = (
+                    round(int(entry.get("prompt_char_total", 0)) / seen_chars, 1)
+                    if seen_chars
+                    else 0.0
+                )
+                entry["body_generation_rate"] = round(present / requests, 4)
+                entry["short_retry_rate"] = round(
+                    int(entry.get("short_retry_requests", 0)) / requests, 4
+                )
+                entry["budget_bound_failure_rate"] = round(
+                    int(entry.get("budget_bound_failures", 0)) / requests, 4
+                )
+                entry["logic_bound_failure_rate"] = round(
+                    int(entry.get("logic_bound_failures", 0)) / requests, 4
+                )
 
         # TASK-054: モデル別の漏洩率・誤検出率・本文保持率を算出する
         self._finalize_leak_stats(state)
@@ -1271,6 +1392,26 @@ class GameLogger:
             )
             stats["avg_gap_own_speeches_to_question"] = round(
                 float(stats["prompt_gap_own_speeches_to_question_sum"]) / prompts, 4
+            )
+            # TASK-062: 論理状態の実測平均。off（比較基準）では sections が 0 なので
+            # avg_continuity_state_chars も 0 になる（同じ土俵で比較できる）。
+            continuity_sections = int(stats.get("continuity_sections", 0))
+            stats["avg_continuity_state_chars"] = (
+                round(int(stats["continuity_state_char_total"]) / continuity_sections, 1)
+                if continuity_sections
+                else 0.0
+            )
+            stats["avg_continuity_items_changed"] = round(
+                int(stats["continuity_items_changed_total"]) / max(1, continuity_sections), 2
+            )
+            stats["avg_continuity_items_unchanged"] = round(
+                int(stats["continuity_items_unchanged_total"]) / max(1, continuity_sections), 2
+            )
+            stats["avg_gap_state_to_evidence"] = round(
+                float(stats["prompt_gap_state_to_evidence_sum"]) / prompts, 4
+            )
+            stats["avg_gap_state_to_question"] = round(
+                float(stats["prompt_gap_state_to_question_sum"]) / prompts, 4
             )
 
         public_players_data = [
@@ -1358,6 +1499,9 @@ class GameLogger:
             "hypothesis_ledger": state.hypothesis_ledger.serialize_public(),
             # TASK-048: 既出論点台帳（要約・連呼・正当な繰り返し）を評価ログへ残す
             "topic_ledger": state.topic_ledger.serialize(),
+            # TASK-062: エンジン発行の論理状態チェックポイント（公開情報のID付き短行のみ）。
+            # 本人限定の未検証仮説はここへ載せず、日別字数と差分件数だけを残す。
+            "continuity_state": state.continuity_state.serialize_public(),
             # TASK-055: 役職主張の出所台帳。公開面は全CO行を中立ラベルに揃え、エンジン照合の
             # 真偽は含まない（serialize_public() に真偽キーがないことはテストで検証する）。
             "role_provenance": state.role_provenance.serialize_public(),
@@ -1381,10 +1525,15 @@ class GameLogger:
             "core_compression_policy": core_compression_policy_label(
                 getattr(state, "core_compression_policy", CORE_COMPRESSION_POLICY_DEFAULT)
             ),
-            # TASK-060: 議論プロンプトの節順ポリシー（v3/v2/auto）。発言証拠・時点・現在
+            # TASK-060: 議論プロンプトの節順ポリシー（v4/v3/v2/auto）。発言証拠・時点・現在
             # 質問・自分の連続性アンカーの位置と、同じ制約の言い換え行数にだけ効く設定。
             "prompt_layout_policy": prompt_layout_policy_label(
                 getattr(state, "prompt_layout_policy", PROMPT_LAYOUT_POLICY_DEFAULT)
+            ),
+            # TASK-062: 日をまたぐ論理状態の正規化（normalized/off）。エンジン発行の状態差分
+            # だけを次の発言へ渡す設定で、口調・論点・結論には干渉しない。
+            "continuity_policy": continuity_policy_label(
+                getattr(state, "continuity_policy", CONTINUITY_POLICY_DEFAULT)
             ),
             "unverified_hypothesis_as_fact_alerts": sum(
                 alert.category == UNVERIFIED_HYPOTHESIS_AS_FACT
@@ -1394,6 +1543,8 @@ class GameLogger:
                 **self._ledger_metrics,
                 **state.hypothesis_ledger.metrics(),
                 **state.topic_ledger.metrics(),
+                # TASK-062: 論理状態の日別推移・差分件数・チェックポイント数（A/B比較の中心）
+                **state.continuity_metrics(),
                 "novelty_class_counts": dict(self._novelty_class_counts),
                 # TASK-056: 発言時点の根拠追跡率と未来参照率。検出は観測専用で、公開本文の
                 # 語彙・口調・結論は自動修正していない（body_modified=false で記録）。
@@ -1522,6 +1673,44 @@ class GameLogger:
                 ),
                 "avg_gap_own_speeches_to_question": round(
                     float(self._ledger_metrics["prompt_gap_own_speeches_to_question_sum"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    4,
+                ),
+                # TASK-062: 論理状態チェックポイントの実測（A/B比較の要）。normalized では
+                # avg_continuity_state_chars が出し、畳んだ本文ぶんだけ recent層が減る。
+                # off（比較基準）では sections=0 / folded=0 / fold_saved=0 のままになる。
+                "continuity_sections": int(self._ledger_metrics["continuity_sections"]),
+                "avg_continuity_state_chars": round(
+                    int(self._ledger_metrics["continuity_state_char_total"])
+                    / max(1, int(self._ledger_metrics["continuity_sections"])),
+                    1,
+                ),
+                "avg_continuity_items_changed": round(
+                    int(self._ledger_metrics["continuity_items_changed_total"])
+                    / max(1, int(self._ledger_metrics["continuity_sections"])),
+                    2,
+                ),
+                "avg_continuity_items_unchanged": round(
+                    int(self._ledger_metrics["continuity_items_unchanged_total"])
+                    / max(1, int(self._ledger_metrics["continuity_sections"])),
+                    2,
+                ),
+                "continuity_open_questions_total": int(
+                    self._ledger_metrics["continuity_open_questions_total"]
+                ),
+                "evidence_continuity_folded_total": int(
+                    self._ledger_metrics["evidence_continuity_folded_total"]
+                ),
+                "continuity_fold_saved_chars_total": int(
+                    self._ledger_metrics["continuity_fold_saved_chars_total"]
+                ),
+                "avg_gap_state_to_evidence": round(
+                    float(self._ledger_metrics["prompt_gap_state_to_evidence_sum"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    4,
+                ),
+                "avg_gap_state_to_question": round(
+                    float(self._ledger_metrics["prompt_gap_state_to_question_sum"])
                     / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
                     4,
                 ),
@@ -1838,11 +2027,17 @@ def run_cli_game(args: argparse.Namespace) -> int:
         getattr(args, "core_compression", CORE_COMPRESSION_POLICY_DEFAULT)
     )
     options["core_compression_policy"] = core_compression_policy
-    # TASK-060: 議論プロンプトの節順（既定 v3）。配置と重複行だけ変わり、発言内容の自由は不変。
+    # TASK-060: 議論プロンプトの節順（既定 v4）。配置と重複行だけ変わり、発言内容の自由は不変。
     prompt_layout_policy = normalize_prompt_layout_policy(
         getattr(args, "prompt_layout", PROMPT_LAYOUT_POLICY_DEFAULT)
     )
     options["prompt_layout_policy"] = prompt_layout_policy
+    # TASK-062: 日をまたぐ論理状態の正規化（既定 normalized）。エンジン発行の状態差分だけを
+    # 次の発言へ渡し、正規化した日の平常発言本文はID行へ畳む。off は旧挙動（A/B比較用）。
+    continuity_policy = normalize_continuity_policy(
+        getattr(args, "continuity", CONTINUITY_POLICY_DEFAULT)
+    )
+    options["continuity_policy"] = continuity_policy
     if args.thinking in {"on", "off"}:
         options["thinking"] = args.thinking == "on"
     for key, value in action_num_predict.items():
@@ -1877,6 +2072,10 @@ def run_cli_game(args: argparse.Namespace) -> int:
     state.core_compression_policy = core_compression_policy
     # TASK-060: 節順のポリシーもstateへ反映する（llm_actions が state から読んでbuilderへ渡す）
     state.prompt_layout_policy = prompt_layout_policy
+    # TASK-062: 論理状態の正規化ポリシーをstateへ反映する（builder と engine が同じ値を使い、
+    # 台帳側のポリシーとも揃える）。ここでの再正規化は行わず、台帳へも同じ値を書く。
+    state.continuity_policy = continuity_policy
+    state.continuity_state.policy = continuity_policy
 
     meta = {
         "mode": args.mode,
@@ -1914,6 +2113,8 @@ def run_cli_game(args: argparse.Namespace) -> int:
         # TASK-060: 議論プロンプトの節順（v3/v2/auto）をログへ残す（A/B比較の判別用）。
         # 配置と重複行の変更のみで、発言の口調・論点・結論には干渉しない設定である。
         "prompt_layout_policy": prompt_layout_policy,
+        # TASK-062: 論理状態の正規化ポリシー（normalized/off）をログへ残す
+        "continuity_policy": continuity_policy,
         "base_url": args.base_url,
         "show_private": args.show_private,
         "response_language": getattr(args, "language", None),
@@ -2616,16 +2817,21 @@ def build_parser() -> argparse.ArgumentParser:
             "prescribes tone, topics or reasoning order."
         ),
     )
-    # TASK-060: 議論プロンプトの節順（配置だけ変え、内容と発言の自由は変えない）
+    # TASK-060 / TASK-062: 議論プロンプトの節順（配置だけ変え、内容と発言の自由は変えない）
     parser.add_argument(
         "--prompt-layout",
         dest="prompt_layout",
-        choices=["v3", "v2", "auto"],
+        choices=["v4", "v3", "v2", "auto"],
         default=PROMPT_LAYOUT_POLICY_DEFAULT,
         help=(
             "Where each information block sits inside the discussion prompt. Only positions and "
             "duplicate wording change - tone, length, topics, conclusions and reasoning order stay "
-            "the model's own. v3 (default): your action record, board facts and engine-issued "
+            "the model's own. v4 (default): the v3 chain plus [CONTINUITY_CHECKPOINT], the "
+            "engine-issued logical state (confirmed facts, public statements, refuted hypotheses "
+            "and open questions as short id-bearing lines with authority tags) sitting directly "
+            "after the speech evidence and immediately before the current question, so the player "
+            "carries state across days without rereading old bodies. v3: the same chain without "
+            "that section - your action record, board facts and engine-issued "
             "private info sit early; weak-middle band holds only droppable derived content (theory "
             "card, topic digest, hypothesis diff, temporary guidance, round header); the tail runs "
             "claim index -> timeline -> speech evidence -> current question -> your speeches and "
@@ -2636,7 +2842,29 @@ def build_parser() -> argparse.ArgumentParser:
             "v2: TASK-058 ordering. auto: follow --prompt-contract (legacy keeps the old byte "
             "order). Compare one seed with prompt_zone_*_chars, prompt_gap_*, "
             "prompt_instructions_to_end_chars, prompt_theory_card_chars and "
-            "duplicate_constraint_total."
+            "duplicate_constraint_total, and the continuity_* keys (avg_continuity_state_chars, "
+            "evidence_continuity_folded_total, continuity_fold_saved_chars_total)."
+        ),
+    )
+    # TASK-062: 日をまたぐ論理状態の正規化（エンジン発行の状態差分だけを使い、口調・論点には干渉しない）
+    parser.add_argument(
+        "--continuity",
+        dest="continuity",
+        choices=["normalized", "off"],
+        default=CONTINUITY_POLICY_DEFAULT,
+        help=(
+            "How the player carries logical state across days and turns. normalized (default): "
+            "the engine issues [CONTINUITY_CHECKPOINT] blocks at day boundaries and hands over "
+            "only what changed since the player last saw it - confirmed facts (deaths, ballots, "
+            "alive count), public claims and seer reports as unverified statements, the player's "
+            "own standing readings, refuted hypotheses shown as history, and open questions - each "
+            "as one short line with an observed stamp and evidence ids, with authority levels kept "
+            "apart so an old inference is never read as a new fact. Unchanged items are not "
+            "restated, and the bodies of ordinary speech from normalized days collapse into "
+            "[speech:N] reference lines in the prompt while staying in the public log. Nothing "
+            "here orders reasoning, fixes a conclusion or sets a tone; changing your mind and "
+            "explaining why stays free. off: no checkpoint section (pre-TASK-062 behaviour) for "
+            "A/B comparison of prompt size, answer rates and stance consistency."
         ),
     )
     # TASK-057: プロンプト契約の簡素化（同じ制約・発言本文の再掲を減らし、不足時は optional だけ落とす）

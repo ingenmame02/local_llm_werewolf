@@ -52,15 +52,19 @@ from .prompt_contract import find_sections
 PROMPT_LAYOUT_POLICY_AUTO = "auto"
 PROMPT_LAYOUT_POLICY_V2 = "v2"
 PROMPT_LAYOUT_POLICY_V3 = "v3"
+# TASK-062: v4 は `[CONTINUITY_CHECKPOINT]`（日をまたぐ論理状態）を含む配置で既定になる。
+PROMPT_LAYOUT_POLICY_V4 = "v4"
 PROMPT_LAYOUT_POLICIES: tuple[str, ...] = (
+    PROMPT_LAYOUT_POLICY_V4,
     PROMPT_LAYOUT_POLICY_V3,
     PROMPT_LAYOUT_POLICY_V2,
     PROMPT_LAYOUT_POLICY_AUTO,
 )
-PROMPT_LAYOUT_POLICY_DEFAULT = PROMPT_LAYOUT_POLICY_V3
+PROMPT_LAYOUT_POLICY_DEFAULT = PROMPT_LAYOUT_POLICY_V4
 
 # レイアウトラベル（ログに載る値）。v2/legacy は core_compression の既存ラベルを再利用する。
 PROMPT_LAYOUT_V3 = "v3_grounding"
+PROMPT_LAYOUT_V4 = "v4_continuity"
 
 
 def normalize_prompt_layout_policy(value: object) -> str:
@@ -70,12 +74,14 @@ def normalize_prompt_layout_policy(value: object) -> str:
     bool は True=v3 / False=v2 として扱う（A/B切り替えの簡易指定）。
     """
     if isinstance(value, bool):
-        return PROMPT_LAYOUT_POLICY_V3 if value else PROMPT_LAYOUT_POLICY_V2
+        return PROMPT_LAYOUT_POLICY_V4 if value else PROMPT_LAYOUT_POLICY_V2
     if isinstance(value, str):
         candidate = value.strip().lower()
         if candidate in PROMPT_LAYOUT_POLICIES:
             return candidate
-        if candidate in {PROMPT_LAYOUT_V3, "grounding", "task060", "on", "true", "best"}:
+        if candidate in {PROMPT_LAYOUT_V4, "continuity", "task062", "on", "true", "best"}:
+            return PROMPT_LAYOUT_POLICY_V4
+        if candidate in {PROMPT_LAYOUT_V3, "grounding", "task060"}:
             return PROMPT_LAYOUT_POLICY_V3
         if candidate in {PROMPT_LAYOUT_V2, "attention", "task058"}:
             return PROMPT_LAYOUT_POLICY_V2
@@ -104,7 +110,9 @@ def resolve_prompt_layout(policy: object, contract_policy: object) -> str:
         return PROMPT_LAYOUT_LEGACY
     if resolved == PROMPT_LAYOUT_POLICY_V2:
         return PROMPT_LAYOUT_V2
-    return PROMPT_LAYOUT_V3
+    if resolved == PROMPT_LAYOUT_POLICY_V3:
+        return PROMPT_LAYOUT_V3
+    return PROMPT_LAYOUT_V4
 
 
 def prompt_layout_policy_label(policy: object) -> str:
@@ -168,6 +176,9 @@ ROLE_ADVISORY = "advisory"  # 議論を促す中立案内
 ROLE_HEURISTIC = "role_heuristics"  # 人狼セオリーカード（推論の目安・誘導が強い）
 ROLE_DERIVED = "derived_unverified"  # 未検証の派生情報（仮説差分・要約・観測）
 ROLE_TEMPORARY_GUIDANCE = "temporary_guidance"  # 期限付きの暫定案内
+# TASK-062: エンジンが発行する「日をまたぐ論理状態」（確定事実・反証・未解決の問い）。
+# いま有効な状態なので中部に沈ませたくないが、読み枠を先頭で決める誘導節でもない。
+ROLE_CONTINUITY = "continuity_state"
 
 SECTION_ROLES: dict[str, str] = {
     "system_rules": ROLE_RULES,
@@ -196,6 +207,8 @@ SECTION_ROLES: dict[str, str] = {
     "inference_line": ROLE_DERIVED,
     "previous_topics": ROLE_DERIVED,
     "continuity_memo": ROLE_DERIVED,
+    # TASK-062: 正規化された論理状態（エンジン発行）。自分の記録と同じくらい「いま」使う
+    "continuity_checkpoint": ROLE_CONTINUITY,
     "integrity_alerts": ROLE_DERIVED,
     "round_transcript": ROLE_DERIVED,
     "day1_first_turn_guidance": ROLE_TEMPORARY_GUIDANCE,
@@ -219,6 +232,8 @@ ROLE_WEIGHTS: dict[str, float] = {
     ROLE_HEURISTIC: 0.60,
     ROLE_DERIVED: 0.55,
     ROLE_TEMPORARY_GUIDANCE: 0.55,
+    # TASK-062: 状態そのものなので、議論の案内や派生要約より高く置く（中部に沈ませない）
+    ROLE_CONTINUITY: 1.20,
 }
 
 # 「いま使う」役割の節が中部帯に沈むことを減点する役割集合
@@ -230,6 +245,8 @@ MUST_USE_ROLES: frozenset[str] = frozenset(
         ROLE_SECRECY,
         ROLE_SELF_HISTORY,
         ROLE_TEMPORAL,
+        # TASK-062: 日をまたぐ論理状態も「いま使う」情報（中部に沈めると記憶減衰が出る）
+        ROLE_CONTINUITY,
     }
 )
 
@@ -308,6 +325,20 @@ ADJACENCY_TARGETS: tuple[AdjacencyTarget, ...] = (
         0.75,
         "推理メモの指針は、自分の前の推理メモの隣で読ませる（更新しやすくする）",
     ),
+    # TASK-062: 正規化された論理状態は「発言証拠のすぐそば」「現在質問のすぐそば」に置く。
+    # 離れると、確定事実・反証済みの仮説・未解決の問いを現在の議論に接続できない。
+    AdjacencyTarget(
+        "continuity_checkpoint",
+        "conversation_evidence",
+        1.05,
+        "状態→発言本文の順で読むと、IDと実際の発言の対応が辿れる（記憶減衰対策）",
+    ),
+    AdjacencyTarget(
+        "continuity_checkpoint",
+        "question_block",
+        0.95,
+        "現在質問に答える直前に論理状態があると、自分の立場を更新したまま答えられる",
+    ),
 )
 
 
@@ -334,7 +365,14 @@ ADJACENT_PAIR_REQUIRED: tuple[tuple[str, str], ...] = (
     ("own_speeches", "reasoning_memo_own"),
 )
 # 誘導の強い節は事実台帳より前に出さない（＝先頭帯で推理の枠を決めない）
-NO_PRIMACY_SECTIONS: tuple[str, ...] = ("werewolf_theory_card", "continuity_memo")
+NO_PRIMACY_SECTIONS: tuple[str, ...] = (
+    "werewolf_theory_card",
+    "continuity_memo",
+    # TASK-062: 正規化状態も「読み枠を先に決める」位置には置かない（末尾帯で使う）
+    "continuity_checkpoint",
+)
+# TASK-062: 論理状態は主張索引（CLAIM_LEDGER）のIDを参照するので、索引より前に来ない
+CONTINUITY_STATE_SECTION = "continuity_checkpoint"
 
 
 def validate_declared_order(order: Sequence[str]) -> list[dict[str, object]]:
@@ -375,6 +413,17 @@ def validate_declared_order(order: Sequence[str]) -> list[dict[str, object]]:
     if "discussion_guidelines" in names and "instructions" in names:
         if names.index("discussion_guidelines") > names.index("instructions"):
             problems.append({"kind": "guidelines_after_format", "name": "discussion_guidelines"})
+    # TASK-062: 論理状態は主張索引（CLAIM_LEDGER）のIDを参照する。索引より前に出すと、
+    # 存在しないIDを辿らせることになり、追跡性が壊れる。
+    if CONTINUITY_STATE_SECTION in names and "claim_ledger" in names:
+        if names.index(CONTINUITY_STATE_SECTION) < names.index("claim_ledger"):
+            problems.append(
+                {
+                    "kind": "state_before_index",
+                    "name": CONTINUITY_STATE_SECTION,
+                    "after": "claim_ledger",
+                }
+            )
     return problems
 
 
@@ -651,6 +700,8 @@ PROMPT_SEARCH_BLOCKS: tuple[tuple[str, ...], ...] = (
     ("self_action_memory",),
     ("claim_ledger",),
     ("day_timeline",),
+    # TASK-062: エンジン発行の論理状態（チェックポイント）。主張索引のIDを参照する位置に置く
+    ("continuity_checkpoint",),
     ("inference_line", "hypothesis_ledger", "previous_topics"),
     ("continuity_memo", "integrity_alerts"),
     ("day1_first_turn_guidance", "first_night_guidance"),
@@ -686,6 +737,7 @@ BLOCK_ALIASES: dict[str, tuple[str, ...]] = {
     "action": ("self_action_memory",),
     "claims": ("claim_ledger",),
     "timeline": ("day_timeline",),
+    "state": ("continuity_checkpoint",),
     "derived": ("inference_line", "hypothesis_ledger", "previous_topics"),
     "memo": ("continuity_memo", "integrity_alerts"),
     "temp": ("day1_first_turn_guidance", "first_night_guidance"),
@@ -710,19 +762,26 @@ def blocks_from_keys(keys: Sequence[str]) -> tuple[tuple[str, ...], ...]:
 
 
 # 探索の初期候補（movable の並びのみ。先頭と終端は自動で付く）。
+# TASK-062で `state`（エンジン発行の論理状態）が加わった。配置候補を4パターン含める。
 SEED_KEYS: tuple[tuple[str, ...], ...] = (
-    # seed A: TASK-058 の v2 配置を、今のブロック制約へ写した近似
-    ("facts", "theory", "claims", "action", "selfpair", "private", "timeline",
+    # seed A: TASK-058 の v2 配置を、今のブロック制約へ写した近似（state は証拠の直前）
+    ("facts", "theory", "claims", "action", "selfpair", "private", "timeline", "state",
      "derived", "memo", "temp", "round", "rguid", "evid", "task", "guid"),
-    # seed B: 自分の記録を先に置き、中部の後に証拠→自分→質問
+    # seed B: 自分の記録を先に置き、中部の後に証拠→自分→質問（state は索引の直後）
     ("facts", "private", "action", "theory", "derived", "memo", "temp", "round",
-     "rguid", "claims", "timeline", "evid", "selfpair", "task", "guid"),
-    # seed C: 議論案内を証拠の直前へ、質問だけは最後まで後ろ
+     "rguid", "claims", "state", "timeline", "evid", "selfpair", "task", "guid"),
+    # seed C: 議論案内を証拠の直前へ、質問だけは最後まで後ろ（state は質問の直後）
     ("facts", "private", "action", "theory", "derived", "memo", "temp", "round",
-     "claims", "guid", "rguid", "timeline", "evid", "selfpair", "task"),
-    # seed D: 議論案内を自分の連続性の前（証拠より前）に置く
-    ("facts", "private", "theory", "action", "claims", "derived", "memo", "temp",
+     "claims", "guid", "rguid", "timeline", "evid", "state", "selfpair", "task"),
+    # seed D: 議論案内を自分の連続性の前（証拠より前）に置く（state は時点の隣）
+    ("facts", "private", "theory", "action", "claims", "state", "derived", "memo", "temp",
      "round", "rguid", "selfpair", "timeline", "evid", "guid", "task"),
+    # seed E (TASK-062): v3 の終端連鎖（索引→時点→証拠→質問）に状態を挟む候補から始める
+    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
+     "claims", "timeline", "state", "evid", "task", "selfpair", "rguid", "guid"),
+    # seed F (TASK-062): 状態を質問の直後に置き、自分の記録へ橋渡しする候補
+    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
+     "claims", "timeline", "evid", "task", "state", "selfpair", "rguid", "guid"),
 )
 
 
@@ -833,6 +892,44 @@ PROMPT_LAYOUT_V3_ORDER: tuple[str, ...] = flatten_blocks(
     )
 )
 
+# TASK-062: layout v4（既定）。`_analysis/task062_order_probe.py` が代表字数で探索した結果を
+# 凍結したもの。v3 と同じ連鎖を保ったまま、エンジン発行の論理状態を
+# 「発言証拠の直後・現在質問の直前」へ置く（スコア46.93／違反0、v3末尾_append案は38.98）。
+# 読み方: ルールと応答言語 → 自分の行動記録 → 盤面の確定事実 → 本人限定情報
+#        → （中部: 理論カード・未検証の派生情報・期限付き案内・ラウンド見出し）
+#        → 公開主張の索引 → 時点 → 発言証拠 → [正規化された論理状態] → 現在質問
+#        → 自分の発言と推理メモ → 推理メモの指針 → 議論の案内（中立）→ 秘匿境界
+#        → 強い契約 → 出力形式 → 最終チェックリスト
+PROMPT_LAYOUT_V4_ORDER: tuple[str, ...] = flatten_blocks(
+    (
+        PROMPT_SEARCH_HEAD,
+        ("self_action_memory",),
+        ("fact_ledger",),
+        ("private_seer_result", "actor_private_memo", "info_boundaries"),
+        ("werewolf_theory_card",),
+        ("inference_line", "hypothesis_ledger", "previous_topics"),
+        ("continuity_memo", "integrity_alerts"),
+        ("day1_first_turn_guidance", "first_night_guidance"),
+        ("round_transcript",),
+        ("claim_ledger",),
+        ("day_timeline",),
+        ("conversation_evidence",),
+        ("continuity_checkpoint",),
+        ("current_task", "question_block", "direct_answer"),
+        ("own_speeches", "reasoning_memo_own"),
+        ("reasoning_guidance",),
+        ("discussion_guidelines",),
+        PROMPT_SEARCH_TAIL,
+    )
+)
+
+# v3 から v4 へ変わった点（節の新設と位置だけ。文言と発言の自由は変えない）
+V4_CHANGED_FROM_V3: tuple[str, ...] = (
+    "continuity_checkpoint: 発言証拠の直後・現在質問の直前へ（証拠との距離0、質問との距離0.0034）",
+    "自分の一貫性アンカー（自分の発言→推理メモ）は質問の直後に残し、状態節がその前段になった",
+    "誘導系（理論カード・派生情報・期限付き案内）は中部帯のまま、状態節だけは終端帯で読む",
+)
+
 # v2 の宣言順から v3 へ変わった点（ログで説明できるようにしておく）
 V3_CHANGED_FROM_V2: tuple[str, ...] = (
     "werewolf_theory_card: FACT_LEDGER の内側（先頭帯）から中部帯へ降格し、optional 化",
@@ -859,6 +956,9 @@ REPRESENTATIVE_SECTION_CHARS: dict[str, int] = {
     "previous_topics": 320,
     "continuity_memo": 620,
     "integrity_alerts": 180,
+    # TASK-062: `[CONTINUITY_CHECKPOINT]` の代表字数。見出し+権威説明が約620字、
+    # 差分・反証・未解決の問いの行で最大約900字（Day 2以降の差分提示の実測平均を想定）。
+    "continuity_checkpoint": 900,
     "day1_first_turn_guidance": 1450,
     "round_transcript": 120,
     "reasoning_guidance": 620,
@@ -880,8 +980,18 @@ REPRESENTATIVE_SECTION_CHARS: dict[str, int] = {
 
 def adopted_layout_score(
     section_chars: Mapping[str, int] | None = None,
+    order: Sequence[str] | None = None,
 ) -> OrderScore:
-    """採用中の v3 節順をコストモデルで評価する（既定は代表字数）。"""
+    """採用中の節順（TASK-062以降は v4）をコストモデルで評価する（既定は代表字数）。"""
+    chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
+    chosen = PROMPT_LAYOUT_V4_ORDER if order is None else tuple(order)
+    return score_order(chosen, chars)
+
+
+def v3_layout_score(
+    section_chars: Mapping[str, int] | None = None,
+) -> OrderScore:
+    """A/B比較の基準側（TASK-060の v3 節順）を評価する。"""
     chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
     return score_order(PROMPT_LAYOUT_V3_ORDER, chars)
 
@@ -898,6 +1008,7 @@ __all__ = [
     "ATTENTION_SPAN_SAMPLES",
     "ATTENTION_ZONES",
     "BLOCK_ALIASES",
+    "CONTINUITY_STATE_SECTION",
     "ENGINE_PRIVATE_SECTIONS",
     "HARD_VIOLATION_PENALTY",
     "MUST_USE_ROLES",
@@ -912,10 +1023,13 @@ __all__ = [
     "PROMPT_LAYOUT_POLICY_DEFAULT",
     "PROMPT_LAYOUT_POLICY_V2",
     "PROMPT_LAYOUT_POLICY_V3",
+    "PROMPT_LAYOUT_POLICY_V4",
     "PROMPT_LAYOUT_V2",
     "PROMPT_LAYOUT_V2_ORDER",
     "PROMPT_LAYOUT_V3",
     "PROMPT_LAYOUT_V3_ORDER",
+    "PROMPT_LAYOUT_V4",
+    "PROMPT_LAYOUT_V4_ORDER",
     "PROMPT_SEARCH_BLOCKS",
     "PROMPT_SEARCH_HEAD",
     "PROMPT_SEARCH_TAIL",
@@ -927,6 +1041,7 @@ __all__ = [
     "ROLE_ENGINE_PRIVATE",
     "ROLE_FORMAT",
     "ROLE_HEURISTIC",
+    "ROLE_CONTINUITY",
     "ROLE_LANGUAGE",
     "ROLE_PUBLIC_INDEX",
     "ROLE_RULES",
@@ -941,9 +1056,11 @@ __all__ = [
     "SEED_KEYS",
     "TAIL_TIGHT_SECTIONS",
     "V3_CHANGED_FROM_V2",
+    "V4_CHANGED_FROM_V3",
     "WEAK_MIDDLE_MUST_USE_WEIGHT",
     "adjacency_gap",
     "adopted_layout_score",
+    "v3_layout_score",
     "attention_prior",
     "attention_prior_span",
     "attention_zone_for_center",

@@ -41,13 +41,17 @@ from werewolf.prompt_contract import (
 from werewolf.prompt_layout import (
     ATTENTION_MIDDLE_BASE,
     ATTENTION_PRIMACY_EDGE,
+    CONTINUITY_STATE_SECTION,
     NO_PRIMACY_SECTIONS,
     PROMPT_LAYOUT_POLICY_AUTO,
     PROMPT_LAYOUT_POLICY_DEFAULT,
     PROMPT_LAYOUT_POLICY_V2,
     PROMPT_LAYOUT_POLICY_V3,
+    PROMPT_LAYOUT_POLICY_V4,
     PROMPT_LAYOUT_V3,
     PROMPT_LAYOUT_V3_ORDER,
+    PROMPT_LAYOUT_V4,
+    PROMPT_LAYOUT_V4_ORDER,
     REPRESENTATIVE_SECTION_CHARS,
     adopted_layout_score,
     adjacency_gap,
@@ -60,6 +64,7 @@ from werewolf.prompt_layout import (
     resolve_prompt_layout,
     score_order,
     search_prompt_orders,
+    v3_layout_score,
     validate_declared_order,
     weak_middle_must_use_chars,
 )
@@ -136,25 +141,35 @@ def _ctx(state: GameState, actor_name: str, layout: str, contract: str = "simpli
 # ---------------------------------------------------------------------------
 # 1. ポリシー解決（既定 v3 / legacy契約では旧字节順が勝つ）
 # ---------------------------------------------------------------------------
-def test_layout_policy_defaults_to_v3_and_normalizes_aliases() -> None:
-    assert PROMPT_LAYOUT_POLICY_DEFAULT == PROMPT_LAYOUT_POLICY_V3
-    assert normalize_prompt_layout_policy(None) == "v3"
+def test_layout_policy_defaults_to_v4_and_normalizes_aliases() -> None:
+    # TASK-062: 既定は v4（論理状態節を発言証拠の直後・現在質問の直前へ置く配置）。
+    # v3 は A/B比較の基準側として明示指定で残る。
+    assert PROMPT_LAYOUT_POLICY_DEFAULT == PROMPT_LAYOUT_POLICY_V4
+    assert normalize_prompt_layout_policy(None) == "v4"
     assert normalize_prompt_layout_policy("V2 ") == "v2"
+    assert normalize_prompt_layout_policy("v3") == PROMPT_LAYOUT_POLICY_V3
+    assert normalize_prompt_layout_policy("continuity") == "v4"
     assert normalize_prompt_layout_policy("auto") == PROMPT_LAYOUT_POLICY_AUTO
-    assert normalize_prompt_layout_policy(True) is PROMPT_LAYOUT_POLICY_V3
+    assert normalize_prompt_layout_policy(True) is PROMPT_LAYOUT_POLICY_V4
     assert normalize_prompt_layout_policy(False) is PROMPT_LAYOUT_POLICY_V2
     # 旧ラベル（legacy/off）は「契約に追随」を意味する auto として扱う
     assert normalize_prompt_layout_policy(PROMPT_LAYOUT_LEGACY) == PROMPT_LAYOUT_POLICY_AUTO
-    assert normalize_prompt_layout_policy("未知値") == "v3"
+    assert normalize_prompt_layout_policy("未知値") == "v4"
     assert prompt_layout_policy_label("v2_attention") == "v2"
+    # レイアウトラベル（ログに出る値）も設定値へ写る
+    assert prompt_layout_policy_label(PROMPT_LAYOUT_V4) == "v4"
+    assert prompt_layout_policy_label(PROMPT_LAYOUT_V3) == "v3"
 
 
 def test_legacy_contract_keeps_the_pre_task060_byte_order() -> None:
     # A/B比較の基準（TASK-057までの字节順）を layout 指定で壊さない
     assert resolve_prompt_layout("v3", "legacy") == PROMPT_LAYOUT_LEGACY
     assert resolve_prompt_layout("v2", "legacy") == PROMPT_LAYOUT_LEGACY
+    assert resolve_prompt_layout("v4", "legacy") == PROMPT_LAYOUT_LEGACY
     assert resolve_prompt_layout(None, "legacy_v1") == PROMPT_LAYOUT_LEGACY
-    assert resolve_prompt_layout("auto", "simplified") == PROMPT_LAYOUT_V3
+    # simplified では auto / v4 が v4、明示した v3 / v2 はそれぞれの配置のまま
+    assert resolve_prompt_layout("auto", "simplified") == PROMPT_LAYOUT_V4
+    assert resolve_prompt_layout("v4", "simplified") == PROMPT_LAYOUT_V4
     assert resolve_prompt_layout("v3", "simplified") == PROMPT_LAYOUT_V3
     assert resolve_prompt_layout("v2", "simplified") == PROMPT_LAYOUT_V2
 
@@ -167,7 +182,7 @@ def test_game_state_normalizes_layout_policy() -> None:
     assert state.prompt_layout_policy == "v2"
     state.prompt_layout_policy = "bogus"
     GameState.__post_init__(state)
-    assert state.prompt_layout_policy == "v3"
+    assert state.prompt_layout_policy == "v4"
 
 
 # ---------------------------------------------------------------------------
@@ -209,23 +224,56 @@ def test_score_order_penalizes_moving_the_question_away_from_evidence() -> None:
 # ---------------------------------------------------------------------------
 # 3. 凍結した v3 節順（ハード制約と探索再現）
 # ---------------------------------------------------------------------------
-def test_frozen_v3_order_is_legal_and_reproduced_by_the_search() -> None:
-    assert validate_declared_order(PROMPT_LAYOUT_V3_ORDER) == []
-    assert len(set(PROMPT_LAYOUT_V3_ORDER)) == len(PROMPT_LAYOUT_V3_ORDER)
+def test_frozen_v4_order_is_legal_and_reproduced_by_the_search() -> None:
+    """凍結した v4 節順がハード制約を満たし、貪欲探索が同じ順を最良として再現する。"""
+    assert validate_declared_order(PROMPT_LAYOUT_V4_ORDER) == []
+    assert len(set(PROMPT_LAYOUT_V4_ORDER)) == len(PROMPT_LAYOUT_V4_ORDER)
+    chars = dict(REPRESENTATIVE_SECTION_CHARS)
     frozen = adopted_layout_score()
     assert frozen.violations == ()
-    assert frozen.order == PROMPT_LAYOUT_V3_ORDER
-    # 代表字数での貪欲探索が、凍結した順を最良候補としてそのまま再現する（決定的・LL不使用）
-    best = search_prompt_orders(REPRESENTATIVE_SECTION_CHARS, top_k=1)[0]
-    assert tuple(best["layout_order"]) == PROMPT_LAYOUT_V3_ORDER
+    assert frozen.order == PROMPT_LAYOUT_V4_ORDER
+    # 代表字数での貪欲探索（単一ブロック移動＋2ブロック入替）が凍結順をそのまま出す
+    best = search_prompt_orders(chars, top_k=1)[0]
+    assert tuple(best["layout_order"]) == PROMPT_LAYOUT_V4_ORDER
     assert best["hard_violations"] == []
     # v2 の宣言順はハード制約で弾かれる（案内が形式の後／自分の記録が分断）
-    v2_like = score_order(PROMPT_LAYOUT_V2_ORDER, REPRESENTATIVE_SECTION_CHARS)
+    v2_like = score_order(PROMPT_LAYOUT_V2_ORDER, chars)
     assert {item["kind"] for item in v2_like.violations} == {
         "anchor_split",
         "guidelines_after_format",
     }
     assert frozen.score > v2_like.score
+    # 同じ節を末尾側（議論案内の直前）へ足すだけの配置より、v4 は上（順番が挙動を決める）
+    appended = list(PROMPT_LAYOUT_V3_ORDER)
+    appended.insert(appended.index("discussion_guidelines"), CONTINUITY_STATE_SECTION)
+    assert score_order(tuple(appended), chars).score < frozen.score
+
+
+def test_v3_baseline_stays_legal_and_is_kept_for_ab_reference() -> None:
+    """A/B基準（TASK-060の v3）は節順そのままで無傷のまま参照できる。"""
+    assert validate_declared_order(PROMPT_LAYOUT_V3_ORDER) == []
+    assert len(set(PROMPT_LAYOUT_V3_ORDER)) == len(PROMPT_LAYOUT_V3_ORDER)
+    baseline = v3_layout_score()
+    assert baseline.order == PROMPT_LAYOUT_V3_ORDER
+    assert baseline.violations == ()
+    assert CONTINUITY_STATE_SECTION not in PROMPT_LAYOUT_V3_ORDER
+    assert CONTINUITY_STATE_SECTION in PROMPT_LAYOUT_V4_ORDER
+
+
+def test_state_section_must_follow_its_id_index() -> None:
+    """論理状態節は主張索引（CLAIM_LEDGER）より前に出せない（存在しないIDを辿らせる）。"""
+    too_early = list(PROMPT_LAYOUT_V4_ORDER)
+    too_early.remove(CONTINUITY_STATE_SECTION)
+    too_early.insert(too_early.index("werewolf_theory_card"), CONTINUITY_STATE_SECTION)
+    kinds = {item["kind"] for item in validate_declared_order(tuple(too_early))}
+    assert "state_before_index" in kinds
+    # v4 の実位置は索引の後・発言証拠の後・現在質問の前（読み順が状態→質問になる）
+    order = PROMPT_LAYOUT_V4_ORDER
+    assert order.index("claim_ledger") < order.index(CONTINUITY_STATE_SECTION)
+    assert order.index("conversation_evidence") < order.index(CONTINUITY_STATE_SECTION)
+    assert order.index(CONTINUITY_STATE_SECTION) < order.index("question_block")
+    assert CONTINUITY_STATE_SECTION in NO_PRIMACY_SECTIONS
+
 
 
 def test_hard_constraints_reject_inducing_or_reordered_placement() -> None:

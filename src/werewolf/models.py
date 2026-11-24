@@ -54,6 +54,13 @@ from .prompt_layout import (
     PROMPT_LAYOUT_POLICY_DEFAULT,
     normalize_prompt_layout_policy,
 )
+# TASK-062: 日をまたぐ論理状態の正規化（ContinuityState）。エンジン発行の短い状態差分だけを
+# 次の発言へ渡す。このモジュールは models を import しないため循環参照にならない。
+from .continuity_state import (
+    CONTINUITY_POLICY_DEFAULT,
+    ContinuityState,
+    normalize_continuity_policy,
+)
 
 
 class Role(str, Enum):
@@ -536,6 +543,14 @@ class GameState:
     # （optional化＝割り当て不足時に第2段階で落ちる）へ下げる。口調・論点・結論は自由のまま。
     # v2 はTASK-058の配置、auto は契約ポリシーに追随（legacy契約では旧バイト順）。
     prompt_layout_policy: str = PROMPT_LAYOUT_POLICY_DEFAULT
+    # TASK-062: 日をまたぐ論理状態の正規化（"normalized" / "off"）。normalized（既定）は
+    # エンジンが発行する短い状態差分（[CONTINUITY_CHECKPOINT]）だけを次の発言へ渡す。
+    # 過去の会話全文を積み増すのではなく、確定事実・公開申告・反証・未解決の問いを
+    # 権威レベルとID付きで継続させる。口調・論点・結論・推理順には干渉しない。
+    # off はA/B比較用の旧挙動（チェックポイントを出さない）。
+    continuity_policy: str = CONTINUITY_POLICY_DEFAULT
+    # プレイヤー別の論理状態と、エンジン発行チェックポイントの台帳
+    continuity_state: ContinuityState = field(default_factory=ContinuityState)
 
     def __post_init__(self) -> None:
         if self.day < 0:
@@ -554,6 +569,9 @@ class GameState:
         # TASK-060: 節順ポリシーも正規化する（未知値は既定の v3）。legacy 契約のときは
         # プロンプト構築側（PromptBuilder）で旧バイト順へ寄せられる。
         self.prompt_layout_policy = normalize_prompt_layout_policy(self.prompt_layout_policy)
+        # TASK-062: 論理状態の正規化ポリシーも正規化し、台帳と同じ値に揃える
+        self.continuity_policy = normalize_continuity_policy(self.continuity_policy)
+        self.continuity_state.policy = self.continuity_policy
         if not 0 <= self.discussion_turn <= 3:
             raise ValueError("Discussion turn must be between zero and three.")
         names = [player.name for player in self.players]
@@ -980,6 +998,59 @@ class GameState:
     def snapshot_hypothesis_presentation(self, actor_name: str) -> None:
         """このターンで本人へ提示した仮説状態を記録する（次ターンの差分基準）。"""
         self.hypothesis_ledger.snapshot_presentation(actor_name)
+
+    # ------------------------------------------------------------------
+    # TASK-062: 日をまたぐ論理状態の正規化（エンジン発行の状態差分だけを使う）
+    # ------------------------------------------------------------------
+
+    def render_continuity_for(
+        self, actor_name: str, day: int | None = None, turn: int | None = None
+    ) -> tuple[str, dict[str, object]]:
+        """本人向けの `[CONTINUITY_CHECKPOINT]` と診断を返す（変わった項目だけの短い行）。"""
+        current_day = self.day if day is None else int(day)
+        current_turn = self.discussion_turn if turn is None else int(turn)
+        if self.reasoning_memory_enabled and actor_name not in self.reasoning_memos:
+            # 未回答質問は推理メモの派生情報なので、初回構築前に確定させる
+            self.refresh_reasoning_memos()
+        return self.continuity_state.render_for(self, actor_name, current_day, current_turn)
+
+    def issue_continuity_checkpoint(self, boundary: str) -> dict[str, object] | None:
+        """日終了・投票前などにエンジンが発行する状態チェックポイントを作る。
+
+        内容は公開情報のID付き短行だけ（秘匿情報は入らない）。発言本文を「要約」という
+        名前で確定事実へ昇格させることはしない。
+        """
+        record = self.continuity_state.checkpoint(
+            self, boundary, turn=self.discussion_turn
+        )
+        if record is None or not self.continuity_state.enabled:
+            return None
+        return {
+            "checkpoint_id": record.checkpoint_id,
+            "boundary": record.boundary,
+            "day": record.day,
+            "turn": record.turn,
+            "issued_at": record.issued_at,
+            "char_count": record.char_count,
+            "lines": list(record.lines),
+            "evidence_ids": list(record.evidence_ids),
+        }
+
+    def continuity_fold_days(self) -> tuple[int, ...]:
+        """チェックポイントが既に正規化した日（当日より前）。prompts側で本文を畳める判断に使う。"""
+        if not self.continuity_state.enabled:
+            return ()
+        return self.continuity_state.normalized_days(self.day)
+
+    def continuity_checkpoint_text(self) -> str:
+        """直近チェックポイントの公開テキスト（thinking-only再要求の短縮プロンプトで優先する）。"""
+        if not self.continuity_state.enabled:
+            return ""
+        return self.continuity_state.checkpoint_text()
+
+    def continuity_metrics(self) -> dict[str, object]:
+        """診断・ログ用の状態メトリクス（日別字数・差分件数・証拠ID数など）。"""
+        return self.continuity_state.metrics()
 
     def record_topics_from_speech(
         self, speaker: str, content: str | None, day: int, turn: int

@@ -54,6 +54,17 @@ from .thinking_profile import (
     reserve_body_budget,
     thinking_allowance,
 )
+# TASK-063: 出力予算・thinking・timeoutを、プロンプト論理の失敗と分離するトレース。
+# モデル×アクション別の内訳（本文生成率・カテゴリ別失敗・短縮再要求・本文喪失）を残す。
+# thinkingを一律に無効化したり推理手順を決めたりする設定はここに入れない。
+from .output_budget_trace import (
+    CATEGORY_OUTPUT_FORMAT,
+    CATEGORY_PROMPT_LOGIC,
+    OutputBudgetTrace,
+    fixed_model_caps,
+    is_thinking_fixed_model,
+    issue_category,
+)
 from .discussion_format import (
     DEFAULT_QUESTION_HINT_MODE,
     QUESTION_HINT_NONE,
@@ -671,10 +682,68 @@ class OllamaActions(ActionPolicy):
         # TASK-053: モデル×アクション別の生成観測プロファイル（thinking消費・空応答率・
         # 待ち時間）。初回リクエストの本文予約とモデル別thinking余白の算出元に使う。
         self._thinking_profiles = ThinkingProfiles()
+        # TASK-063: モデル×アクション別の出力予算トレース（thinking予算・timeout・生成上限・
+        # 出力形式・通信・プロンプト論理を分離する）。観測のみで生成挙動そのものは変えない。
+        self._output_trace = OutputBudgetTrace()
 
     def thinking_profiles_snapshot(self) -> dict[str, dict[str, dict[str, object]]]:
         """TASK-053: モデル×アクション別のプロファイル（評価ログ・CLI表示用）。"""
         return self._thinking_profiles.snapshot()
+
+    def output_budget_snapshot(self) -> dict[str, object]:
+        """TASK-063: 出力予算トレース（モデル別内訳と行動単位の結果。本文は含まない）。"""
+        return self._output_trace.serialize_public()
+
+    def _trace_generation_attempt(
+        self,
+        actor: Player,
+        budget_key: str,
+        action: str,
+        request_number: int,
+        *,
+        body_char_count: int = 0,
+        thinking_requested: bool | None = None,
+        thinking_present: bool = False,
+        thinking_only: bool = False,
+        timed_out: bool = False,
+        transport_error: bool = False,
+        done_reason: str | None = None,
+        eval_count: object = None,
+        num_predict: object = None,
+        num_ctx: object = None,
+        prompt_char_count: object = None,
+        elapsed_seconds: float = 0.0,
+        short_retry: bool = False,
+        format_issue: str | None = None,
+        logic_issue: str | None = None,
+    ) -> dict[str, object]:
+        """1送信をトレースへ記録し、ログに載せる行（辞書）を返す（TASK-063）。
+
+        カテゴリ決定は `classify_attempt`（通信→timeout→生成量→形式→論理の順）。ここで
+        決めるのは観測カテゴリだけで、モデルの応答内容・口調・推理順には干渉しない。
+        """
+        row = self._output_trace.record_attempt(
+            model=actor.model,
+            budget_key=budget_key,
+            action=str(action),
+            request_number=request_number,
+            body_char_count=body_char_count,
+            thinking_requested=thinking_requested,
+            thinking_present=thinking_present,
+            thinking_only=thinking_only,
+            timed_out=timed_out,
+            transport_error=transport_error,
+            done_reason=done_reason,
+            eval_count=eval_count,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            prompt_char_count=prompt_char_count,
+            elapsed_seconds=elapsed_seconds,
+            short_retry=short_retry,
+            format_issue=format_issue,
+            logic_issue=logic_issue,
+        )
+        return row.serialize()
 
     def _profile_for(self, actor: Player, budget_key: str) -> ModelActionProfile:
         key = normalize_action_budget_key(budget_key)
@@ -689,13 +758,32 @@ class OllamaActions(ActionPolicy):
     def _thinking_margin_for(
         self, actor: Player, budget_key: str, thinking_enabled: bool | None
     ) -> int:
-        """モデル別の実測thinking余白（TASK-046の全局余白ではなく観測値を使う）。"""
+        """モデル別の実測thinking余白（TASK-046の全局余白ではなく観測値を使う）。
 
-        return thinking_allowance(
-            self._thinking_profiles.get(actor.model, normalize_action_budget_key(budget_key)),
+        TASK-063: thinking-fixed系モデルでは行動別のthinking上限（FIXED_MODEL_THINKING_CAP）を
+        上限として適用する。thinking を切るのではなく「同じ生成上限の中で思考に渡せる分量の
+        天井」を決めるので、本文が空になる事故を抑えつつ推論の自由は残る。
+        """
+
+        key = normalize_action_budget_key(budget_key)
+        profile = self._thinking_profiles.get(actor.model, key)
+        allowance = thinking_allowance(
+            profile,
             thinking_enabled=thinking_enabled,
             default_margin=THINKING_MARGIN_TOKENS,
         )
+        caps = fixed_model_caps(actor.model, key)
+        if caps is not None:
+            # 静的な上限は「観測の無いときの既定 guesses」にだけ当てる。実測で思考消費が
+            # 観測されている場合はその値を尊重する（証拠より静的な天井で削ると、かえって
+            # 本文が空になるため）。ここで削るのは予約量のguessだけで、thinking自体は切らない。
+            static_cap = int(caps["thinking_cap_tokens"])
+            observed_floor = int(getattr(profile, "thinking_floor_tokens", 0) or 0) if profile else 0
+            if observed_floor <= 0 and not (profile and profile.has_thinking_evidence):
+                # 観測なしのときは静的上限で予約を抑える（既定1024の_guessを行動別に絞る）
+                allowance = min(allowance, static_cap)
+            # 実測のある行動では静的上限を適用しない（証拠の方を優先する）
+        return allowance
 
     def _body_reservation(
         self,
@@ -717,12 +805,23 @@ class OllamaActions(ActionPolicy):
         profile = self._thinking_profiles.get(actor.model, key)
         cap = BODY_RESERVATION_MAX_NUM_PREDICT.get(key)
         timeout_fit = self._slow_model(actor) and key in {"discussion", "wolf_discussion"}
+        # TASK-063: thinking-fixed系モデルでは行動別の「本文最低量」を強化し、その分だけ
+        # 生成上限キャップも引き上げる（思考に食われて本文が空になる事故を防ぐためで、
+        # 推理手順や論点を決める変更ではない）。
+        caps = fixed_model_caps(actor.model, key)
+        body_min: int | None = None
+        if caps is not None:
+            body_min = int(caps["body_min_tokens"])
+            needed = body_min + int(caps["thinking_cap_tokens"])
+            cap = max(int(cap or 0), needed)
         reservation = reserve_body_budget(
             num_predict,
             num_predict_source,
             profile,
             key,
             thinking_enabled=thinking_enabled,
+            body_min=body_min,
+            allowance=self._thinking_margin_for(actor, key, thinking_enabled),
             cap=cap,
             enabled=self._body_reservation_enabled() and not timeout_fit,
             retry_request=retry,
@@ -2636,6 +2735,25 @@ class OllamaActions(ActionPolicy):
                     metadata,
                 )
             last_response_issue = response_issue
+            # TASK-063: 本文は出ているのに失敗したケースを、形式側（output_format）と
+            # 論理側（prompt_logic）へ分類してトレースへ関連付ける（thinking不足・timeoutとは
+            # 別枠で数えるため。口調・論点の内容そのものは変更しない）。
+            if response_issue and response_text:
+                self._output_trace.annotate_last_attempt(
+                    model=actor.model,
+                    budget_key=attempt_budget_key,
+                    action=str(action),
+                    format_issue=(
+                        response_issue
+                        if issue_category(response_issue) == CATEGORY_OUTPUT_FORMAT
+                        else None
+                    ),
+                    logic_issue=(
+                        response_issue
+                        if issue_category(response_issue) == CATEGORY_PROMPT_LOGIC
+                        else None
+                    ),
+                )
             if response_issue == "seer_result_without_claim":
                 last_spoken_result = extract_public_seer_result(
                     response_text,
@@ -3353,6 +3471,13 @@ class OllamaActions(ActionPolicy):
             if recent_messages is not None
             else tuple(self.state.conversation_log)
         )
+        # TASK-063: thinking-only等の再要求で同じ長いプロンプトを再送しないため、エンジンが
+        # 正規化した論理状態（[CONTINUITY_CHECKPOINT]）があればそれを先に渡す。確定事実・公開
+        # 申告のID・反証・未解決の問いはここに既にあるので、下記の投票台帳や死亡行は
+        # 省略できる（節約ぶんだけ入力が減り、強化モデルの再要求コストが下がる）。
+        checkpoint_text = str(
+            getattr(self.state, "continuity_checkpoint_text", lambda: "")() or ""
+        ).strip()
         current_day_history = PromptBuilder.current_day_messages(conversation)
         recent_speech = [
             f"{message.speaker}: {message.content[:240]}"
@@ -3419,9 +3544,18 @@ class OllamaActions(ActionPolicy):
             guidance += (
                 f" Answer {previous_message.speaker} directly in your first sentence."
             )
+        # TASK-062/063: thinking-only等の再要求で同じ長いプロンプトを再送しないため、エンジンが
+        # 正規化した論理状態（[CONTINUITY_CHECKPOINT]）を先頭に置く。確定事実・公開申告のID・
+        # 反証・未解決の問いはそこへ集約済みなので、投票台帳の全行は再掲しない（入力が減り、
+        # 強化モデルの再要求コストが下がる）。口調・論点・結論はここで決めない。
+        state_prefix = f"{checkpoint_text}\n" if checkpoint_text else ""
+        vote_history_line = (
+            f"- Vote History: {vote_ledger}\n" if not checkpoint_text else ""
+        )
         return (
             "This is a short retry prompt. Omit old omitted dialogue; use only the following facts and recent speeches.\n"
-            "[Game System Confirmed Facts]\n"
+            + state_prefix
+            + "[Game System Confirmed Facts]\n"
             f"- Your Player Name: {actor.name}\n"
             f"- Self-Reference: {actor.name} is yourself. Always refer to yourself in the first person (I/me/my). "
             f"Do not discuss {actor.name} in the third person.\n"
@@ -3433,8 +3567,8 @@ class OllamaActions(ActionPolicy):
             f"- Known Dead: {', '.join(dead_players) or 'None'}\n"
             f"- Confirmed Deaths (Last 3): {death_summary}\n"
             f"- Latest Vote Result: {latest_vote}\n"
-            f"- Vote History: {vote_ledger}\n"
-            f"- Response Language: {actor.response_language} (Strictly {actor.response_language})\n"
+            + vote_history_line
+            + f"- Response Language: {actor.response_language} (Strictly {actor.response_language})\n"
             "[Theory (Inference - Not Confirmed)] Prioritize revealing Werewolf results early. "
             "A lone Seer CO with no counter-claim - especially a Day 1 CO - is placed more genuinely "
             "(真置き) the longer it persists, so doubt it only with concrete inconsistency. "
@@ -5463,6 +5597,9 @@ class OllamaActions(ActionPolicy):
         thinking_enabled: bool | None,
         send_started: float,
         response: ChatResponse,
+        # TASK-063: 送信したプロンプト実字数（トレースで入力肥大と失敗 カテゴリを突き合わせる）
+        prompt_char_count: int | None = None,
+        short_retry: bool = False,
     ) -> ChatResponse:
         """送信結果をモデル×アクション別の生成プロファイルへ加算する（TASK-053）。
 
@@ -5540,6 +5677,27 @@ class OllamaActions(ActionPolicy):
                 num_predict=request_options.get("num_predict"),
                 body_budget=body_budget,
                 generation_profile=profile.serialize(),
+                output_budget=self._trace_generation_attempt(
+                    actor,
+                    key,
+                    action,
+                    request_number,
+                    body_char_count=len(body_text),
+                    thinking_requested=bool(thinking_enabled)
+                    if thinking_enabled is not None
+                    else None,
+                    thinking_present=thinking_present,
+                    thinking_only=thinking_only,
+                    done_reason=response.done_reason,
+                    eval_count=response.eval_count,
+                    num_predict=request_options.get("num_predict"),
+                    num_ctx=response.requested_num_ctx,
+                    prompt_char_count=prompt_char_count,
+                    elapsed_seconds=elapsed_seconds,
+                    short_retry=short_retry
+                    or ("retry" in str(request_reason or "").lower())
+                    or ("correction" in str(request_reason or "").lower()),
+                ),
             )
         return response
 
@@ -5555,6 +5713,8 @@ class OllamaActions(ActionPolicy):
         thinking_enabled: bool | None,
         send_started: float,
         error: OllamaError,
+        # TASK-063: 送信しようとしたプロンプト実字数（失敗時の入力肥大評価用）
+        prompt_char_count: int | None = None,
     ) -> None:
         """通信失敗をプロファイルへ記録する（タイムアウト・接続・HTTP）。"""
 
@@ -5589,6 +5749,18 @@ class OllamaActions(ActionPolicy):
                 num_predict=request_options.get("num_predict"),
                 generation_issue=self._transport_failure_reason(error),
                 generation_profile=profile.serialize(),
+                output_budget=self._trace_generation_attempt(
+                    actor,
+                    key,
+                    str(action or key),
+                    request_number,
+                    timed_out=timed_out,
+                    transport_error=not timed_out,
+                    elapsed_seconds=elapsed_seconds,
+                    num_predict=request_options.get("num_predict"),
+                    num_ctx=request_options.get("num_ctx"),
+                    prompt_char_count=prompt_char_count,
+                ),
             )
 
     def _record_thinking_budget_exhausted(
@@ -6179,6 +6351,13 @@ class OllamaActions(ActionPolicy):
             """1送信を計測し、モデル×アクション別の生成プロファイルへ加算する（TASK-053）。"""
 
             send_started = time.perf_counter()
+            # TASK-063: 送信実字数をトレースに残す（入力肥大と失敗カテゴリを突き合わせるため）。
+            # 発言内容そのものは記録しない（字数とカテゴリだけの観測）。
+            sent_prompt_chars = sum(
+                len(str(message.get("content", "")))
+                for message in messages
+                if isinstance(message, dict)
+            )
             try:
                 response = send(request_options)
             except OllamaError as error:
@@ -6193,6 +6372,7 @@ class OllamaActions(ActionPolicy):
                     thinking_enabled,
                     send_started,
                     error,
+                    prompt_char_count=sent_prompt_chars,
                 )
                 raise
             return self._record_generation_response(
@@ -6206,6 +6386,7 @@ class OllamaActions(ActionPolicy):
                 thinking_enabled,
                 send_started,
                 response,
+                prompt_char_count=sent_prompt_chars,
             )
 
         try:

@@ -1,0 +1,9 @@
+checkpoint chars: 245
+final body: '[CO] None\n[BODY] Player 5縺ｮ遒ｺ隱崎ｦ∵ｱゅ↓縺ｯ遲斐∴繧峨ｌ縺ｦ縺・↑縺・・縺ｧ縲∫ｶ壼ｱ繧貞ｰ九・縺ｾ縺吶・ chars= 51
+categories: {'ok': 1, 'thinking_budget': 1, 'generation_cap': 0, 'timeout': 0, 'transport': 0, 'output_format': 0, 'prompt_logic': 0}
+body_generation_rate: 0.5
+budget_bound: 1 logic_bound: 0
+short_retry_count: 1
+sent prompt char sizes: [15887, 4991]
+retry saved: 10896 chars (69%)
+outcome: discussion ['thinking_budget', 'ok'] body_preservation= lost

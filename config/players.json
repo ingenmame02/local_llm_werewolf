@@ -2,7 +2,7 @@
   "players": [
     {
       "name": "Player 1",
-            "model":"llm-jp-4.1-33b-thinking-fixed",
+      "model":"llm-jp-4.1-33b-thinking-fixed",
       "num_ctx": 16384,
       "max_num_ctx": 16384,
       "recommended_num_ctx": 16384,

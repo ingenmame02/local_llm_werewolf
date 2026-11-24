@@ -201,6 +201,20 @@ PROMPT_SECTIONS: tuple[PromptSectionMeta, ...] = (
         source=AUTHORITY_UNVERIFIED,
         authority=AUTHORITY_UNVERIFIED,
     ),
+    # TASK-062: エンジンが発行する論理状態のチェックポイント。確定事実・公開申告・反証・
+    # 未解決の問いを権威レベル付きの短いID行で保持し、past本文の再掲の代わりにする。
+    # core（絶対に落とさない）だが行数上限が決まっているため日跨ぎでも字数が増えない。
+    PromptSectionMeta(
+        name="continuity_checkpoint",
+        markers=("[CONTINUITY_CHECKPOINT",),
+        tier=TIER_CORE,
+        purpose=(
+            "engine-normalized logical state carried across days and turns "
+            "(confirmed facts, public statements, refuted hypotheses, open questions with ids)"
+        ),
+        source=AUTHORITY_ENGINE,
+        authority=AUTHORITY_ENGINE,
+    ),
     PromptSectionMeta(
         name="integrity_alerts",
         markers=("[INTEGRITY_ALERTS]",),

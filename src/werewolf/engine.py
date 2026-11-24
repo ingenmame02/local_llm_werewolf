@@ -1716,6 +1716,9 @@ class GameEngine:
                         )
                 if self.state.reasoning_memory_enabled:
                     self.state.refresh_reasoning_memos()
+        # TASK-062: 議論終了（投票前）にエンジンが論理状態をチェックポイント化し、この日の
+        # 平常発言本文を翌日からID行へ畳むための基準を作る（内容の強制はしない）
+        self._issue_continuity_checkpoint(f"day-{self.state.day}-pre_vote")
         self.state.phase = Phase.VOTING
 
     def run_voting(self) -> None:
@@ -1775,6 +1778,9 @@ class GameEngine:
         )
         # TASK-056: 処刑を時系列台帳へ登録する（この時点以降の発言だけが依拠できる）
         self.state.public_timeline.record_death(day=day, name=executed, executed=True)
+        # TASK-062: 処刑を反映した状態チェックポイントを日終了として発行する（翌日以降の
+        # 議論では、この日の発言本文ではなくこのID付き短行で論理が継続される）
+        self._issue_continuity_checkpoint(f"day-{day}-post_execution")
         self.check_winner()
         if self.state.winner is None:
             self.state.day += 1
@@ -2449,6 +2455,21 @@ class GameEngine:
     def _emit_public_claim(self, event_type: str, **details: object) -> None:
         if self.event_callback is not None:
             self.event_callback({"type": event_type, **details})
+
+    def _issue_continuity_checkpoint(self, boundary: str) -> dict[str, object] | None:
+        """TASK-062: 日の境界でエンジンが論理状態チェックポイントを作る。
+
+        中身は公開情報のID付き短行だけ（人狼相談・占い結果などの秘匿情報は入らない）。
+        モデルへ渡すのは次の発言の直前であり、口調・論点・結論・推理順には干渉しない。
+        `continuity_policy="off"` では何も作らない（A/B比較の基準側）。
+        """
+        issuer = getattr(self.state, "issue_continuity_checkpoint", None)
+        if issuer is None:
+            return None
+        record = issuer(boundary)
+        if record is not None and self.event_callback is not None:
+            self.event_callback({"type": "continuity_checkpoint", **record})
+        return record
 
     def _append_discussion_message(self, message: Message) -> None:
         """Append a public speech and emit it immediately for live UIs/loggers.

@@ -63,10 +63,15 @@ from .core_compression import (
 # TASK-060: 節順（layout）のポリシー解決と attention モデルによる配置評価。v3 では
 # セオリーカードを中部帯へ、発言証拠・時点・現在質問・自分の連続性アンカーを終端帯へ
 # 寄せ、同じ制約の言い換え（一人称・言語・記録外・死者扱い）を1箇所に寄せる。
+# TASK-062: 既定は v4。エンジン発行の論理状態（[CONTINUITY_CHECKPOINT]）を発言証拠の直後・
+# 現在質問の直前へ置き、チェックポイントが正規化した日の平常発言本文をID行へ畳む。
 from .prompt_layout import (
+    CONTINUITY_STATE_SECTION,
     PROMPT_LAYOUT_POLICY_DEFAULT,
     PROMPT_LAYOUT_V3,
     PROMPT_LAYOUT_V3_ORDER,
+    PROMPT_LAYOUT_V4,
+    PROMPT_LAYOUT_V4_ORDER,
     adjacency_gap,
     measure_zones,
     normalize_prompt_layout_policy,
@@ -1194,6 +1199,9 @@ class PromptBuilder:
         state: GameState | None,
         char_budget: int | None = None,
         layered: bool = False,
+        # TASK-062: チェックポイントが既に正規化した日（当日より前）。この日の平常発言本文は
+        # 状態が [CONTINUITY_CHECKPOINT] 側へ移っているので、予算圧迫を待たずにID行へ畳める。
+        continuity_fold_days: frozenset[int] = frozenset(),
     ) -> tuple[str, dict[str, object]]:
         if context_strategy not in {
             "full_transcript",
@@ -1417,6 +1425,48 @@ class PromptBuilder:
             priority_by_index[index] = value
             return value
 
+        # TASK-062: 段階0（能動的畳み込み・予算圧迫を待つ）。チェックポイントが正規化した日
+        # （当日より前）の平常発言は、論理状態が [CONTINUITY_CHECKPOINT] 側で継続しているので、
+        # 本文をID行（時点・話者・発言IDだけ残す約70字）へ畳む。recent層が日にちに比例して
+        # 増え続けるのを止めるのが狙い。直近 RECENT_KEEP_COUNT 件・必須証拠・高優先項目は畳まない。
+        continuity_folded: list[int] = []
+        continuity_fold_saved = 0
+        if continuity_fold_days and selected_records and layered:
+            newest_any = max(int(record["index"]) for record in selected_records)
+            active_cutoff = newest_any - RECENT_KEEP_COUNT
+            # TASK-062: 当日より2日以上前の日は文脈の接続点として残す価値が薄いため、直近
+            # RECENT_KEEP_COUNT の窓に入っていても畳む（recent層の日比例増加を止める）。
+            # 各正規化日の最後の1件は常に本文を残し、前日との流れだけは保つ。
+            current_day = int(getattr(state, "day", 0) or max(int(r["day"]) for r in selected_records))
+            newest_by_day: dict[int, int] = {}
+            for record in selected_records:
+                record_day = int(record["day"])
+                newest_by_day[record_day] = max(
+                    newest_by_day.get(record_day, -1), int(record["index"])
+                )
+            fold_targets = [
+                {**record, "priority": priority_of(record)}
+                for record in selected_records
+                if removable(record)
+                and priority_of(record) == PRIORITY_PLAIN
+                and int(record["day"]) in continuity_fold_days
+                and int(record["index"]) < newest_by_day[int(record["day"])]
+                and (
+                    int(record["index"]) <= active_cutoff
+                    or int(record["day"]) <= current_day - 2
+                )
+            ]
+            for record in sort_records_for_withholding(fold_targets):
+                index = int(record["index"])
+                stub_line = historical_stub_line(
+                    str(record["header"]), record.get("speech_id")
+                )
+                withheld_stubs[index] = stub_line
+                saved = max(0, record_body_len(record) - len(stub_line))
+                withheld_saved_chars += saved
+                continuity_fold_saved += saved
+                continuity_folded.append(index)
+
         if char_budget is not None and selected_records and layered:
             # 段階1: plain（台帳へ正規化済みの古い通常発言）だけを、古い順に本文から畳む。
             # 直近 RECENT_KEEP_COUNT 件は議論の接続点なので畳まない（recent帯の宣言と一致）。
@@ -1582,6 +1632,8 @@ class PromptBuilder:
             "compression_stage": (
                 "evidence_budget_compressed"
                 if evidence_dropped
+                else "evidence_continuity_folded"
+                if continuity_folded
                 else "evidence_core_layered_stubs"
                 if withheld_stubs
                 else "full"
@@ -1591,6 +1643,11 @@ class PromptBuilder:
             "core_compression_applied": bool(layered),
             "evidence_withheld_body_count": len(withheld_stubs),
             "evidence_withheld_saved_chars": int(withheld_saved_chars),
+            # TASK-062: 段階0（正規化日）の実績。本文は公開ログに残ったまま、プロンプトでは
+            # ID行へ畳んだ件数と節約字数（状態は [CONTINUITY_CHECKPOINT] が引き継ぐ）。
+            "evidence_continuity_folded_count": len(continuity_folded),
+            "evidence_continuity_fold_saved_chars": int(continuity_fold_saved),
+            "evidence_continuity_fold_days": sorted(int(day_no) for day_no in continuity_fold_days),
         }
         return "\n".join(lines), diagnostics
 
@@ -1683,6 +1740,28 @@ class PromptBuilder:
         if not block:
             return "", diagnostics
         return f"[PREVIOUS_TOPICS]\n{block}\n\n", diagnostics
+
+    @staticmethod
+    def _continuity_section(
+        state: GameState | None, actor: Player, day: int
+    ) -> tuple[str, dict[str, object]]:
+        """エンジン発行の論理状態チェックポイントを作る（TASK-062）。
+
+        過去の発言全文を積み増す代わりに、確定事実・公開申告・反証された仮説・未解決の
+        問いを権威レベル付きの短いID行で継続する。変わった項目だけを出し、変わっていない
+        項目は個数とIDだけ示す（同じ状態の再掲でコンテキストを増やさない）。議論の順序・
+        結論・口調には干渉しないため、ここから新しい命令文は追加しない。
+        """
+        if state is None:
+            return "", {}
+        renderer = getattr(state, "render_continuity_for", None)
+        if renderer is None:
+            return "", {}
+        state.resolve_hypothesis_ledger()
+        block, diagnostics = renderer(actor.name, day)
+        if not block:
+            return "", diagnostics
+        return block, diagnostics
 
     @staticmethod
     def _discussion_claim_ledger(state: GameState | None) -> str:
@@ -2330,6 +2409,25 @@ class PromptBuilder:
             if state is not None
             else ()
         )
+        # TASK-062: 契約・レイアウトのラベルを先に解決する（発言証拠の畳み込み判断が
+        # チェックポイント正規化日を使うため、証拠構築より前に決めたい）。legacy 契約では
+        # TASK-057までの字节順が優先される（A/B比較の基準を壊さないため）。
+        contract_policy = normalize_prompt_contract_policy(prompt_contract_policy)
+        simplified = contract_policy != PROMPT_CONTRACT_POLICY_LEGACY
+        layout_label = resolve_prompt_layout(prompt_layout_policy, contract_policy)
+        use_v3 = simplified and layout_label == PROMPT_LAYOUT_V3
+        # TASK-062: v4 は v3 と同じ節連鎖の作り回しを使い、状態節だけを追加で組む
+        use_v4 = simplified and layout_label == PROMPT_LAYOUT_V4
+        use_chain = use_v3 or use_v4
+        # チェックポイントが正規化した日（当日より前）は、平常発言の本文をID行へ畳める。
+        # 状態自体は [CONTINUITY_CHECKPOINT] 側で継続しているので情報量は落ちない。
+        continuity_fold_days: frozenset[int] = frozenset()
+        if (
+            use_chain
+            and state is not None
+            and bool(getattr(state.continuity_state, "enabled", False))
+        ):
+            continuity_fold_days = frozenset(state.continuity_fold_days())
         conversation_evidence, context_diagnostics = cls._discussion_evidence(
             conversation_history,
             context_strategy,
@@ -2337,6 +2435,7 @@ class PromptBuilder:
             evidence_char_budget,
             layered=normalize_core_compression_policy(core_compression_policy)
             == "layered",
+            continuity_fold_days=continuity_fold_days,
         )
         context_diagnostics["reasoning_memory_enabled"] = bool(
             state is not None and state.reasoning_memory_enabled
@@ -2356,14 +2455,9 @@ class PromptBuilder:
         directly_addressed = cls._is_directed_to_player(
             actor, previous_message, current_day_history
         )
-        # TASK-057: 契約ポリシーと「発言本文が実際に履歴へ載っているID」を決める。
-        # simplified では同じ本文を他の節で再掲せず `[ref:sN]` に差し替える（節約）。
-        contract_policy = normalize_prompt_contract_policy(prompt_contract_policy)
-        simplified = contract_policy != PROMPT_CONTRACT_POLICY_LEGACY
-        # TASK-060: 節順（layout）は契約ポリシーとあわせて解決する。legacy 契約では
-        # TASK-057までの字节順が優先される（A/B比較の基準を壊さないため）。
-        layout_label = resolve_prompt_layout(prompt_layout_policy, contract_policy)
-        use_v3 = simplified and layout_label == PROMPT_LAYOUT_V3
+        # TASK-057: 「発言本文が実際に履歴へ載っているID」を決める。simplified では同じ本文を
+        # 他の節で再掲せず `[ref:sN]` に差し替える（節約）。契約・レイアウト解決は上流
+        # （発言証拠の畳み込み判断より前）で済ませている。
         evidence_speech_ids = frozenset(
             int(speech_id)
             for speech_id in (context_diagnostics.get("evidence_speech_ids") or ())
@@ -2478,8 +2572,8 @@ class PromptBuilder:
             # TASK-060: v3 ではセオリーカードを独立節（中部帯）として別位置に置く。
             # 併せて、他所に正準がある言い換え行（一人称・言語・記録外・死者扱い）を
             # ヘッダから落として二重送信を防ぐ（落とした制約は契約/ルール/案内に残る）。
-            include_theory_card=not use_v3,
-            lean_redundant_lines=use_v3,
+            include_theory_card=not use_chain,
+            lean_redundant_lines=use_chain,
         )
         if fact_header.startswith(RULE_CARD):
             fact_header = fact_header[len(RULE_CARD) :]
@@ -2546,6 +2640,13 @@ class PromptBuilder:
             if include_topic_summary
             else ("", {})
         )
+        # TASK-062: エンジン発行の論理状態チェックポイント（v4のみで出す）。変わった項目だけの
+        # 短い差分なので、日をまたいでも core が増え続けない。口調・論点・結論には干渉しない。
+        continuity_block, continuity_diagnostics = (
+            cls._continuity_section(state, actor, day) if use_v4 else ("", {})
+        )
+        context_diagnostics.update(continuity_diagnostics)
+        context_diagnostics["continuity_fold_days"] = sorted(continuity_fold_days)
         # TASK-060: 推理メモ関連は3断片（派生 / エンジン発行情報 / 自分のメモ）へ分ける。
         # v1/v2 は従来と同一の字节順で使うため、ここで結合し直す（TASK-058のA/B基準を壊さない）。
         (
@@ -2906,11 +3007,11 @@ class PromptBuilder:
             )
             + language_tail(actor.response_language)
         )
-        # TASK-060: layout v3 は節ごとの断片を PROMPT_LAYOUT_V3_ORDER の順で連結して作る。
+        # TASK-060 / TASK-062: レイアウト連鎖（v3 / v4）は節ごとの断片を宣言順で連結して作る。
         # 文言は simplified(v2) と同じものを使い、口調・文量・論点・結論や推理の順番を決める
-        # 指示は新たに足さない（契約の自由行はそのままとする）。
+        # 指示は新たに足さない（契約の自由行はそのままとする）。v4 は状態節を1つ増やすだけ。
         user_prompt_v3 = ""
-        if use_v3:
+        if use_chain:
             round_transcript_piece = (
                 "[Full Current Round Dialogue]\n"
                 "Review the unshortened public speech from this round; reflect anomalies, "
@@ -2945,6 +3046,9 @@ class PromptBuilder:
                 ),
                 "day_timeline": timeline_block,
                 "conversation_evidence": _v3_evidence_piece(conversation_evidence),
+                # TASK-062: エンジン発行の論理状態（発言証拠の直後・現在質問の直前に配置）。
+                # 内容そのものは ContinuityState が作り、ここでは連結だけ行う。
+                "continuity_checkpoint": continuity_block if use_v4 else "",
                 "current_task": _v3_current_task_piece(
                     hint_mode,
                     directly_addressed,
@@ -2972,7 +3076,8 @@ class PromptBuilder:
             }
             placed: list[str] = []
             seen_parts: set[str] = set()
-            for section_name in PROMPT_LAYOUT_V3_ORDER:
+            chain_order = PROMPT_LAYOUT_V4_ORDER if use_v4 else PROMPT_LAYOUT_V3_ORDER
+            for section_name in chain_order:
                 text = v3_parts.get(section_name, "")
                 if text:
                     placed.append(text)
@@ -2983,7 +3088,7 @@ class PromptBuilder:
             user_prompt_v3 = "".join(placed)
         user_prompt = (
             user_prompt_v3
-            if use_v3
+            if use_chain
             else (
                 user_prompt_v2_head + user_prompt_v2_tail
                 if simplified
@@ -3025,9 +3130,13 @@ class PromptBuilder:
             prompt_layout_policy
         )
         layout_order = (
-            PROMPT_LAYOUT_V3_ORDER
-            if use_v3
-            else (PROMPT_LAYOUT_V2_ORDER if simplified else ())
+            PROMPT_LAYOUT_V4_ORDER
+            if use_v4
+            else (
+                PROMPT_LAYOUT_V3_ORDER
+                if use_v3
+                else (PROMPT_LAYOUT_V2_ORDER if simplified else ())
+            )
         )
         context_diagnostics["prompt_layout_violations"] = (
             validate_prompt_layout(user_prompt, layout_order) if layout_order else []
@@ -3050,6 +3159,17 @@ class PromptBuilder:
         )
         context_diagnostics["prompt_gap_own_speeches_to_question"] = adjacency_gap(
             user_prompt, "own_speeches", "question_block"
+        )
+        # TASK-062: 論理状態節の隣接距離（発言証拠との距離／現在質問との距離）。状態が中部へ
+        # 沈んだり索引より前に出たりしていないかもここで同時に検証する。
+        context_diagnostics["prompt_gap_state_to_evidence"] = adjacency_gap(
+            user_prompt, CONTINUITY_STATE_SECTION, "conversation_evidence"
+        )
+        context_diagnostics["prompt_gap_state_to_question"] = adjacency_gap(
+            user_prompt, CONTINUITY_STATE_SECTION, "question_block"
+        )
+        context_diagnostics["continuity_section_chars"] = (
+            len(continuity_block) if continuity_block else 0
         )
         context_diagnostics["prompt_theory_card_chars"] = (
             len(WEREWOLF_THEORY_CARD) if WEREWOLF_THEORY_CARD in user_prompt else 0

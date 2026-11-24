@@ -1,0 +1,14 @@
+actor=Player 3 seed=2062061
+[continuity=off]
+  Day 1: user=16530 recent=5226 hist=0 anchor=5714 state=0 folded=0 saved=0 layout=v3_grounding viol=0
+  Day 2: user=16576 recent=5226 hist=0 anchor=5760 state=0 folded=0 saved=0 layout=v3_grounding viol=0
+  Day 3: user=17260 recent=5226 hist=0 anchor=5766 state=0 folded=0 saved=0 layout=v3_grounding viol=0
+  Day 4: user=17468 recent=5226 hist=0 anchor=5717 state=0 folded=0 saved=0 layout=v3_grounding viol=0
+  Day1->Day4 delta: user=938, recent=0, state=0
+[continuity=normalized]
+  Day 1: user=17207 recent=5226 hist=0 anchor=6391 state=677 folded=0 saved=0 layout=v4_continuity viol=0
+  Day 2: user=17212 recent=5226 hist=0 anchor=6396 state=636 folded=0 saved=0 layout=v4_continuity viol=0
+  Day 3: user=17629 recent=4665 hist=294 anchor=6402 state=636 folded=3 saved=267 layout=v4_continuity viol=0
+  Day 4: user=17392 recent=3730 hist=784 anchor=6353 state=636 folded=8 saved=712 layout=v4_continuity viol=0
+  Day1->Day4 delta: user=185, recent=-1496, state=-41
+Day4 off vs normalized: user diff=-76, recent diff=-1496, checkpoint chars=636, folded bodies=8 (saved 712 chars), unchanged(count only)=1, questions=0

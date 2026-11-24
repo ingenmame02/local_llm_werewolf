@@ -1,0 +1,31 @@
+============================= test session starts =============================
+platform win32 -- Python 3.15.1, pytest-9.1.1, pluggy-1.7.0
+rootdir: C:\Users\yukic\local_llm_werewolf
+configfile: pyproject.toml
+testpaths: tests
+collected 269 items
+
+tests\test_discussion_signal.py ....                                     [  1%]
+tests\test_free_personality_mode.py ...........                          [  5%]
+tests\test_none_text_pipeline.py .....                                   [  7%]
+tests\test_seer_fallback_and_madman_rule.py .........                    [ 10%]
+tests\test_task043_player3_hallucination.py .......                      [ 13%]
+tests\test_task046_context_budget.py ..........                          [ 17%]
+tests\test_task046_evidence_protection.py ...                            [ 18%]
+tests\test_task047_fact_hypothesis_separation.py .........               [ 21%]
+tests\test_task048_novelty_policy.py ........                            [ 24%]
+tests\test_task052_dead_player_resolution.py ......                      [ 26%]
+tests\test_task053_thinking_body_reservation.py ..............           [ 31%]
+tests\test_task054_leak_guard_classification.py ..................       [ 38%]
+tests\test_task055_role_claim_provenance.py ...............              [ 44%]
+tests\test_task056_day_timeline.py ................................      [ 56%]
+tests\test_task057_prompt_contract.py .........................          [ 65%]
+tests\test_task058_core_compression.py ...............                   [ 71%]
+tests\test_task059_citation_states.py .............                      [ 75%]
+tests\test_task060_prompt_layout.py ....................                 [ 83%]
+tests\test_task061_harmony_response.py ...                               [ 84%]
+tests\test_task062_continuity_state.py ..................                [ 91%]
+tests\test_task063_output_budget.py ..........                           [ 94%]
+tests\test_theory_and_fallback_relaxation.py ..............              [100%]
+
+============================= 269 passed in 1.87s =============================

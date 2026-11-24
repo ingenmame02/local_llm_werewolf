@@ -93,6 +93,9 @@ CORE_SECTION_LAYERS: dict[str, str] = {
     "day_timeline": LAYER_ANCHOR,
     "conversation_evidence": LAYER_RECENT,
     "current_task": LAYER_ANCHOR,
+    # TASK-062: エンジン発行の論理状態チェックポイント。確定事実・反証・未解決の問いを
+    # 載せる「いま使う」欄なので anchor（常に全文保持）。行数上限があるため日跨ぎで増えない。
+    "continuity_checkpoint": LAYER_ANCHOR,
     "question_block": LAYER_ANCHOR,
     "leak_boundary": LAYER_ANCHOR,
     "behavior_contract": LAYER_ANCHOR,

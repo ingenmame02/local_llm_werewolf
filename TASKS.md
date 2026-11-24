@@ -2528,7 +2528,7 @@ Day1の実形（本人発言あり・直前に自分への質問）では anchor
 
 ## TASK-062 最新ゲーム分析 — 日をまたぐ論理状態の正規化と記憶減衰対策
 
-状態：未着手（実機ログ `game_e6b6c7cc3481` で課題を確認）
+状態：実装済み（2026-11-23 / layout v4 既定化 + `continuity_state.ContinuityState`。LL不使用テスト15件、モックA/Bで効果を確認。実機比較は未実施）
 
 ### 背景
 
@@ -2558,7 +2558,7 @@ Day1の実形（本人発言あり・直前に自分への質問）では anchor
 
 ## TASK-063 最新ゲーム分析 — 強化モデルのthinking-only・timeoutと論理状態の分離
 
-状態：未着手（Player 1の強化モデルで実機課題を確認）
+状態：実装済み（2026-11-23 / `output_budget_trace.py` で送信カテゴリを分離。LL不使用テスト10件、モックで -69% の短縮再要求を確認。実機の同一seed比較は未実施）
 
 ### 背景
 
@@ -2580,4 +2580,113 @@ Player 1を `llm-jp-4.1-33b-thinking-fixed` に変更した今回、17アクシ�
 - 強化モデルの本文生成率と後半の論理状態参照率を、旧モデルと同一seedで比較できる。
 - thinking制御を変更しても、役職主張のプロヴェナンス、秘密情報ガード、時系列根拠、発言本文の自由を損なわない。
 - 速度・VRAM・失敗率と論理性のトレードオフをモデル別に記録し、既定設定を根拠付きで選択できる。
+
+## TASK-062 / TASK-063 実装記録 — 日をまたぐ論理状態の正規化と出力予算の分離（2026-11-23）
+
+### 設計思想からの変換（4つの要求）
+
+| 思想 | 実装 |
+| --- | --- |
+| コンテキスト節約 | 過去本文を再掲せず、エンジン発行の状態差分（`[CONTINUITY_CHECKPOINT]`）で継続。checkpoint が正規化した日の平常発言本文は prompt 側が ID 行へ畳む（recent層の日比例増加を停止） |
+| モデルの一貫性 | 項目に `observed_at`（時点刻印）・`evidence_ids`・権威レベルを付与。確定事実（engine_confirmed）／公開申告（SAID-unverified）／自分の未検証仮説（YOUR-UNVERIFIED）／反証済み（NO-LONGER-STANDS）を混ぜない。反証された仮説の古い行は状態から落ち、履歴としてだけ残る |
+| 合理的な議論 | `current / changed / overturned / unresolved` の状態だけを提示し、結論・推理順・優先事項は指示しない（中立文言のみ） |
+| 議論の自由 | 新しい禁止・誘導命令文は追加しない。自分の立場を変える自由と矛盾の説明の自由を明文で許可（テストで禁止語の有無を検査） |
+
+### 新しいモジュールと接続
+
+- `src/werewolf/continuity_state.py`: `ContinuityState`（プレイヤー別台帳）+ `ContinuityCheckpoint`（エンジン発行の ID 付き短行、1行280字上限）。差分提示は初回のみ持ち越し状態、以降は変わった項目だけ。変わらない項目は本文もIDも再掲せず「個数＋チェックポイントID」の1行に畳む。行数上限（changed 4／overturned 3／unresolved 3）を超えた分は注記で件数を出す（状態そのものは失わない）。同じ時点での組み直し（予算段階・再要求）では同一文言を返し、差分基準が進まない。
+- `GameState.continuity_policy`（既定 `normalized`、A/B比較用に `off`）、`GameState.render_continuity_for / issue_continuity_checkpoint / continuity_fold_days / continuity_checkpoint_text / continuity_metrics`。`GameEngine` は日終了時（`day-N-post_execution`）と投票前（`day-N-pre_vote`）に checkpoint を発行し、`continuity_checkpoint` イベントで公開する（秘匿情報は含まれないことをテストで固定）。
+- `prompt_contract`: 節 `[CONTINUITY_CHECKPOINT]` を `TIER_CORE`（engine権威）として登録。`core_compression`: anchor層（常に全文保持；行数上限があるため日跨ぎでも増えない）。`prompt_layout`: `ROLE_CONTINUITY`(weight 1.20, must-use)、隣接目標（発言証拠との距離1.05・現在質問との距離0.95）、制約「主張索引より前に出さない」「先頭帯に置かない」を追加。
+
+### プロンプトの順番最適化（v4を凍結）
+
+`_analysis/task062_order_probe.py`（代表字数26,140字・決定的貪欲探索・LL不使用）の結果：
+
+| 候補 | スコア | 違反 | 状態節の位置 |
+| --- | --- | --- | --- |
+| v4 凍結順（証拠の直後・現在質問の直前） | 46.93 | 0 | 19/31（primacy 1,910 / weak_middle 16,850 / recency 7,380） |
+| v3 末尾案内の前へ機械的に追加する案 | 38.98 | 0 | 末尾帯だが劣化 |
+| v3（checkpoint なし・26節） | 52.75 | 0 | 該当なし |
+
+同一構成内での比較では、状態節を発言証拠と現在質問に隣接させた配置が最良（証拠との距離 0.0、質問との距離 0.0034）。自分の一貫性アンカー（自分の発言→推理メモ）は質問の直後に残したまま、その前段に状態を置いた。誘導系（セオリーカード・派生情報・期限付き案内）は中部帯のまま据え置き、状態節だけを終端帯で読む。`adopted_layout_score()` は既定で v4 を評価し、v3 は `v3_layout_score()` でA/B基準として参照できる（v3凍結順は無傷）。
+
+- CLI: `--prompt-layout {v4,v3,v2,auto}`（既定 v4）、`--continuity {normalized,off}`（既定 normalized）。ログには `continuity_policy`, `avg_continuity_state_chars`, `avg_continuity_items_changed`, `avg_continuity_items_unchanged`, `continuity_open_questions_total`, `evidence_continuity_folded_total`, `continuity_fold_saved_chars_total`、ゲーム終了時 `state.continuity_metrics()`（日別字数・増加分・checkpoint数・証拠ID数・反証／解消した問いの数）を記録。
+
+### モックA/Bの実測（`_analysis/task062_effect_probe.py`、seed 2062061・実機LL不使用）
+
+4日間・各ターン3発言の盤面で `continuity=off + v3` と `normalized + v4` を比較：
+
+| 構成 | Day1 user | Day4 user | Day1→Day4 の recent層 | Day4で畳んだ本文 | checkpoint字数 |
+| --- | --- | --- | --- | --- | --- |
+| off + v3 | 16,530 | 17,468 | +0（5,226字で横ばい） | 0件 / 0字 | 0 |
+| normalized + v4 | 17,207 | 17,392 | -1,496（5,226 → 3,730字、historical 784字へ移動） | 8件 / 712字節約 | 636字（Day1 677字から -41＝日に比例して増えない） |
+
+Day4 の総送信量は checkpoint を載せても旧構成より 76字少なく、状態節の字数は増加しない。`prompt_layout_violations` は両構成で0。
+
+### テスト（LL不使用・18件）
+
+`tests/test_task062_continuity_state.py`: ポリシー正規化と `off` の無効果、エンジン発行 checkpoint の公開情報のみ（人狼相談・占い結果が漏れない）、権威レベル分離、初回のみ持ち越し提示、同一時点での組み直しの一致、次ターンは差分だけ（unchanged は個数＋ID）、上限超過の注記、自分の読みは未検証扱いで破棄自由、反証行は履歴扱いで古い行が消える、未解決質問の上限と解消時の消去、禁止命令文を増やさないこと、プロンプト統合（v4での位置・診断キー）、正規化した日の平常発言本文が ID 行へ畳まれて recent層が減ること（公開ログの本文は一字一句不変）、状態節の字数が日をまたいで線形増加しないこと。`python -m pytest -q` で 269 passed（TASK-060/057/058 の既存アサーションは v3/v2 を明示する形に更新済み）。
+
+## TASK-063 実装記録 — thinking-only・timeoutと論理状態の分離（2026-11-23）
+
+### 分類（相互排他的な「最初の不足原因」）
+
+`src/werewolf/output_budget_trace.py` が送信1件を単一カテゴリへ寄せる。決定順は
+通信 → timeout → 生成量 → 出力形式 → プロンプト論理：
+
+| カテゴリ | 意味 | 側 |
+| --- | --- | --- |
+| `thinking_budget` | 思考が生成上限を食い潰して本文が空（done_reason=length／thinkingのみ応答） | 出力予算 |
+| `generation_cap` | 思考以外の理由で打ち切られ本文が不完全 | 出力予算 |
+| `timeout` | 送信タイムアウト（応答なし） | 通信・時間 |
+| `transport` | 接続・HTTPなどの通信失敗 | 通信 |
+| `output_format` | 本文は出たが CO/BODY/RESULT 形式を満たさない | プロンプト論理側 |
+| `prompt_logic` | 内容は出るが議論として弱い（未回答・同一論点の再掲など） | プロンプト論理側 |
+
+`llm_actions._record_generation_response / _record_generation_failure` が 1送信ごとに
+`classify_attempt` を適用し、`llm_generation_attempt` の `output_budget` として
+（モデル・行動・カテゴリ・本文字数・thinking有無・num_predict・eval_count・num_ctx・
+送信実字数・短縮再要求か）をログへ載せる。本文が出ている送信に限り、形式・論理の問題を
+`annotate_last_attempt` で関連付ける（空応答を「議論の質」へ読み替えない）。
+
+### thinking-fixed系モデルの行動別予算（推理の自由は削らない）
+
+`is_thinking_fixed_model()`（名前に thinking と fixed を含む）に対して行動別の本文最低量と
+thinking上限を持つ: 議論 832字分/2048、CO補正 320/768、投票・占い・襲撃 192・160/640。
+`_body_reservation` は本文最低量を引き上げ、`body_min + thinking_cap` を下回らないよう
+生成上限キャップも吊り上げる。**静的な天井は観測のない行動の既定ガンのみに適用**し、
+実測で思考消費が観測済みの場合はその値を優先する（削りすぎて本文を空にしない）。
+thinking を一律 off にしたり推理手順を示す変更はしていない。
+
+### checkpoint優先の短縮再要求（TASK-053の短縮プロンプトへ状態を優先搭載）
+
+`_short_discussion_retry_prompt()` は、エンジン正規化済みの `[CONTINUITY_CHECKPOINT]` が
+あればそれを先頭に置き、確定事実が揃っているため投票台帳の全行（`- Vote History:`）を
+再掲しない。現在質問・直近発言・形式指示だけを送る。
+
+### モック実測（`_analysis/task063_split_probe.py`、LL不使用・ScriptedClient）
+
+| 項目 | 値 |
+| --- | --- |
+| カテゴリ内訳 | `thinking_budget: 1`, `ok: 1`（予算側=1／論理側=0 と分離） |
+| 送信実字数 | 15,887字 → 4,991字（-10,896字＝69%減） |
+| 本文生成率 | 0.5（1回目は思考のみ） |
+| 行動単位の結果 | `discussion ['thinking_budget','ok'] / body_preservation = lost` |
+
+### CLI集計とログ
+
+`--continuity`・`--prompt-layout v4` とあわせ、モデル×アクション別 stats に
+`output_budget_categories`、`budget_bound_failures/logic_bound_failures`（と率）、
+`avg_prompt_char_count / max_prompt_char_count`、`short_retry_requests / short_retry_rate`、
+`body_generation_rate` を追加。`actions.output_budget_snapshot()` はモデル別内訳と
+行動単位の結果（本文は載せない）を返す。強化モデルの事故を「論理の失敗」と取り違えず、
+入力長・thinking予算・通信・形式へ切り分けられる。
+
+### テスト（LL不使用・10件）
+
+`tests/test_task063_output_budget.py`: カテゴリ決定と優先順、応答問題名を形式／論理へ写す対応、
+固定モデル別表（通常モデルには適用しない）、本文喪失の lost/preserved/not_applicable、
+空応答を形式・論理へ書き換えないこと、固定モデルの本文予約（キャップが本文+上限を下回らない）、
+観測済み思考を静的天井で削らないこと、checkpoint先頭の短縮再要求（投票台帳を省く）、
+CLIのカテゴリ集計。`python -m pytest -q` で 269 passed（実機テストは行っていない）。
 
