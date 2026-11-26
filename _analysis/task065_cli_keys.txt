@@ -1,0 +1,84 @@
+354: "timeline_past_attributions_observed": 0,
+355: "timeline_future_question_acts": 0,
+356: "timeline_future_action_speculations": 0,
+357: "name_variant_mentions_absorbed": 0,
+359: "unresolved_name_references": 0,
+361: "context_integrity_checks": 0,
+362: "context_integrity_mismatches": 0,
+363: "context_integrity_caps_applied": 0,
+365: "output_stabilization_scope_events": 0,
+369: "stabilization_relaxations": 0,
+497: absorbed = int(diagnostic_record.get("name_variants_absorbed") or 0)
+498: unresolved = int(diagnostic_record.get("unresolved_name_references") or 0)
+500: self._ledger_metrics["name_variant_mentions_absorbed"] += absorbed
+501: self._ledger_metrics["unresolved_name_references"] += unresolved
+506: stats["name_variant_mentions_absorbed"] += absorbed
+507: stats["unresolved_name_references"] += unresolved
+516: self._ledger_metrics["context_integrity_checks"] += 1
+517: if bool(diagnostic_record.get("context_integrity_mismatch")):
+518: self._ledger_metrics["context_integrity_mismatches"] += 1
+519: if bool(diagnostic_record.get("context_integrity_applied")):
+520: self._ledger_metrics["context_integrity_caps_applied"] += 1
+523: if bool(diagnostic_record.get("context_integrity_mismatch")):
+526: stats["context_integrity_checks"] += 1
+541: self._ledger_metrics["output_stabilization_scope_events"] += 1
+545: scope = str(diagnostic_record.get("stabilization_scope") or "")
+547: entry = f"timeout_fit/{action_key}"
+551: scoped = stats.setdefault("stabilized_actions", [])
+555: if event_type == "thinking_stabilization":
+557: self._ledger_metrics["output_stabilization_scope_events"] += 1
+559: scope = str(diagnostic_record.get("stabilization_scope") or "")
+566: scoped = stats.setdefault("stabilized_actions", [])
+570: if event_type == "output_stabilization_relaxed":
+571: self._ledger_metrics["stabilization_relaxations"] += 1
+576: stats["stabilization_relaxations"] += 1
+689: intent_counts = diagnostic_record.get("timeline_intent_counts")
+698: self._ledger_metrics["timeline_past_attributions_observed"] += int(
+699: diagnostic_record.get("past_attributions_observed") or 0
+701: self._ledger_metrics["timeline_future_question_acts"] += int(
+702: diagnostic_record.get("future_question_acts_observed") or 0
+704: self._ledger_metrics["timeline_future_action_speculations"] += int(
+705: diagnostic_record.get("future_action_speculations_observed") or 0
+1510: "name_variant_mentions_absorbed": 0,
+1511: "unresolved_name_references": 0,
+1514: "context_integrity_checks": 0,
+1523: "stabilization_relaxations": 0,
+1524: "stabilized_actions": [],
+1869: "integrity_alerts": [
+1946: "timeline_intent_policy": timeline_intent_policy_label(
+1947: getattr(state, "timeline_intent_policy", TIMELINE_INTENT_POLICY_DEFAULT)
+1954: "context_integrity_policy": context_integrity_policy_label(
+1955: getattr(state, "context_integrity_policy", CONTEXT_INTEGRITY_POLICY_DEFAULT)
+1957: "output_stabilization_scope": output_stabilization_scope_label(
+1959: state, "output_stabilization_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT
+1963: "context_integrity_evidence": dict(
+1964: getattr(state, "context_integrity_checks", {}) or {}
+2004: "timeline_unspoken_intent_counts": dict(self._timeline_intent_counts),
+2005: "timeline_past_attributions_per_body": round(
+2006: int(self._ledger_metrics["timeline_past_attributions_observed"])
+2010: "timeline_question_acts_per_body": round(
+2011: int(self._ledger_metrics["timeline_future_question_acts"])
+2015: "timeline_action_speculations_per_body": round(
+2016: int(self._ledger_metrics["timeline_future_action_speculations"])
+2022: "name_variants_absorbed_total": int(
+2023: self._ledger_metrics["name_variant_mentions_absorbed"]
+2028: "unresolved_name_references_total": int(
+2029: self._ledger_metrics["unresolved_name_references"]
+2038: "stabilization_relaxations_total": int(
+2039: self._ledger_metrics["stabilization_relaxations"]
+2041: "context_integrity_mismatch_models": sorted(self._context_mismatch_models),
+2042: "context_integrity_checked_models": sorted(self._context_integrity_models),
+2513: getattr(state, "context_integrity_policy", CONTEXT_INTEGRITY_POLICY_DEFAULT)
+2552: checks = getattr(state, "context_integrity_checks", None)
+2556: "type": "context_integrity_preflight",
+2661: getattr(args, "context_integrity", CONTEXT_INTEGRITY_POLICY_DEFAULT)
+2664: getattr(args, "timeline_intent", TIMELINE_INTENT_POLICY_DEFAULT)
+2759: "context_integrity_policy": context_integrity_policy,
+2760: "timeline_intent_policy": timeline_intent_policy,
+2762: "output_stabilization_scope": output_stabilization_scope,
+3468: "--context-integrity",
+3469: dest="context_integrity",
+3483: "--timeline-intent",
+3484: dest="timeline_intent",
+3492: "as separate intents and never as violations. literal: pre-TASK-065 flat "
+3504: "diagnostics. normalized (default): resolve spacing variants, full-width "

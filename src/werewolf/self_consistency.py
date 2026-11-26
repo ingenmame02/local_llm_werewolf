@@ -2,6 +2,17 @@ import re
 from dataclasses import dataclass
 
 from .models import GameState, Message, Player, PlayerActionMemory
+# TASK-065: `Player\u202f6` / `プレイヤー6` などの表記ゆれを内部判定の入口だけで吸収する。
+# 公開発言の表記・本文はそのまま。方策はstateの値（既定 normalized / A/B用 literal）に追随し、
+# literal では旧来と同じ実在名の完全一致で動く（存在しない番号は未解決のまま観測される）。
+from .name_resolution import resolve_known_names
+
+
+def _mentioned_player_names(state: GameState, content: str) -> set[str]:
+    """本文の名前言及を実在名集合へ解決する（内部照合専用。公開面は変更しない）。"""
+    names = tuple(player.name for player in state.players)
+    policy = getattr(state, "player_name_resolution_policy", None)
+    return set(resolve_known_names(content, names, policy=policy or "normalized"))
 
 
 @dataclass(frozen=True)
@@ -226,9 +237,8 @@ class SelfConsistencyGuard:
                 for memory in memories
                 if memory.action_type == "vote" and memory.vote_target
             }
-            refers_to_another_player = any(
-                player.name != actor.name and player.name in content
-                for player in state.players
+            refers_to_another_player = bool(
+                _mentioned_player_names(state, content) - {actor.name}
             )
             if memory_targets and re.search(
                 r"(?:投票|票|自分の行動|自分の判断)"
@@ -247,9 +257,7 @@ class SelfConsistencyGuard:
         if cls._HISTORY_DENIAL.search(content) and cls._denial_match(
             cls._FACT_HISTORY_DENIAL, content
         ):
-            mentioned_players = {
-                player.name for player in state.players if player.name in content
-            }
+            mentioned_players = _mentioned_player_names(state, content)
             fact_topics = {
                 "vote": re.search(
                     r"(?:投票|票)|(?i:\bvote\b|votes|voting|ballot)", content

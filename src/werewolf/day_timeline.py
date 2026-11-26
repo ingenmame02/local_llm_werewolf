@@ -91,6 +91,48 @@ SUBTYPE_GENERAL_MENTION_UNSPOKEN = "general_mention_without_attribution_observed
 SUBTYPE_HEDGED_CITATION_PENDING = "hedged_citation_of_pending_speech_observed"
 CAUSE_NO_PUBLIC_SPEECH_AT_POINT = "actor_had_no_public_speech_at_this_point"
 
+# TASK-065（実装案3）: 未発言者に関する文の「意図」を分ける。従来は未発言者の名前が
+# 出て断定しているだけで `speech_from_unspoken_player`（未来参照）に数えたため、
+# 「次にプレイヤー6へ投票理由を問いただすことを提案します」という**これから質問する行為**
+# が未来参照として検出された（game_425755ce9a83 Day2 T1 Player 1）。
+# 実質的な未来参照＝その人物が過去に述べたと断定するものだけを集計し、
+# 質問行為とこれからの行動推測は別メトリクスへ移す（本文は変更しない）。
+INTENT_PAST_ATTRIBUTION = "past_attribution_to_unspoken"
+INTENT_FUTURE_QUESTION_TO_UNSPOKEN = "future_question_to_unspoken"
+INTENT_FUTURE_ACTION_SPECULATION = "future_action_speculation"
+INTENT_NONE = "none"
+UNSPOKEN_INTENTS: tuple[str, ...] = (
+    INTENT_PAST_ATTRIBUTION,
+    INTENT_FUTURE_QUESTION_TO_UNSPOKEN,
+    INTENT_FUTURE_ACTION_SPECULATION,
+)
+
+# 方策（A/B比較用）。separated が既定。literal は TASK-059 までの旧算入を再現する。
+TIMELINE_INTENT_POLICY_SEPARATED = "separated"
+TIMELINE_INTENT_POLICY_LITERAL = "literal"
+TIMELINE_INTENT_POLICIES: tuple[str, ...] = (
+    TIMELINE_INTENT_POLICY_SEPARATED,
+    TIMELINE_INTENT_POLICY_LITERAL,
+)
+TIMELINE_INTENT_POLICY_DEFAULT = TIMELINE_INTENT_POLICY_SEPARATED
+
+
+def normalize_timeline_intent_policy(value: object) -> str:
+    """設定値を意図分離の方策へ正規化する（未知値は既定の separated）。"""
+    if isinstance(value, str) and value.strip():
+        candidate = value.strip().lower()
+        if candidate in TIMELINE_INTENT_POLICIES:
+            return candidate
+    return TIMELINE_INTENT_POLICY_DEFAULT
+
+
+def timeline_intent_policy_label(policy: object) -> str:
+    """ログ用ラベル（intent_separated_detection / legacy_flat_detection）。"""
+    if normalize_timeline_intent_policy(policy) == TIMELINE_INTENT_POLICY_LITERAL:
+        return "legacy_flat_detection"
+    return "intent_separated_detection"
+
+
 # TASK-059（実装案3）: 本文に現れる証拠ID参照 `[speech:N]` / `[ref:sN]` を数え、未解決の
 # 原因を分類する（ID欠落・旧ログ互換＝時点情報なし履歴・まだ存在しないID＝実際の未来
 # 参照）。誤検出を増やさないため、この分類は観測だけで future_event_reference は増やさない。
@@ -316,6 +358,12 @@ class PublicTimeline:
     mentions_without_attribution_observed: int = 0
     checks_skipped_empty_body: int = 0
     reference_cause_counts: dict[str, int] = field(default_factory=dict)
+    # TASK-065: 未発言者に関する意図の内訳（観測専用）。findings（実質的な未来参照）とは
+    # 別枠で、質問行為とこれからの行動推測を数える。本文の書き換えは一切しない。
+    past_attribution_unspoken: int = 0
+    future_question_unspoken: int = 0
+    future_action_speculation_observed: int = 0
+    intent_counts: dict[str, int] = field(default_factory=dict)
     _seen_keys: set[tuple[object, ...]] = field(
         default_factory=set, repr=False, compare=False
     )
@@ -476,6 +524,17 @@ class PublicTimeline:
             ),
             "timeline_checks_skipped_empty_body": int(self.checks_skipped_empty_body),
             "evidence_reference_cause_counts": dict(self.reference_cause_counts),
+            # TASK-065: 未発言者に関する意図の内訳（実質的未来参照・質問行為・行動推測）。
+            # future_event_reference_findings と違い、質問したことを違反として数えないための欄。
+            "timeline_unspoken_intent_counts": {
+                INTENT_PAST_ATTRIBUTION: self.past_attribution_unspoken,
+                INTENT_FUTURE_QUESTION_TO_UNSPOKEN: self.future_question_unspoken,
+                INTENT_FUTURE_ACTION_SPECULATION: self.future_action_speculation_observed,
+            },
+            "future_question_acts_observed": int(self.future_question_unspoken),
+            "future_action_speculations_observed": int(
+                self.future_action_speculation_observed
+            ),
         }
 
     def record_observation(self, report: "TimelineReferenceReport") -> None:
@@ -503,6 +562,16 @@ class PublicTimeline:
             self.reference_cause_counts[key] = (
                 int(self.reference_cause_counts.get(key, 0)) + int(count)
             )
+        # TASK-065: 意図の内訳を積む（実質的未来参照・質問行為・これからの行動推測）。
+        # findings の合計とは別枠で、検出しても本文は直していない。
+        self.past_attribution_unspoken += int(getattr(report, "past_attributions_observed", 0))
+        self.future_question_unspoken += int(getattr(report, "future_question_acts", 0))
+        self.future_action_speculation_observed += int(
+            getattr(report, "future_action_speculations", 0)
+        )
+        for intent, count in dict(getattr(report, "intent_counts", {}) or {}).items():
+            key = str(intent)
+            self.intent_counts[key] = int(self.intent_counts.get(key, 0)) + int(count)
 
     def serialize(self) -> dict[str, object]:
         """ログ用の逐列表現（時点・ID・要約のみ。本文と非公開情報は含まれない）。"""
@@ -958,6 +1027,183 @@ def _is_hedged(norm: str) -> bool:
     return any(term in norm for term in _HEDGE_TERMS)
 
 
+# --- TASK-065: 未発言者に関する文の意図分類（観測専用・本文は書き換えない） ---------
+
+# 「その人が過去に述べた」という帰属の形（実質的な未来参照として残す数え手）。
+# 引用の形を広く取りすぎると「これから聞く」依頼を巻き込むため、過去の出来事として
+# 耳にした・読んだと述べる形と完了形の帰属に絞る（TASK-056の検出強度は下げない）。
+_PAST_ATTRIBUTION_TERMS: tuple[str, ...] = (
+    "と言った",
+    "が言った",
+    "いい残",
+    "言い残",
+    "述べた",
+    "語った",
+    "答えた",
+    "返した",
+    "名乗った",
+    "公言した",
+    "公表した",
+    "明かした",
+    "暴露した",
+    "指摘した",
+    "主張した",
+    "表明した",
+    "発言を聞い",
+    "発言を耳にし",
+    "発言を見た",
+    "先の発言",
+    "発言内容から",
+    "過去の発言",
+    "先ほどの発言",
+    "前回の発言",
+    "その発言は",
+    "said",
+    "stated",
+    "claimed",
+    "told",
+    "argued",
+    "declared",
+)
+
+# これから聞き出す側（質問行為）。動詞と誘い文句の両方を見て判断する。
+_REQUEST_VERB_TERMS: tuple[str, ...] = (
+    "質問",
+    "問い",
+    "尋ね",
+    "たずね",
+    # TASK-065: 「問いただす／問い質す／問い正す／問い詰める」は未来の回答を求める
+    # 行為（game_425755ce9a83 Day2 T1 Player 1の誤検出文）。旧語彙だと別名の未発言者へ
+    # の質問が「過去の発言の引用」として future_event_reference に数えられていた。
+    "問いただ",
+    "問い質",
+    "問い正",
+    "問い詰め",
+    "聞きたい",
+    "聞いて",
+    "聞く",
+    "聞かせて",
+    "ききたい",
+    "教え",
+    "答えを",
+    "回答",
+    "説明",
+    "共有",
+    "述べて",
+    "報告",
+    "開示",
+    "comment",
+    "ask",
+    "question",
+    "explain",
+    "clarify",
+    "tellme",
+)
+_SOLICITATION_TERMS: tuple[str, ...] = (
+    "ください",
+    "下さい",
+    "ほしい",
+    "欲しい",
+    "もらいたい",
+    "願う",
+    "依頼",
+    "求め",
+    "提案",
+    "検討",
+    "予定",
+    "次に",
+    "これから",
+    "今後",
+    "次回",
+    "まずは",
+    "順番",
+    "待ち",
+    "ask",
+    "wantto",
+    "wouldlike",
+    "please",
+    "next",
+)
+# これから起こるその人物自身の行動への推測（投票・夜行動・COなど）。
+_ACTION_SPECULATION_VERBS: tuple[str, ...] = (
+    "する",
+    "します",
+    "つもり",
+    "はず",
+    "だろう",
+    "ことになる",
+    "予定",
+    "投票",
+    "襲",
+    "攻撃",
+    "占",
+    "名乗",
+    "co",
+    "発言",
+    "protect",
+    "vote",
+    "attack",
+)
+# 名の直後に目的語マーカーが来たら「その人への提案」であり本人の行動ではない。
+_OBJECT_PARTICLES: tuple[str, ...] = ("に", "を", "へ", "から", "で", "against", "to")
+
+
+def classify_unspoken_intent(
+    sentence: str,
+    norm: str,
+    snapshot: "TurnSnapshot",
+    mentions: tuple[str, ...],
+) -> tuple[str, tuple[str, ...]]:
+    """未発言者に関する文の意図を分ける（観測専用・判定の緩和強化はここでは行わない）。
+
+    戻り値は (意図, 対象にした未発言者)。未発言者を挙げていなければ INTENT_NONE。
+    順序は「これから聞く」→「過去の発言として扱う」→「これからの行動推測」。
+    疑問文・依頼文を無条件に無害扱いせず、過去の発言を根拠にしているか、
+    未来の回答を求めているかを見て分ける（TASK-065実装案3）。
+    """
+    targets = tuple(
+        name
+        for name in mentions
+        if name != snapshot.actor and snapshot.citation_status(name) == CITATION_NEVER_SPOKEN_YET
+    )
+    if not targets:
+        return INTENT_NONE, ()
+    question = _is_question(sentence)
+    request_verb = any(term in norm for term in _REQUEST_VERB_TERMS)
+    solicitation = any(term in norm for term in _SOLICITATION_TERMS)
+    past_terms = [term for term in _PAST_ATTRIBUTION_TERMS if term in norm]
+    action_gaps = _action_speculation_gaps(norm, targets)
+    if question or (request_verb and solicitation):
+        return INTENT_FUTURE_QUESTION_TO_UNSPOKEN, targets
+    if past_terms:
+        # 未発言者の「過去の発言」を根拠にしている＝実質的な未来参照
+        return INTENT_PAST_ATTRIBUTION, targets
+    if action_gaps:
+        return INTENT_FUTURE_ACTION_SPECULATION, targets
+    return INTENT_NONE, targets
+
+
+def _action_speculation_gaps(norm: str, targets: tuple[str, ...]) -> tuple[str, ...]:
+    """言及名の直後にある行動表現（本人が主語のものだけ）。目的語化している物は除く。"""
+    gaps: list[str] = []
+    for name in targets:
+        key = _normalize_text(name)
+        if not key:
+            continue
+        for match in re.finditer(re.escape(key), norm):
+            tail = norm[match.end() : match.end() + 14]
+            if not tail:
+                continue
+            if tail[0] in _OBJECT_PARTICLES:
+                # 「Player 6に投票すべきだ」型は本人の行動ではなく他者からの提案
+                continue
+            if any(verb in tail for verb in _ACTION_SPECULATION_VERBS):
+                gaps.append(tail[:20])
+    return tuple(gaps)
+
+
+
+
 @dataclass(frozen=True)
 class FutureReferenceFinding:
     """発言時点で未発生だった事象を断定していた箇所（観測のみ・本文は触らない）。"""
@@ -969,6 +1215,9 @@ class FutureReferenceFinding:
     # TASK-059: speech_from_unspoken_player の内訳分類（観測専用タグ）。判定は変えない。
     subtype: str = ""
     cause: str = ""
+    # TASK-065: 未発言者に関する文の意図（past_attribution_to_unspoken など）。
+    # 質問行為・これからの行動推測は findings へ数えないための分離キー。
+    intent: str = ""
 
     def to_dict(self) -> dict[str, object]:
         digest = hashlib.sha256(self.sentence.encode("utf-8")).hexdigest()[:16]
@@ -983,6 +1232,8 @@ class FutureReferenceFinding:
             payload["subtype"] = self.subtype
         if self.cause:
             payload["cause"] = self.cause
+        if self.intent:
+            payload["intent"] = self.intent
         return payload
 
 
@@ -999,9 +1250,16 @@ class TimelineReferenceReport:
     citation_status_counts: dict = field(default_factory=dict)
     hedged_pending_citations: int = 0
     mentions_without_attribution: int = 0
-    # TASK-059: 本文の `[speech:N]` / `[ref:sN]` 参照を時点照合した内訳（解決済み・
+    # TASK-059: 本文に現れる証拠ID参照 `[speech:N]` / `[ref:sN]` を時点照合した内訳（解決済み・
     # まだ存在しないID・旧ログ互換で検証不能・IDなしの帰属）
     reference_token_counts: dict = field(default_factory=dict)
+    # TASK-065: 未発言者に関する文の意図内訳。実質的な未来参照（past_attribution_to_unspoken）
+    # だけを findings へ数え、質問行為とこれからの行動推測は別カウンタへ寄せる。
+    intent_counts: dict = field(default_factory=dict)
+    past_attributions_observed: int = 0
+    future_question_acts: int = 0
+    future_action_speculations: int = 0
+    intent_policy: str = TIMELINE_INTENT_POLICY_DEFAULT
 
     @property
     def grounding_rate(self) -> float:
@@ -1036,6 +1294,15 @@ class TimelineReferenceReport:
             # TASK-059: 証拠ID参照の時点照合結果（原因別の内訳）。実在しないIDを指して
             # いないかを実機ログで分解するために使う（本文は変えない）。
             "evidence_reference_counts": dict(self.reference_token_counts),
+            # TASK-065: 未発言者に関する意図の内訳。違反として数えるのは実質的な未来参照
+            # （past_attribution_to_unspoken）だけで、質問行為とこれからの行動推測は
+            # 観測専用へ分ける（「質問したから未来参照」をなくすための分離キー）。
+            "timeline_intent_counts": dict(self.intent_counts),
+            "past_attributions_observed": int(self.past_attributions_observed),
+            "future_question_acts_observed": int(self.future_question_acts),
+            "future_action_speculations_observed": int(self.future_action_speculations),
+            "timeline_intent_policy": self.intent_policy,
+            "timeline_intent_policy_label": timeline_intent_policy_label(self.intent_policy),
             # 観測専用であることの証跡（自動修正・再生成要求は行わない）
             "body_modified": False,
         }
@@ -1045,14 +1312,30 @@ def inspect_public_body(
     body: str | None,
     snapshot: TurnSnapshot,
     player_names: tuple[str, ...],
+    *,
+    intent_policy: object = TIMELINE_INTENT_POLICY_DEFAULT,
 ) -> TimelineReferenceReport:
     """公開予定の本文を発言時点と突き合わせ、未来参照を観測する（書き換えない）。
 
     断定表現だけを対象にし、疑問文・推測・婉曲は数えない。検出しても本文の語彙・
     口調・結論には一切干渉しない（観測専用）。
+
+    TASK-065: `separated`（既定）では未発言者に関する文の意図を分ける。これから回答を
+    求める質問行為（`future_question_to_unspoken`）は future_event_reference に数えず
+    別メトリクスへ移す。これからの行動推測（`future_action_speculation`）も意図として
+    分けて数えるが、発言引用を伴う断定なら従来どおり検出する（TASK-056/059の強度を
+    下げない）。実質的な未来参照は `past_attribution_to_unspoken`（その人が過去に
+    述べたとする断定）ですくう。`literal` は TASK-059 までと同じ算入（A/B比較用の旧挙動）。
     """
+    normalized_intent_policy = normalize_timeline_intent_policy(intent_policy)
     if not isinstance(body, str) or not body.strip():
-        return TimelineReferenceReport((), 0, 0, len(body or ""))
+        return TimelineReferenceReport(
+            (),
+            0,
+            0,
+            len(body or ""),
+            intent_policy=normalized_intent_policy,
+        )
     from .discussion_format import split_sentences
 
     sentences = split_sentences(body) or [body]
@@ -1065,6 +1348,32 @@ def inspect_public_body(
     mentions_no_attribution = 0
     reference_counts: dict[str, int] = {}
     dead_known = dict(snapshot.known_dead)
+    # TASK-065: 意図の内訳をまず全文から拾う（疑問文の質問行為もここなら数えられる）。
+    # 以降の違反判定ループは従来どおりに動かし、観測だけを追加する（本文は触らない）。
+    intent_counts: dict[str, int] = {}
+    past_attributions = 0
+    question_acts = 0
+    action_speculations = 0
+    if normalized_intent_policy == TIMELINE_INTENT_POLICY_SEPARATED:
+        for sentence in sentences:
+            folded_intent = _normalize_text(sentence)
+            if not folded_intent:
+                continue
+            names_intent = mentions_players(sentence, tuple(player_names))
+            if not names_intent:
+                continue
+            intent, targets = classify_unspoken_intent(
+                sentence, folded_intent, snapshot, names_intent
+            )
+            if intent == INTENT_NONE or not targets:
+                continue
+            intent_counts[intent] = intent_counts.get(intent, 0) + 1
+            if intent == INTENT_FUTURE_QUESTION_TO_UNSPOKEN:
+                question_acts += 1
+            elif intent == INTENT_FUTURE_ACTION_SPECULATION:
+                action_speculations += 1
+            else:
+                past_attributions += 1
     for sentence in sentences:
         norm = _normalize_text(sentence)
         if not norm or _is_question(sentence):
@@ -1139,7 +1448,11 @@ def inspect_public_body(
                     category = FUTURE_DEATH_BEFORE_DEATH
                     reason = f"{name} was still alive at this point"
                     break
-        # 4) まだ一度も公開発言していない相手の発言・COを引用していないか
+        # 4) まだ一度も公開発言していない相手の「過去の発言」を断定していないか
+        #    （TASK-065: これから回答を求める質問行為だけ違反から外す。これからの行動
+        #     推測は別メトリクスへ分けるが、発言引用を伴う断定であれば従来どおり検出し、
+        #     TASK-056 / TASK-059 の検出強度を落とさない）
+        sentence_intent = INTENT_NONE
         if (
             category is None
             and cites_speech
@@ -1147,8 +1460,14 @@ def inspect_public_body(
             and others
             and all(not snapshot.spoken_before(name) for name in others)
         ):
-            category = FUTURE_SPEECH_FROM_UNSPOKEN
-            reason = "no public speech by them existed at this point"
+            sentence_intent, _ = classify_unspoken_intent(sentence, norm, snapshot, names)
+            asked_future_answer = (
+                normalized_intent_policy == TIMELINE_INTENT_POLICY_SEPARATED
+                and sentence_intent == INTENT_FUTURE_QUESTION_TO_UNSPOKEN
+            )
+            if not asked_future_answer:
+                category = FUTURE_SPEECH_FROM_UNSPOKEN
+                reason = "no public speech by them existed at this point"
         if category is not None:
             subtype = ""
             cause = ""
@@ -1173,6 +1492,9 @@ def inspect_public_body(
                     reason=reason,
                     subtype=subtype,
                     cause=cause,
+                    # TASK-065: 未発言者に関する断定だった場合だけ意図を添える
+                    # （past_attribution_to_unspoken。質問・推測はここで違反にならない）
+                    intent=sentence_intent if category == FUTURE_SPEECH_FROM_UNSPOKEN else "",
                 )
             )
             # 根拠追跡率の分母は「他者の発言を引用した参照」だけ。投票・死亡・夜行動の
@@ -1188,6 +1510,13 @@ def inspect_public_body(
         hedged_pending_citations=int(hedged_pending),
         mentions_without_attribution=int(mentions_no_attribution),
         reference_token_counts=dict(reference_counts),
+        # TASK-065: 意図の内訳。findings（future_event_reference）へ数えたのは
+        # past_attribution の断定だけ。質問行為とこれからの行動推測は観測専用で分ける。
+        intent_counts=dict(intent_counts),
+        past_attributions_observed=int(past_attributions),
+        future_question_acts=int(question_acts),
+        future_action_speculations=int(action_speculations),
+        intent_policy=normalized_intent_policy,
     )
 
 

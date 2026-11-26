@@ -96,6 +96,9 @@ CORE_SECTION_LAYERS: dict[str, str] = {
     # TASK-062: エンジン発行の論理状態チェックポイント。確定事実・反証・未解決の問いを
     # 載せる「いま使う」欄なので anchor（常に全文保持）。行数上限があるため日跨ぎで増えない。
     "continuity_checkpoint": LAYER_ANCHOR,
+    # TASK-064: エンジン発行の役職能力の境界。実行と申告の区別という「いま使う」情報で、
+    # 行数が本人COぶんの固定行しかないため anchor（常に全文保持・本文の再掲なし）。
+    "role_action_boundary": LAYER_ANCHOR,
     "question_block": LAYER_ANCHOR,
     "leak_boundary": LAYER_ANCHOR,
     "behavior_contract": LAYER_ANCHOR,

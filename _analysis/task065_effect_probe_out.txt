@@ -1,0 +1,37 @@
+baseline_log=game_425755ce9a83.private.jsonl
+players=8 -> Player 1, Player 2, Player 3, Player 4, Player 5, Player 6, Player 7, Player 8
+
+== 1. プレイヤー名表記ゆれ（公開本文は変更しない内部照合のみ） ==
+bodies_checked=40
+unknown_tokens: old_string_match=0 literal_policy=0 normalized_policy=0
+bodies_where_old_flagged_and_new_absorbed=0
+by_model_action_owner_of_old_flag:
+    Player 1: old=0 normalized=0
+    Player 2: old=0 normalized=0
+    Player 3: old=0 normalized=0
+    Player 4: old=0 normalized=0
+    Player 5: old=0 normalized=0
+    Player 6: old=0 normalized=0
+    Player 7: old=0 normalized=0
+    Player 8: old=0 normalized=0
+    103x label:canonical
+     22x label:whitespace_or_label_variant
+      9x label:katakana
+guard（存在しない番号は吸収しない＝未解決として観測）:
+    'Player 9': unresolved=True resolved_names=[]
+    'P 12': unresolved=True resolved_names=[]
+    'プレイヤー１２': unresolved=True resolved_names=[]
+    'player 100': unresolved=True resolved_names=[]
+
+== 2. 時系列検出の意図分離（同一本文・発言順snapshot・LL不使用） ==
+  [separated(既定)] bodies=40 findings=1 speech_from_unspoken=0 unresolvable=0
+      past_attribution_observed=0 question_acts=5 action_speculations=3
+      intent_counts={'future_action_speculation': 3, 'future_question_to_unspoken': 5}
+  [literal(TASK-059まで)] bodies=40 findings=1 speech_from_unspoken=0 unresolvable=0
+      past_attribution_observed=0 question_acts=0 action_speculations=0
+      intent_counts={}
+  separatedで消えたfindings=0 / 残ったfindings=1
+    + Player 1 D2: [death_before_death] また、処刑されたプレイヤー4も占い師COで同様の結果を示しており、狼が占い師を装って投票を誘導したと考えられます。
+
+== 3. 質問回答判定（旧: 文字列一致 / 新: 内部解決で吸収） ==
+adjacent_pairs=39 legacy_answer_flags=31 canonical_miss_but_variant_resolved=6

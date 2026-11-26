@@ -1,0 +1,120 @@
+1:     # TASK-059: 引用された相手の時点別内訳と、違反には数えない観察カウンタ。
+2:     # （婉曲での仮定引用・未発言者名の一般言及は自由な議論なので区別して数える）
+3:     citation_status_counts: dict = field(default_factory=dict)
+4:     hedged_pending_citations: int = 0
+5:     mentions_without_attribution: int = 0
+6:     # TASK-059: 本文に現れる証拠ID参照 `[speech:N]` / `[ref:sN]` を時点照合した内訳（解決済み・
+7:     # まだ存在しないID・旧ログ互換で検証不能・IDなしの帰属）
+8:     reference_token_counts: dict = field(default_factory=dict)
+9:     # TASK-065: 未発言者に関する文の意図内訳。実質的な未来参照（past_attribution_to_unspoken）
+10:     # だけを findings へ数え、質問行為とこれからの行動推測は別カウンタへ寄せる。
+11:     intent_counts: dict = field(default_factory=dict)
+12:     past_attributions_observed: int = 0
+13:     future_question_acts: int = 0
+14:     future_action_speculations: int = 0
+15:     intent_policy: str = TIMELINE_INTENT_POLICY_DEFAULT
+16: 
+17:     @property
+18:     def grounding_rate(self) -> float:
+19:         """発言時点の根拠追跡率（参照した証拠が時点で確認できる割合）。"""
+20:         if self.attributed_references <= 0:
+21:             return 1.0
+22:         return round(
+23:             1.0 - (self.unresolvable_references / self.attributed_references), 4
+24:         )
+25: 
+26:     def to_log_fields(self) -> dict[str, object]:
+27:         categories = {category: 0 for category in FUTURE_REFERENCE_CATEGORIES}
+28:         for finding in self.findings:
+29:             categories[finding.category] = categories.get(finding.category, 0) + 1
+30:         return {
+31:             "future_event_reference": bool(self.findings),
+32:             "future_event_reference_count": len(self.findings),
+33:             "future_event_reference_categories": categories,
+34:             "future_event_reference_findings": [
+35:                 finding.to_dict() for finding in self.findings[:8]
+36:             ],
+37:             "attributed_references_observed": self.attributed_references,
+38:             "unresolvable_references": self.unresolvable_references,
+39:             "evidence_grounding_rate_at_speech_time": self.grounding_rate,
+40:             # TASK-059: 引用の時点状態と観察専用カウンタ（誤検出率の監視に使う。
+41:             # future_event_reference_categories と違い、これは違反の指摘ではない）。
+42:             "citation_status_counts": dict(self.citation_status_counts),
+43:             "hedged_pending_citations_observed": int(self.hedged_pending_citations),
+44:             "mentions_without_attribution_observed": int(
+45:                 self.mentions_without_attribution
+46:             ),
+47:             # TASK-059: 証拠ID参照の時点照合結果（原因別の内訳）。実在しないIDを指して
+48:             # いないかを実機ログで分解するために使う（本文は変えない）。
+49:             "evidence_reference_counts": dict(self.reference_token_counts),
+50:             # TASK-065: 未発言者に関する意図の内訳。違反として数えるのは実質的な未来参照
+51:             # （past_attribution_to_unspoken）だけで、質問行為とこれからの行動推測は
+52:             # 観測専用へ分ける（「質問したから未来参照」をなくすための分離キー）。
+53:             "timeline_intent_counts": dict(self.intent_counts),
+54:             "past_attributions_observed": int(self.past_attributions_observed),
+55:             "future_question_acts_observed": int(self.future_question_acts),
+56:             "future_action_speculations_observed": int(self.future_action_speculations),
+57:             "timeline_intent_policy": self.intent_policy,
+58:             "timeline_intent_policy_label": timeline_intent_policy_label(self.intent_policy),
+59:             # 観測専用であることの証跡（自動修正・再生成要求は行わない）
+60:             "body_modified": False,
+61:         }
+62: 
+63: 
+64: def inspect_public_body(
+65:     body: str | None,
+66:     snapshot: TurnSnapshot,
+67:     player_names: tuple[str, ...],
+68:     *,
+69:     intent_policy: object = TIMELINE_INTENT_POLICY_DEFAULT,
+70: ) -> TimelineReferenceReport:
+71:     """公開予定の本文を発言時点と突き合わせ、未来参照を観測する（書き換えない）。
+72: 
+73:     断定表現だけを対象にし、疑問文・推測・婉曲は数えない。検出しても本文の語彙・
+74:     口調・結論には一切干渉しない（観測専用）。
+75: 
+76:     TASK-065: `separated`（既定）では未発言者に関する文の意図を分ける。これから回答を
+77:     求める質問行為（`future_question_to_unspoken`）は future_event_reference に数えず
+78:     別メトリクスへ移す。これからの行動推測（`future_action_speculation`）も意図として
+79:     分けて数えるが、発言引用を伴う断定なら従来どおり検出する（TASK-056/059の強度を
+80:     下げない）。実質的な未来参照は `past_attribution_to_unspoken`（その人が過去に
+81:     述べたとする断定）ですくう。`literal` は TASK-059 までと同じ算入（A/B比較用の旧挙動）。
+82:     """
+83:     normalized_intent_policy = normalize_timeline_intent_policy(intent_policy)
+84:     if not isinstance(body, str) or not body.strip():
+85:         return TimelineReferenceReport(
+86:             (),
+87:             0,
+88:             0,
+89:             len(body or ""),
+90:             intent_policy=normalized_intent_policy,
+91:         )
+92:     from .discussion_format import split_sentences
+93: 
+94:     sentences = split_sentences(body) or [body]
+95:     findings: list[FutureReferenceFinding] = []
+96:     attributed = 0
+97:     unresolvable = 0
+98:     # TASK-059: 時点別の引用状態カウントと、違反扱いしない観察値（婉曲・一般名指し）
+99:     citation_counts: dict[str, int] = {}
+100:     hedged_pending = 0
+101:     mentions_no_attribution = 0
+102:     reference_counts: dict[str, int] = {}
+103:     dead_known = dict(snapshot.known_dead)
+104:     # TASK-065: 意図の内訳をまず全文から拾う（疑問文の質問行為もここなら数えられる）。
+105:     # 以降の違反判定ループは従来どおりに動かし、観測だけを追加する（本文は触らない）。
+106:     intent_counts: dict[str, int] = {}
+107:     past_attributions = 0
+108:     question_acts = 0
+109:     action_speculations = 0
+110:     if normalized_intent_policy == TIMELINE_INTENT_POLICY_SEPARATED:
+111:         for sentence in sentences:
+112:             folded_intent = _normalize_text(sentence)
+113:             if not folded_intent:
+114:                 continue
+115:             names_intent = mentions_players(sentence, tuple(player_names))
+116:             if not names_intent:
+117:                 continue
+118:             intent, targets = classify_unspoken_intent(
+119:                 sentence, folded_intent, snapshot, names_intent
+120:             )

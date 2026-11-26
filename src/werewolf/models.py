@@ -25,15 +25,20 @@ from .role_provenance import (
     SOURCE_COMPATIBILITY_TEXT,
     RoleProvenanceLedger,
 )
+# TASK-064: 役職騙りと能力行使の境界台帳（engine_action / public_role_claim /
+# unsupported_role_action / inference）。観測専用で本文は変更しない。modelsをimportしない。
+from .role_action_provenance import RoleActionProvenance
 # TASK-056: Day内イベントの時系列台帳（day / discussion_turn / speech_id / sequence を残す。
 # このモジュールは models をimportしないため、循環参照にはならない）
 from .day_timeline import (
     DAY_TIMELINE_POLICY_DEFAULT,
     PublicTimeline,
+    TIMELINE_INTENT_POLICY_DEFAULT,
     TimelineEvent,
     TurnSnapshot,
     build_turn_snapshot,
     normalize_day_timeline_policy,
+    normalize_timeline_intent_policy,
 )
 # TASK-057: プロンプト契約のポリシー（simplified / legacy）。このモジュールは models を
 # import しないため循環参照にならない。節の台帳・証拠ID参照・段階除去を prompts 側で使う。
@@ -60,6 +65,21 @@ from .continuity_state import (
     CONTINUITY_POLICY_DEFAULT,
     ContinuityState,
     normalize_continuity_policy,
+)
+# TASK-065: 実効コンテキスト整合（configured / server_observed / loaded / requested）、
+# 未発言者への意図分離、プレイヤー名表記ゆれの内部解決、出力安定化のスコープ。
+# いずれも models を import しない純粋なモジュールで、公開本文は書き換えない。
+from .context_integrity import (
+    CONTEXT_INTEGRITY_POLICY_DEFAULT,
+    normalize_context_integrity_policy,
+)
+from .name_resolution import (
+    NAME_RESOLUTION_POLICY_DEFAULT,
+    normalize_name_resolution_policy,
+)
+from .output_stability import (
+    OUTPUT_STABILIZATION_SCOPE_DEFAULT,
+    normalize_output_stabilization_scope,
 )
 
 
@@ -523,6 +543,12 @@ class GameState:
     # TASK-055: エンジン発行情報（RoleEvidence）と公開申告（PublicInterpretation）の台帳。
     # 照合結果は管理者ログ専用で、公開面では全CO行を同じ中立ラベルに揃える。
     role_provenance: RoleProvenanceLedger = field(default_factory=RoleProvenanceLedger)
+    # TASK-064: 役職能力の実行記録と公開主張の境界台帳（RoleActionProvenance）。
+    # 実行済み行動（エンジン）／本人の公開CO／実行記録のない能力行使表現／他者の推測を
+    # 分けて持つ。検出は観測専用で、本文の再生成・無害化には使わない。
+    role_action_provenance: RoleActionProvenance = field(
+        default_factory=RoleActionProvenance
+    )
     # TASK-056: 公開イベントの時系列台帳（時点・ID・短い要約のみ。発言本文は保持しない）。
     # 発言・投票・処刑・襲撃死を登順で並べ、「この時点で既知」と「まだ発生していない」
     # の境界をプロンプトとログの両方で追跡できるようにする。
@@ -551,6 +577,21 @@ class GameState:
     continuity_policy: str = CONTINUITY_POLICY_DEFAULT
     # プレイヤー別の論理状態と、エンジン発行チェックポイントの台帳
     continuity_state: ContinuityState = field(default_factory=ContinuityState)
+    # TASK-065: 実効コンテキスト整合チェック（off / warn / cap）。既定 warn は送信値を変えず、
+    # cap のときだけサーバー観測値へ安全縮退する。議論本文へは一切書き込まない。
+    context_integrity_policy: str = CONTEXT_INTEGRITY_POLICY_DEFAULT
+    # ゲーム開始前のモデル別ロード確認結果（configured / server_observed / loaded / requested）。
+    # 数値とカテゴリのみで、役職・占い結果などの秘密情報は含まれない。
+    context_integrity_checks: dict[str, dict[str, object]] = field(default_factory=dict)
+    # TASK-065: 未発言者に関する文の意図分離（separated / literal）。既定 separated は
+    # これから質問する行為を未来参照から外し、実質的な断定だけを残す。offではない。
+    timeline_intent_policy: str = TIMELINE_INTENT_POLICY_DEFAULT
+    # TASK-065: プレイヤー名表記ゆれの内部解決（normalized / literal）。既定は
+    # `Player\u202f6`・全角・カタカナ表記を実在名へ解決するが、公開発言の表記は変えない。
+    player_name_resolution_policy: str = NAME_RESOLUTION_POLICY_DEFAULT
+    # TASK-065: thinking・timeout・生成上限の処置スコープ（action / model）。既定 action は
+    # モデル全体へ恒久適用せず、モデル×行動×直近失敗履歴に限定する。
+    output_stabilization_scope: str = OUTPUT_STABILIZATION_SCOPE_DEFAULT
 
     def __post_init__(self) -> None:
         if self.day < 0:
@@ -572,6 +613,21 @@ class GameState:
         # TASK-062: 論理状態の正規化ポリシーも正規化し、台帳と同じ値に揃える
         self.continuity_policy = normalize_continuity_policy(self.continuity_policy)
         self.continuity_state.policy = self.continuity_policy
+        # TASK-065: 4つの運用ポリシーを正規化する（未知の設定値はそれぞれ既定へ寄せる）。
+        # どれを選んでも発言本文・口調・論点には干渉せず、整合チェックと観測の切れ目だけを
+        # 整える設定である。
+        self.context_integrity_policy = normalize_context_integrity_policy(
+            self.context_integrity_policy
+        )
+        self.timeline_intent_policy = normalize_timeline_intent_policy(
+            self.timeline_intent_policy
+        )
+        self.player_name_resolution_policy = normalize_name_resolution_policy(
+            self.player_name_resolution_policy
+        )
+        self.output_stabilization_scope = normalize_output_stabilization_scope(
+            self.output_stabilization_scope
+        )
         if not 0 <= self.discussion_turn <= 3:
             raise ValueError("Discussion turn must be between zero and three.")
         names = [player.name for player in self.players]

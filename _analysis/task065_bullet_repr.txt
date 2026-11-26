@@ -1,0 +1,1 @@
+'、過去の発言as根拠の断定だけ `future_event_reference` に残します（TASK-056/059の検出強度は下げない）。イベントは `timeline_intent_counts` / `past_attributions_observe'

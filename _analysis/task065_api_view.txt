@@ -1,0 +1,41 @@
+--- cli.py :: --context-integrity hits=1
+3468: "--context-integrity",
+--- cli.py :: --timeline-intent hits=1
+3483: "--timeline-intent",
+--- cli.py :: --player-name-resolution hits=1
+3498: "--player-name-resolution",
+--- cli.py :: --output-stabilization-scope hits=0
+--- cli.py :: preflight hits=4
+364: "context_preflight_runs": 0,
+2499: def run_context_integrity_preflight(
+2556: "type": "context_integrity_preflight",
+3168: run_context_integrity_preflight(client, state, logger)
+--- models.py :: context_integrity_checks hits=1
+585: context_integrity_checks: dict[str, dict[str, object]] = field(default_factory=dict)
+--- models.py :: timeline_intent_policy hits=4
+41: normalize_timeline_intent_policy,
+588: timeline_intent_policy: str = TIMELINE_INTENT_POLICY_DEFAULT
+622: self.timeline_intent_policy = normalize_timeline_intent_policy(
+623: self.timeline_intent_policy
+--- models.py :: player_name_resolution_policy hits=3
+591: player_name_resolution_policy: str = NAME_RESOLUTION_POLICY_DEFAULT
+625: self.player_name_resolution_policy = normalize_name_resolution_policy(
+626: self.player_name_resolution_policy
+--- models.py :: output_stabilization_scope hits=4
+82: normalize_output_stabilization_scope,
+594: output_stabilization_scope: str = OUTPUT_STABILIZATION_SCOPE_DEFAULT
+628: self.output_stabilization_scope = normalize_output_stabilization_scope(
+629: self.output_stabilization_scope
+--- llm_actions.py :: def _stability_record hits=0
+--- llm_actions.py :: def run_context_preflight hits=0
+--- llm_actions.py :: relax( hits=1
+6084: relaxed = self._stability.relax(actor.model, key)
+--- llm_actions.py :: apply_downgrade( hits=2
+5751: payload = self._stability.apply_downgrade(actor.model, key, DOWNGRADE_TIMEOUT_FIT)
+6267: payload = self._stability.apply_downgrade(
+--- llm_actions.py :: model_wide_evidence( hits=2
+5768: model_wide_evidence=self._stability.model_wide_evidence(
+6270: model_wide = self._stability.model_wide_evidence(actor.model, DOWNGRADE_THINKING_OFF)
+--- engine.py :: name_resolution hits=0
+--- prompts.py :: name_resolution hits=0
+--- continuity_state.py :: name_resolution hits=0

@@ -65,6 +65,9 @@ from .core_compression import (
 # 寄せ、同じ制約の言い換え（一人称・言語・記録外・死者扱い）を1箇所に寄せる。
 # TASK-062: 既定は v4。エンジン発行の論理状態（[CONTINUITY_CHECKPOINT]）を発言証拠の直後・
 # 現在質問の直前へ置き、チェックポイントが正規化した日の平常発言本文をID行へ畳む。
+# TASK-064: 既定は v5。v4 の連鎖に `[ROLE_ACTION_BOUNDARY]`（エンジン実行と本人申告の境界、
+# [DONE]/[CLAIM] の短固定行）を現在質問の直後・自分の発言の直前へ挟む（代表字数での探索で
+# 最良と出た位置。口調・論点・結論には干渉せず、本文の重複掲載もしない）。
 from .prompt_layout import (
     CONTINUITY_STATE_SECTION,
     PROMPT_LAYOUT_POLICY_DEFAULT,
@@ -72,6 +75,9 @@ from .prompt_layout import (
     PROMPT_LAYOUT_V3_ORDER,
     PROMPT_LAYOUT_V4,
     PROMPT_LAYOUT_V4_ORDER,
+    PROMPT_LAYOUT_V5,
+    PROMPT_LAYOUT_V5_ORDER,
+    ROLE_BOUNDARY_SECTION,
     adjacency_gap,
     measure_zones,
     normalize_prompt_layout_policy,
@@ -79,6 +85,12 @@ from .prompt_layout import (
     resolve_prompt_layout,
     weak_middle_must_use_chars,
 )
+# TASK-064: 役職能力の境界節が参照する定数（エンジン実行の能力種類）。台帳そのものは
+# GameState.role_action_provenance が持ち、ここでは能力種類の名前だけを使う。
+from .role_action_provenance import KIND_ATTACK, KIND_DIVINATION
+# TASK-065: 名前言及の表記ゆれを内部照合で吸収する（公開本文は変更しない）
+from .name_resolution import resolve_known_names
+
 
 
 
@@ -1764,6 +1776,72 @@ class PromptBuilder:
         return block, diagnostics
 
     @staticmethod
+    def _role_action_boundary_section(
+        actor: Player, state: GameState | None
+    ) -> tuple[str, dict[str, object]]:
+        """エンジン発行の `[ROLE_ACTION_BOUNDARY]` 節を作る（TASK-064）。
+
+        「エンジンが実際にその人のために実行した能力行動」（[DONE]=事実）と
+        「本人が公に語った役職・結果」（[CLAIM]=未検証の申告）を見出し1行＋状態1行で分ける。
+        エンジン結果・公開主張・推測の本文はここには再掲しない（結果は私人欄、CO本文は
+        CLAIM_LEDGER が既に持つ）。口調・論点・推理順・結論はモデルのもので、この節から
+        新しい命令文は増やさない。発言の自由（ブラフ・疑問形・仮定形・引用・立場変更）は
+        [BEHAVIOR_CONTRACT] が1回だけ書く既存の自由行が担うため、ここでは繰り返さない
+        （TASK-060の重複排除方針と同じ）。境界が見せるのは「事実性」の区別だけ。
+        """
+        if state is None:
+            return "", {}
+        tracker = getattr(state, "role_action_provenance", None)
+        if tracker is None:
+            return "", {}
+        divination_days = tracker.own_engine_days(actor.name, KIND_DIVINATION)
+        attack_days = tracker.own_engine_days(actor.name, KIND_ATTACK)
+        own_claims = [
+            (index, claim)
+            for index, claim in enumerate(state.public_role_claims, 1)
+            if claim.claimant == actor.name
+        ]
+        # コンテキスト節約: 実行記録・本人の公開COを1行に畳み、結果本文は再掲しない
+        # （結果は私人欄、CO本文は CLAIM_LEDGER が既に持つ）。ここで最大2件まで。
+        done_bits: list[str] = []
+        if divination_days:
+            recent = ", ".join(f"D{d}" for d in divination_days[-3:])
+            done_bits.append(f"{len(divination_days)} ({recent})")
+        else:
+            done_bits.append("none")
+        if attack_days:
+            done_bits.append(f"attack nights: {len(attack_days)}")
+        done_text = "; ".join(done_bits)
+        if own_claims:
+            claim_bits = []
+            for index, claim in own_claims[-2:]:
+                try:
+                    role_key = Role(claim.claimed_role)
+                except ValueError:
+                    role_key = None
+                role_name = str(
+                    ROLE_NAMES_EN.get(role_key, claim.claimed_role)
+                    if role_key is not None
+                    else claim.claimed_role
+                )
+                claim_bits.append(f"[claim:{index}] {role_name} D{claim.day}")
+            claim_text = ", ".join(claim_bits) + " (unverified)"
+        else:
+            claim_text = "none"
+        header = (
+            "[ROLE_ACTION_BOUNDARY]\n"
+            "[DONE]=the engine ran this ability for you (fact); "
+            "[CLAIM]=you said it publicly (not an engine record).\n"
+        )
+        block = f"{header}- [DONE] divination: {done_text} | [CLAIM] published: {claim_text}\n\n"
+        diagnostics = {
+            "role_boundary_section_chars": len(block),
+            "role_boundary_done_rows": 1 + (1 if attack_days else 0),
+            "role_boundary_claim_rows": len(own_claims[-2:]) if own_claims else 0,
+        }
+        return block, diagnostics
+
+    @staticmethod
     def _discussion_claim_ledger(state: GameState | None) -> str:
         if state is None:
             return "(No ledger)"
@@ -2418,7 +2496,10 @@ class PromptBuilder:
         use_v3 = simplified and layout_label == PROMPT_LAYOUT_V3
         # TASK-062: v4 は v3 と同じ節連鎖の作り回しを使い、状態節だけを追加で組む
         use_v4 = simplified and layout_label == PROMPT_LAYOUT_V4
-        use_chain = use_v3 or use_v4
+        # TASK-064: v5 は v4 連鎖のまま、エンジン発行の能力境界節を質問と自分の発言の
+        # 間へ挟む（既製の節断片に1節足すだけ。口調・論点には干渉しない）
+        use_v5 = simplified and layout_label == PROMPT_LAYOUT_V5
+        use_chain = use_v3 or use_v4 or use_v5
         # チェックポイントが正規化した日（当日より前）は、平常発言の本文をID行へ畳める。
         # 状態自体は [CONTINUITY_CHECKPOINT] 側で継続しているので情報量は落ちない。
         continuity_fold_days: frozenset[int] = frozenset()
@@ -2640,13 +2721,20 @@ class PromptBuilder:
             if include_topic_summary
             else ("", {})
         )
-        # TASK-062: エンジン発行の論理状態チェックポイント（v4のみで出す）。変わった項目だけの
+        # TASK-062: エンジン発行の論理状態チェックポイント（v4/v5で出す）。変わった項目だけの
         # 短い差分なので、日をまたいでも core が増え続けない。口調・論点・結論には干渉しない。
         continuity_block, continuity_diagnostics = (
-            cls._continuity_section(state, actor, day) if use_v4 else ("", {})
+            cls._continuity_section(state, actor, day) if (use_v4 or use_v5) else ("", {})
         )
         context_diagnostics.update(continuity_diagnostics)
         context_diagnostics["continuity_fold_days"] = sorted(continuity_fold_days)
+        # TASK-064: エンジン発行の役職能力の境界節（v5のみ）。実際に実行した能力行動と
+        # 本人が公開した主張を [DONE]/[CLAIM] の短固定行で分ける。エンジン結果・公開主張・
+        # 推測の本文は再掲せずIDだけ。ブラフ・疑い・立場変更は自由のまま（命令文なし）。
+        role_boundary_block, role_boundary_diagnostics = (
+            cls._role_action_boundary_section(actor, state) if use_v5 else ("", {})
+        )
+        context_diagnostics.update(role_boundary_diagnostics)
         # TASK-060: 推理メモ関連は3断片（派生 / エンジン発行情報 / 自分のメモ）へ分ける。
         # v1/v2 は従来と同一の字节順で使うため、ここで結合し直す（TASK-058のA/B基準を壊さない）。
         (
@@ -3048,7 +3136,10 @@ class PromptBuilder:
                 "conversation_evidence": _v3_evidence_piece(conversation_evidence),
                 # TASK-062: エンジン発行の論理状態（発言証拠の直後・現在質問の直前に配置）。
                 # 内容そのものは ContinuityState が作り、ここでは連結だけ行う。
-                "continuity_checkpoint": continuity_block if use_v4 else "",
+                "continuity_checkpoint": continuity_block if (use_v4 or use_v5) else "",
+                # TASK-064: 役職能力の境界節（v5のみ・現在質問の直後・自分の発言の直前）。
+                # 中身はエンジン台帳が既に持っており、ここは短い行の連結だけ行う。
+                "role_action_boundary": role_boundary_block if use_v5 else "",
                 "current_task": _v3_current_task_piece(
                     hint_mode,
                     directly_addressed,
@@ -3076,7 +3167,11 @@ class PromptBuilder:
             }
             placed: list[str] = []
             seen_parts: set[str] = set()
-            chain_order = PROMPT_LAYOUT_V4_ORDER if use_v4 else PROMPT_LAYOUT_V3_ORDER
+            chain_order = (
+                PROMPT_LAYOUT_V5_ORDER
+                if use_v5
+                else (PROMPT_LAYOUT_V4_ORDER if use_v4 else PROMPT_LAYOUT_V3_ORDER)
+            )
             for section_name in chain_order:
                 text = v3_parts.get(section_name, "")
                 if text:
@@ -3130,12 +3225,16 @@ class PromptBuilder:
             prompt_layout_policy
         )
         layout_order = (
-            PROMPT_LAYOUT_V4_ORDER
-            if use_v4
+            PROMPT_LAYOUT_V5_ORDER
+            if use_v5
             else (
-                PROMPT_LAYOUT_V3_ORDER
-                if use_v3
-                else (PROMPT_LAYOUT_V2_ORDER if simplified else ())
+                PROMPT_LAYOUT_V4_ORDER
+                if use_v4
+                else (
+                    PROMPT_LAYOUT_V3_ORDER
+                    if use_v3
+                    else (PROMPT_LAYOUT_V2_ORDER if simplified else ())
+                )
             )
         )
         context_diagnostics["prompt_layout_violations"] = (
@@ -3167,6 +3266,14 @@ class PromptBuilder:
         )
         context_diagnostics["prompt_gap_state_to_question"] = adjacency_gap(
             user_prompt, CONTINUITY_STATE_SECTION, "question_block"
+        )
+        # TASK-064: 能力境界節の隣接距離（現在質問との距離／自分の発言との距離）。
+        # v5ではどちらも最小距離（探査で凍結した位置）から外れていないかをA/Bで測る。
+        context_diagnostics["prompt_gap_role_boundary_to_question"] = adjacency_gap(
+            user_prompt, ROLE_BOUNDARY_SECTION, "question_block"
+        )
+        context_diagnostics["prompt_gap_role_boundary_to_own_speeches"] = adjacency_gap(
+            user_prompt, ROLE_BOUNDARY_SECTION, "own_speeches"
         )
         context_diagnostics["continuity_section_chars"] = (
             len(continuity_block) if continuity_block else 0
@@ -3386,7 +3493,15 @@ class PromptBuilder:
             "意見",
         )
         addressed = any(cue in content for cue in address_cues)
+        # TASK-065: 名前言及の表記ゆれを内部で吸収する（公開本文は変更しない）。
+        # `Player\u202f6`・`player6`・`プレイヤー6` などの書き方を、文字列一致で見逃すと
+        # 「自分への質問」を認識できず、質問回答の観測と直接指名だけが沈黙する。
+        # ここでは actor 名の実在解決だけを使い、存在しない番号を無理に名へ直さない。
+        if not addressed:
+            resolved_actor_mentions = resolve_known_names(content, (actor.name,))
+            addressed = bool(resolved_actor_mentions)
         has_own_prior_statement = any(
+
             message.speaker == actor.name for message in player_history[:-1]
         )
         reacts_to_own_statement = has_own_prior_statement and any(

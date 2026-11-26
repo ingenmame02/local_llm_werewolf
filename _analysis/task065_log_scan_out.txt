@@ -1,0 +1,129 @@
+events=539
+
+== 1. context resolution ==
+Player 2/werewolf-muse-glimmer-16k configured=16384 server_observed=4096(process_env) adopted=16384 conflict=False candidates={'player_setting': 16384, 'process_env': 4096, 'modelfile': 16384}
+Player 1/llm-jp-4.1-33b-thinking-fixed configured=16384 server_observed=4096(process_env) adopted=16384 conflict=True candidates={'player_setting': 16384, 'process_env': 4096, 'modelfile': 4096}
+Player 3/werewolf-mistral-small-16k configured=16384 server_observed=4096(process_env) adopted=16384 conflict=False candidates={'player_setting': 16384, 'process_env': 4096, 'modelfile': 16384}
+Player 4/werewolf-glm-4.7-flash-16k configured=16384 server_observed=4096(process_env) adopted=16384 conflict=False candidates={'player_setting': 16384, 'process_env': 4096, 'modelfile': 16384}
+Player 5/werewolf-qwen3.8-16k configured=16384 server_observed=4096(process_env) adopted=16384 conflict=False candidates={'player_setting': 16384, 'process_env': 4096, 'modelfile': 16384}
+Player 6/werewolf-deepseek-r1-16k configured=16384 server_observed=4096(process_env) adopted=16384 conflict=False candidates={'player_setting': 16384, 'process_env': 4096, 'modelfile': 16384}
+Player 7/werewolf-gpt-oss-20b-16k configured=16384 server_observed=4096(process_env) adopted=16384 conflict=False candidates={'player_setting': 16384, 'process_env': 4096, 'modelfile': 16384}
+Player 8/werewolf-gemma4-16k configured=16384 server_observed=4096(process_env) adopted=16384 conflict=False candidates={'player_setting': 16384, 'process_env': 4096, 'modelfile': 16384}
+
+== loaded (/api/ps) keys on attempts ==
+Counter({'requested_num_ctx': 130, 'num_ctx_source': 130, 'effective_num_ctx': 59})
+
+== 2. generation attempts (model x action x category fields) ==
+6 ('Player 1', 'llm-jp-4.1-33b-thinking-fixed', 'discussion', (None, 'stop', False, False, None))
+2 ('Player 1', 'llm-jp-4.1-33b-thinking-fixed', 'discussion', (None, None, False, False, None))
+1 ('Player 1', 'llm-jp-4.1-33b-thinking-fixed', 'vote', (None, 'length', False, False, None))
+2 ('Player 1', 'llm-jp-4.1-33b-thinking-fixed', 'vote', (None, 'stop', False, False, None))
+6 ('Player 2', 'werewolf-muse-glimmer-16k', 'discussion', (None, 'stop', False, False, None))
+2 ('Player 2', 'werewolf-muse-glimmer-16k', 'seer', (None, 'stop', False, False, None))
+1 ('Player 2', 'werewolf-muse-glimmer-16k', 'vote', (None, 'stop', False, False, None))
+2 ('Player 3', 'werewolf-mistral-small-16k', 'discussion', (None, 'length', False, False, None))
+6 ('Player 3', 'werewolf-mistral-small-16k', 'discussion', (None, 'stop', False, False, None))
+2 ('Player 3', 'werewolf-mistral-small-16k', 'vote', (None, 'stop', False, False, None))
+5 ('Player 4', 'werewolf-glm-4.7-flash-16k', 'discussion', (None, 'stop', False, False, None))
+2 ('Player 4', 'werewolf-glm-4.7-flash-16k', 'vote', (None, 'stop', False, False, None))
+6 ('Player 5', 'werewolf-qwen3.8-16k', 'discussion', (None, 'stop', False, False, None))
+2 ('Player 5', 'werewolf-qwen3.8-16k', 'vote', (None, 'stop', False, False, None))
+1 ('Player 6', 'werewolf-deepseek-r1-16k', 'attack', (None, 'stop', False, False, None))
+6 ('Player 6', 'werewolf-deepseek-r1-16k', 'discussion', (None, 'stop', False, False, None))
+2 ('Player 6', 'werewolf-deepseek-r1-16k', 'vote', (None, 'stop', False, False, None))
+6 ('Player 7', 'werewolf-gpt-oss-20b-16k', 'discussion', (None, 'stop', False, False, None))
+2 ('Player 7', 'werewolf-gpt-oss-20b-16k', 'vote', (None, 'stop', False, False, None))
+1 ('Player 8', 'werewolf-gemma4-16k', 'discussion', (None, 'length', False, False, None))
+6 ('Player 8', 'werewolf-gemma4-16k', 'discussion', (None, 'stop', False, False, None))
+2 ('Player 8', 'werewolf-gemma4-16k', 'vote', (None, 'stop', False, False, None))
+
+== retries / timeout events ==
+type=game_init player=None model=None action=None timeout=180.0 timeout_retries=None transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=None
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=seer timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.202
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.169
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.198
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.022
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=69.613
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.208
+type=llm_request_configuration player=Player 4 model=werewolf-glm-4.7-flash-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.167
+type=llm_request_configuration player=Player 4 model=werewolf-glm-4.7-flash-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=30.25
+type=llm_request_configuration player=Player 5 model=werewolf-qwen3.8-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.209
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.209
+type=llm_request_configuration player=Player 7 model=werewolf-gpt-oss-20b-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.218
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.192
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.014
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.03
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=63.291
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.011
+type=llm_request_configuration player=Player 4 model=werewolf-glm-4.7-flash-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.008
+type=llm_request_configuration player=Player 5 model=werewolf-qwen3.8-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.009
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.027
+type=llm_action_completed player=Player 6 model=werewolf-deepseek-r1-16k action=discussion timeout=None timeout_retries=None transport_retries=1 retry_strategy=None retry_prompt_style=None elapsed=251.507
+type=llm_request_configuration player=Player 7 model=werewolf-gpt-oss-20b-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.022
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.02
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.013
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.039
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=65.654
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.014
+type=llm_request_configuration player=Player 4 model=werewolf-glm-4.7-flash-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.037
+type=llm_request_configuration player=Player 4 model=werewolf-glm-4.7-flash-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=55.582
+type=llm_request_configuration player=Player 5 model=werewolf-qwen3.8-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.03
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.041
+type=llm_request_configuration player=Player 7 model=werewolf-gpt-oss-20b-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.021
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.021
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.003
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.003
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 4 model=werewolf-glm-4.7-flash-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 4 model=werewolf-glm-4.7-flash-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=19.633
+type=llm_request_configuration player=Player 5 model=werewolf-qwen3.8-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.022
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 7 model=werewolf-gpt-oss-20b-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=attack timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.004
+type=llm_request_configuration player=Player 2 model=werewolf-muse-glimmer-16k action=seer timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.017
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=360.047
+type=llm_action_completed player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=None transport_retries=1 retry_strategy=None retry_prompt_style=None elapsed=412.011
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.023
+type=llm_request_configuration player=Player 5 model=werewolf-qwen3.8-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.022
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.044
+type=llm_request_configuration player=Player 7 model=werewolf-gpt-oss-20b-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.047
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.029
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.027
+type=llm_action_completed player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=None transport_retries=1 retry_strategy=None retry_prompt_style=None elapsed=331.505
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.031
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=103.462
+type=llm_request_configuration player=Player 5 model=werewolf-qwen3.8-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.044
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.056
+type=llm_request_configuration player=Player 7 model=werewolf-gpt-oss-20b-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.055
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.053
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.03
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.04
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=103.714
+type=llm_request_configuration player=Player 5 model=werewolf-qwen3.8-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.046
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.064
+type=llm_request_configuration player=Player 7 model=werewolf-gpt-oss-20b-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.049
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.035
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=discussion timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=80.126
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.003
+type=llm_request_configuration player=Player 1 model=llm-jp-4.1-33b-thinking-fixed action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=98.126
+type=llm_request_configuration player=Player 3 model=werewolf-mistral-small-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 5 model=werewolf-qwen3.8-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 6 model=werewolf-deepseek-r1-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 7 model=werewolf-gpt-oss-20b-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+type=llm_request_configuration player=Player 8 model=werewolf-gemma4-16k action=vote timeout=None timeout_retries=1 transport_retries=None retry_strategy=None retry_prompt_style=None elapsed=0.002
+
+== 3. timeline findings (future references) ==
+player=Player 1 day=2 turn? action=discussion cats={'vote_outcome_before_vote': 0, 'death_before_death': 0, 'speech_from_unspoken_player': 1, 'night_action_before_night': 0}
+   - {'category': 'speech_from_unspoken_player', 'names': ['Player 6'], 'reason': 'no public speech by them existed at this point', 'sentence_excerpt': '谺｡縺ｫ縲√・繝ｬ繧､繝､繝ｼ6縺ｫ蜈ｷ菴鍋噪縺ｪ逋ｺ險蜀・ｮｹ繧・兜逾ｨ逅・罰繧貞撫縺・◆縺縺吶％縺ｨ繧呈署譯医＠縺ｾ縺吶・, 'sentence_sha256': '96715b77cb4c33bd', 'subtype': 'attribution_to_never_spoken_player', 'cause': 'actor_had_no_public_speech_at_this_point'}
+
+== 4. unknown_player_reference raw bodies ==
+type=ledger_repair player=Player 1 reason=unknown_player_reference text_keys=['body_preserved'] names_in_snippet=[]
+type=ledger_repair player=Player 1 reason=unknown_player_reference text_keys=['body_preserved'] names_in_snippet=[]
+type=ledger_repair player=Player 7 reason=unknown_player_reference text_keys=['body_preserved'] names_in_snippet=[]
+type=ledger_repair player=Player 1 reason=unknown_player_reference text_keys=['body_preserved'] names_in_snippet=[]
+type=ledger_repair player=Player 7 reason=unknown_player_reference text_keys=['body_preserved'] names_in_snippet=[]
+
+== question checks / answers ==
+Counter({(False, True): 23, (True, True): 10, (True, False): 5, (False, False): 3})

@@ -1,0 +1,86 @@
+65: FUTURE_SPEECH_FROM_UNSPOKEN = "speech_from_unspoken_player"
+70: FUTURE_SPEECH_FROM_UNSPOKEN,
+88: # speech_from_unspoken_player の副型（TASK-059実装案2）。観測専用のタグで、本文は触らない。
+89: SUBTYPE_ATTRIBUTION_NEVER_SPOKEN = "attribution_to_never_spoken_player"
+90: SUBTYPE_GENERAL_MENTION_UNSPOKEN = "general_mention_without_attribution_observed"
+91: SUBTYPE_HEDGED_CITATION_PENDING = "hedged_citation_of_pending_speech_observed"
+110: def classify_reference_tokens(
+138: def normalize_day_timeline_policy(value: object) -> str:
+153: def day_timeline_policy_label(policy: object) -> str:
+158: def timeline_evidence_header(
+184: class TimelineEvent:
+197: def available_at(self) -> str:
+201: def short_point(self) -> str:
+212: def to_dict(self) -> dict[str, object]:
+227: class TurnSnapshot:
+250: def point(self) -> str:
+253: def spoken_before(self, name: str) -> bool:
+256: def was_alive(self, name: str) -> bool:
+259: def citation_status(self, name: str) -> str:
+277: def to_log_fields(self) -> dict[str, object]:
+292: class PublicTimeline:
+315: hedged_pending_citations_observed: int = 0
+316: mentions_without_attribution_observed: int = 0
+323: def __post_init__(self) -> None:
+327: def next_sequence(self) -> int:
+330: def record(
+362: def record_speech(
+382: def record_day_start(self, day: int) -> TimelineEvent | None:
+385: def record_vote_phase(
+401: def record_death(self, day: int, name: str, *, executed: bool) -> TimelineEvent | None:
+406: def on_day(self, day: int) -> tuple[TimelineEvent, ...]:
+409: def speeches(self, day: int | None = None) -> tuple[TimelineEvent, ...]:
+416: def latest(self) -> TimelineEvent | None:
+419: def metrics(self) -> dict[str, object]:
+457: def observation_metrics(self) -> dict[str, object]:
+471: "hedged_pending_citations_observed": int(
+472: self.hedged_pending_citations_observed
+474: "mentions_without_attribution_observed": int(
+475: self.mentions_without_attribution_observed
+481: def record_observation(self, report: "TimelineReferenceReport") -> None:
+497: self.hedged_pending_citations_observed += int(report.hedged_pending_citations)
+498: self.mentions_without_attribution_observed += int(
+499: report.mentions_without_attribution
+507: def serialize(self) -> dict[str, object]:
+519: def _is_japanese(language: object) -> bool:
+525: def _death_day_map(state: object) -> dict[str, int]:
+543: def _next_speech_id(state: object) -> int:
+549: def build_turn_snapshot(state: object, actor_name: str) -> TurnSnapshot:
+639: def _event_short(event: TimelineEvent) -> str:
+645: def render_timeline_section(
+793: _HEDGE_TERMS: tuple[str, ...] = (
+877: "mentioned",
+930: def _normalize_text(text: str) -> str:
+936: def mentions_players(sentence: str, player_names: tuple[str, ...]) -> tuple[str, ...]:
+953: def _is_question(sentence: str) -> bool:
+957: def _is_hedged(norm: str) -> bool:
+958: return any(term in norm for term in _HEDGE_TERMS)
+962: class FutureReferenceFinding:
+969: # TASK-059: speech_from_unspoken_player の内訳分類（観測専用タグ）。判定は変えない。
+973: def to_dict(self) -> dict[str, object]:
+990: class TimelineReferenceReport:
+1000: hedged_pending_citations: int = 0
+1001: mentions_without_attribution: int = 0
+1007: def grounding_rate(self) -> float:
+1015: def to_log_fields(self) -> dict[str, object]:
+1032: "hedged_pending_citations_observed": int(self.hedged_pending_citations),
+1033: "mentions_without_attribution_observed": int(
+1034: self.mentions_without_attribution
+1044: def inspect_public_body(
+1064: hedged_pending = 0
+1065: mentions_no_attribution = 0
+1072: names = mentions_players(sentence, tuple(player_names))
+1074: hedged = _is_hedged(norm)
+1100: if cites_speech and hedged and all_without_speech:
+1102: hedged_pending += 1
+1105: mentions_no_attribution += 1
+1111: and not hedged
+1121: and not hedged
+1134: if category is None and not hedged:
+1146: and not hedged
+1150: category = FUTURE_SPEECH_FROM_UNSPOKEN
+1155: if category == FUTURE_SPEECH_FROM_UNSPOKEN:
+1158: subtype = SUBTYPE_ATTRIBUTION_NEVER_SPOKEN
+1180: if category == FUTURE_SPEECH_FROM_UNSPOKEN:
+1188: hedged_pending_citations=int(hedged_pending),
+1189: mentions_without_attribution=int(mentions_no_attribution),

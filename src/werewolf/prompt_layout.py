@@ -52,19 +52,23 @@ from .prompt_contract import find_sections
 PROMPT_LAYOUT_POLICY_AUTO = "auto"
 PROMPT_LAYOUT_POLICY_V2 = "v2"
 PROMPT_LAYOUT_POLICY_V3 = "v3"
-# TASK-062: v4 は `[CONTINUITY_CHECKPOINT]`（日をまたぐ論理状態）を含む配置で既定になる。
+# TASK-062: v4 は `[CONTINUITY_CHECKPOINT]`（日をまたぐ論理状態）を含む配置。
 PROMPT_LAYOUT_POLICY_V4 = "v4"
+# TASK-064: v5 は v4 の連鎖へ `[ROLE_ACTION_BOUNDARY]`（役職能力の境界節）を挟む既定配置。
+PROMPT_LAYOUT_POLICY_V5 = "v5"
 PROMPT_LAYOUT_POLICIES: tuple[str, ...] = (
+    PROMPT_LAYOUT_POLICY_V5,
     PROMPT_LAYOUT_POLICY_V4,
     PROMPT_LAYOUT_POLICY_V3,
     PROMPT_LAYOUT_POLICY_V2,
     PROMPT_LAYOUT_POLICY_AUTO,
 )
-PROMPT_LAYOUT_POLICY_DEFAULT = PROMPT_LAYOUT_POLICY_V4
+PROMPT_LAYOUT_POLICY_DEFAULT = PROMPT_LAYOUT_POLICY_V5
 
 # レイアウトラベル（ログに載る値）。v2/legacy は core_compression の既存ラベルを再利用する。
 PROMPT_LAYOUT_V3 = "v3_grounding"
 PROMPT_LAYOUT_V4 = "v4_continuity"
+PROMPT_LAYOUT_V5 = "v5_role_boundary"
 
 
 def normalize_prompt_layout_policy(value: object) -> str:
@@ -74,11 +78,13 @@ def normalize_prompt_layout_policy(value: object) -> str:
     bool は True=v3 / False=v2 として扱う（A/B切り替えの簡易指定）。
     """
     if isinstance(value, bool):
-        return PROMPT_LAYOUT_POLICY_V4 if value else PROMPT_LAYOUT_POLICY_V2
+        return PROMPT_LAYOUT_POLICY_V5 if value else PROMPT_LAYOUT_POLICY_V2
     if isinstance(value, str):
         candidate = value.strip().lower()
         if candidate in PROMPT_LAYOUT_POLICIES:
             return candidate
+        if candidate in {PROMPT_LAYOUT_V5, "boundary", "role_boundary", "task064"}:
+            return PROMPT_LAYOUT_POLICY_V5
         if candidate in {PROMPT_LAYOUT_V4, "continuity", "task062", "on", "true", "best"}:
             return PROMPT_LAYOUT_POLICY_V4
         if candidate in {PROMPT_LAYOUT_V3, "grounding", "task060"}:
@@ -112,7 +118,9 @@ def resolve_prompt_layout(policy: object, contract_policy: object) -> str:
         return PROMPT_LAYOUT_V2
     if resolved == PROMPT_LAYOUT_POLICY_V3:
         return PROMPT_LAYOUT_V3
-    return PROMPT_LAYOUT_V4
+    if resolved == PROMPT_LAYOUT_POLICY_V4:
+        return PROMPT_LAYOUT_V4
+    return PROMPT_LAYOUT_V5
 
 
 def prompt_layout_policy_label(policy: object) -> str:
@@ -179,6 +187,10 @@ ROLE_TEMPORARY_GUIDANCE = "temporary_guidance"  # 期限付きの暫定案内
 # TASK-062: エンジンが発行する「日をまたぐ論理状態」（確定事実・反証・未解決の問い）。
 # いま有効な状態なので中部に沈ませたくないが、読み枠を先頭で決める誘導節でもない。
 ROLE_CONTINUITY = "continuity_state"
+# TASK-064: エンジンが発行する「役職能力の境界」（実際に実行した行動 vs 本人の公開主張）。
+# 現在質問の読み直後・自分の発言の直前に置いて実行と主張を取り違えないための状態欄。
+# 口調・論点・結論には干渉しない。
+ROLE_ABILITY_BOUNDARY = "ability_boundary"
 
 SECTION_ROLES: dict[str, str] = {
     "system_rules": ROLE_RULES,
@@ -209,6 +221,8 @@ SECTION_ROLES: dict[str, str] = {
     "continuity_memo": ROLE_DERIVED,
     # TASK-062: 正規化された論理状態（エンジン発行）。自分の記録と同じくらい「いま」使う
     "continuity_checkpoint": ROLE_CONTINUITY,
+    # TASK-064: 役職能力の境界（エンジン発行）。実行と主張の取り違えを防ぐ「いま」使う状態
+    "role_action_boundary": ROLE_ABILITY_BOUNDARY,
     "integrity_alerts": ROLE_DERIVED,
     "round_transcript": ROLE_DERIVED,
     "day1_first_turn_guidance": ROLE_TEMPORARY_GUIDANCE,
@@ -234,6 +248,8 @@ ROLE_WEIGHTS: dict[str, float] = {
     ROLE_TEMPORARY_GUIDANCE: 0.55,
     # TASK-062: 状態そのものなので、議論の案内や派生要約より高く置く（中部に沈ませない）
     ROLE_CONTINUITY: 1.20,
+    # TASK-064: 実行記録と本人の主張の境界。質問直前で読むほど取り違えが減る状態
+    ROLE_ABILITY_BOUNDARY: 1.20,
 }
 
 # 「いま使う」役割の節が中部帯に沈むことを減点する役割集合
@@ -247,6 +263,8 @@ MUST_USE_ROLES: frozenset[str] = frozenset(
         ROLE_TEMPORAL,
         # TASK-062: 日をまたぐ論理状態も「いま使う」情報（中部に沈めると記憶減衰が出る）
         ROLE_CONTINUITY,
+        # TASK-064: 能力の境界も「いま使う」情報（質問に答える直前で読み states を区別する）
+        ROLE_ABILITY_BOUNDARY,
     }
 )
 
@@ -339,6 +357,28 @@ ADJACENCY_TARGETS: tuple[AdjacencyTarget, ...] = (
         0.95,
         "現在質問に答える直前に論理状態があると、自分の立場を更新したまま答えられる",
     ),
+    # TASK-064: 能力の境界は現在質問と隣接帯に置き、そのまま自分の発言へ接続する。
+    # 実際にやった行動と自分が言った主張を、質問応答の接続点で区別するため。
+    AdjacencyTarget(
+        "role_action_boundary",
+        "question_block",
+        1.00,
+        "境界節を現在質問の隣に読むと、実行記録と本人申告の取り違えが減る（前でも後ろでも隣なら可）",
+    ),
+    AdjacencyTarget(
+        "continuity_checkpoint",
+        "role_action_boundary",
+        0.60,
+        "エンジン発行の2節（論理状態→能力の境界）を連続で読むと権威の層が混ざらない",
+    ),
+    # TASK-064: 境界は「現在質問」と「自分の発言」の間に挟む。質問を読んで答える直前に
+    # 実行記録と本人申告を読み、そのまま自分の過去の発言（立場のアンカー）へ接続する。
+    AdjacencyTarget(
+        "role_action_boundary",
+        "own_speeches",
+        0.55,
+        "実行と申告の直後に自分の発言を読むと、立場の一貫性が保たれる（TASK-039系）",
+    ),
 )
 
 
@@ -370,9 +410,13 @@ NO_PRIMACY_SECTIONS: tuple[str, ...] = (
     "continuity_memo",
     # TASK-062: 正規化状態も「読み枠を先に決める」位置には置かない（末尾帯で使う）
     "continuity_checkpoint",
+    # TASK-064: 能力の境界も先頭帯で枠を決めない（ID索引を参照するため末尾帯で読む）
+    "role_action_boundary",
 )
 # TASK-062: 論理状態は主張索引（CLAIM_LEDGER）のIDを参照するので、索引より前に来ない
 CONTINUITY_STATE_SECTION = "continuity_checkpoint"
+# TASK-064: 能力の境界も本人の公開CO索引（[claim:N]）を参照する。索引より前に出さない
+ROLE_BOUNDARY_SECTION = "role_action_boundary"
 
 
 def validate_declared_order(order: Sequence[str]) -> list[dict[str, object]]:
@@ -421,6 +465,17 @@ def validate_declared_order(order: Sequence[str]) -> list[dict[str, object]]:
                 {
                     "kind": "state_before_index",
                     "name": CONTINUITY_STATE_SECTION,
+                    "after": "claim_ledger",
+                }
+            )
+    # TASK-064: 能力の境界も本人の公開CO索引（[claim:N]）を参照する。索引より前に出すと
+    # 存在しないIDを辿らせることになり、追跡性が壊れる（state節と同じ制約）。
+    if ROLE_BOUNDARY_SECTION in names and "claim_ledger" in names:
+        if names.index(ROLE_BOUNDARY_SECTION) < names.index("claim_ledger"):
+            problems.append(
+                {
+                    "kind": "boundary_before_index",
+                    "name": ROLE_BOUNDARY_SECTION,
                     "after": "claim_ledger",
                 }
             )
@@ -702,6 +757,8 @@ PROMPT_SEARCH_BLOCKS: tuple[tuple[str, ...], ...] = (
     ("day_timeline",),
     # TASK-062: エンジン発行の論理状態（チェックポイント）。主張索引のIDを参照する位置に置く
     ("continuity_checkpoint",),
+    # TASK-064: エンジン発行の役職能力の境界（実行 vs 申告）。同じく索引IDを参照する
+    ("role_action_boundary",),
     ("inference_line", "hypothesis_ledger", "previous_topics"),
     ("continuity_memo", "integrity_alerts"),
     ("day1_first_turn_guidance", "first_night_guidance"),
@@ -738,6 +795,7 @@ BLOCK_ALIASES: dict[str, tuple[str, ...]] = {
     "claims": ("claim_ledger",),
     "timeline": ("day_timeline",),
     "state": ("continuity_checkpoint",),
+    "rbound": ("role_action_boundary",),
     "derived": ("inference_line", "hypothesis_ledger", "previous_topics"),
     "memo": ("continuity_memo", "integrity_alerts"),
     "temp": ("day1_first_turn_guidance", "first_night_guidance"),
@@ -784,11 +842,28 @@ SEED_KEYS: tuple[tuple[str, ...], ...] = (
      "claims", "timeline", "evid", "task", "state", "selfpair", "rguid", "guid"),
 )
 
+# TASK-064: v5 の探索は `rbound`（エンジン発行の役職能力の境界）を含む候補から始める。
+# SEED_KEYS（v4まで）はそのまま残し、v5専用のシード集合として凍結再現に使う。
+SEED_KEYS_V5: tuple[tuple[str, ...], ...] = (
+    # seed G: v4連鎖（索引→時点→状態→証拠）で境界を証拠と質問の間に挟む
+    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
+     "claims", "timeline", "state", "evid", "rbound", "task", "selfpair", "rguid", "guid"),
+    # seed H: 境界を状態より前（証拠の隣）に置く
+    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
+     "claims", "timeline", "state", "rbound", "evid", "task", "selfpair", "rguid", "guid"),
+    # seed I: 境界を主張索引の直後（ID参照を最短距離で辿る案）に置く
+    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
+     "claims", "rbound", "timeline", "state", "evid", "task", "selfpair", "rguid", "guid"),
+    # seed K: 境界を質問ブロックの後・自分の記録の直前へ（状態節はv4連鎖のまま）
+    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
+     "claims", "timeline", "state", "evid", "task", "rbound", "selfpair", "rguid", "guid"),
+)
 
-def candidate_orders() -> list[tuple[str, ...]]:
+
+def candidate_orders(seeds: Sequence[tuple[str, ...]] | None = None) -> list[tuple[str, ...]]:
     """候補順の初期集合（先頭2つ＋movable＋終端4つの平坦列）。"""
     orders: list[tuple[str, ...]] = []
-    for keys in SEED_KEYS:
+    for keys in SEED_KEYS if seeds is None else seeds:
         blocks = (PROMPT_SEARCH_HEAD, *blocks_from_keys(keys), PROMPT_SEARCH_TAIL)
         orders.append(flatten_blocks(blocks))
     return orders
@@ -848,10 +923,12 @@ def search_prompt_orders(
     *,
     top_k: int = 6,
     max_passes: int = 6,
+    seeds: Sequence[tuple[str, ...]] | None = None,
 ) -> list[dict[str, object]]:
     """代表字数で候補順を貪欲改善し、上位をスコア付きで返す（決定的・LL不使用）。"""
     found: dict[tuple[tuple[str, ...], ...], OrderScore] = {}
-    for keys in SEED_KEYS:
+    chosen_seeds = SEED_KEYS if seeds is None else seeds
+    for keys in chosen_seeds:
         blocks = (PROMPT_SEARCH_HEAD, *blocks_from_keys(keys), PROMPT_SEARCH_TAIL)
         refined, scored = _improved(blocks, section_chars, max_passes=max_passes)
         previous = found.get(refined)
@@ -859,6 +936,17 @@ def search_prompt_orders(
             found[refined] = scored
     ranked = sorted(found.values(), key=lambda item: (-item.score, tuple(item.order)))
     return [result.as_dict() for result in ranked[: max(1, int(top_k))]]
+
+
+def search_prompt_orders_v5(
+    section_chars: Mapping[str, int] | None = None,
+    *,
+    top_k: int = 6,
+    max_passes: int = 6,
+) -> list[dict[str, object]]:
+    """TASK-064: `rbound`（役職能力の境界）を含む候補から節順を探索する（決定的）。"""
+    chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
+    return search_prompt_orders(chars, top_k=top_k, max_passes=max_passes, seeds=SEED_KEYS_V5)
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +1018,48 @@ V4_CHANGED_FROM_V3: tuple[str, ...] = (
     "誘導系（理論カード・派生情報・期限付き案内）は中部帯のまま、状態節だけは終端帯で読む",
 )
 
+# TASK-064: layout v5（既定）。`_analysis/task064_order_probe.py` が代表字数で探索した結果を
+# 凍結したもの（スコア43.58／違反0、全シード収束）。v4 と同じ連鎖を保ったまま、エンジン発行の
+# 役職能力の境界を「現在質問ブロックの直後・自分の発言の直前」へ置く。質問を読んだ直後に
+# [DONE]/[CLAIM] で実行と申告を区別し、そのまま自分の発言（立場のアンカー）へ接続する。
+# 代表字数200字での貪欲探索が1位にした配置そのもので、RBOUND→質問 0.0099・RBOUND→自分の発言
+# 0.0（STATE→RBOUND は 0.0262）。機械的に議論案内の前へ足すだけの配置（35.28）より明確に良い。
+# 読み方: ルールと応答言語 → 自分の行動記録 → 盤面の確定事実 → 本人限定情報
+#        → （中部: 理論カード・未検証の派生情報・期限付き案内・ラウンド見出し）
+#        → 公開主張の索引 → 時点 → 発言証拠 → [論理状態] → 現在質問
+#        → [能力の境界] → 自分の発言と推理メモ → 推理メモの指針 → 議論の案内（中立）
+#        → 秘匿境界 → 強い契約 → 出力形式 → 最終チェックリスト
+PROMPT_LAYOUT_V5_ORDER: tuple[str, ...] = flatten_blocks(
+    (
+        PROMPT_SEARCH_HEAD,
+        ("self_action_memory",),
+        ("fact_ledger",),
+        ("private_seer_result", "actor_private_memo", "info_boundaries"),
+        ("werewolf_theory_card",),
+        ("inference_line", "hypothesis_ledger", "previous_topics"),
+        ("continuity_memo", "integrity_alerts"),
+        ("day1_first_turn_guidance", "first_night_guidance"),
+        ("round_transcript",),
+        ("claim_ledger",),
+        ("day_timeline",),
+        ("conversation_evidence",),
+        ("continuity_checkpoint",),
+        ("current_task", "question_block", "direct_answer"),
+        ("role_action_boundary",),
+        ("own_speeches", "reasoning_memo_own"),
+        ("reasoning_guidance",),
+        ("discussion_guidelines",),
+        PROMPT_SEARCH_TAIL,
+    )
+)
+
+# v4 から v5 へ変わった点（節の新設と位置だけ。文言・口調・議論の自由は変えない）
+V5_CHANGED_FROM_V4: tuple[str, ...] = (
+    "role_action_boundary: 現在質問ブロックの直後・自分の発言の直前へ（質問との距離0.0099、自分の発言との距離0）",
+    "エンジン発行の状態節（continuity_checkpoint）は発言証拠の直後に残し、境界節は質問応答の接続点で読む",
+    "誘導系（理論カード・派生情報・期限付き案内）は中部帯のまま、境界節は終端帯のアンカー列に組み込む",
+)
+
 # v2 の宣言順から v3 へ変わった点（ログで説明できるようにしておく）
 V3_CHANGED_FROM_V2: tuple[str, ...] = (
     "werewolf_theory_card: FACT_LEDGER の内側（先頭帯）から中部帯へ降格し、optional 化",
@@ -959,6 +1089,10 @@ REPRESENTATIVE_SECTION_CHARS: dict[str, int] = {
     # TASK-062: `[CONTINUITY_CHECKPOINT]` の代表字数。見出し+権威説明が約620字、
     # 差分・反証・未解決の問いの行で最大約900字（Day 2以降の差分提示の実測平均を想定）。
     "continuity_checkpoint": 900,
+    # TASK-064: `[ROLE_ACTION_BOUNDARY]` の代表字数。実測（_analysis/task064_boundary_cost2.py）で
+    # 実行記録・本人COなしの通常盤面が180字、占い実行＋本人CO2件で235字。結果本文は再掲しない
+    # ため日跨ぎでも増えない（1リクエスト平均は200字弱）。
+    "role_action_boundary": 200,
     "day1_first_turn_guidance": 1450,
     "round_transcript": 120,
     "reasoning_guidance": 620,
@@ -982,9 +1116,9 @@ def adopted_layout_score(
     section_chars: Mapping[str, int] | None = None,
     order: Sequence[str] | None = None,
 ) -> OrderScore:
-    """採用中の節順（TASK-062以降は v4）をコストモデルで評価する（既定は代表字数）。"""
+    """採用中の節順（TASK-064以降は v5）をコストモデルで評価する（既定は代表字数）。"""
     chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
-    chosen = PROMPT_LAYOUT_V4_ORDER if order is None else tuple(order)
+    chosen = PROMPT_LAYOUT_V5_ORDER if order is None else tuple(order)
     return score_order(chosen, chars)
 
 
@@ -994,6 +1128,23 @@ def v3_layout_score(
     """A/B比較の基準側（TASK-060の v3 節順）を評価する。"""
     chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
     return score_order(PROMPT_LAYOUT_V3_ORDER, chars)
+
+
+def v4_layout_score(
+    section_chars: Mapping[str, int] | None = None,
+) -> OrderScore:
+    """A/B比較の基準側（TASK-062の v4 節順）を評価する（境界節なし）。"""
+    chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
+    base = {k: v for k, v in dict(chars).items() if k != ROLE_BOUNDARY_SECTION}
+    return score_order(PROMPT_LAYOUT_V4_ORDER, base)
+
+
+def v5_layout_score(
+    section_chars: Mapping[str, int] | None = None,
+) -> OrderScore:
+    """現行既定（TASK-064の v5 節順）を評価する。"""
+    chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
+    return score_order(PROMPT_LAYOUT_V5_ORDER, chars)
 
 
 __all__ = [
@@ -1024,17 +1175,22 @@ __all__ = [
     "PROMPT_LAYOUT_POLICY_V2",
     "PROMPT_LAYOUT_POLICY_V3",
     "PROMPT_LAYOUT_POLICY_V4",
+    "PROMPT_LAYOUT_POLICY_V5",
     "PROMPT_LAYOUT_V2",
     "PROMPT_LAYOUT_V2_ORDER",
     "PROMPT_LAYOUT_V3",
     "PROMPT_LAYOUT_V3_ORDER",
     "PROMPT_LAYOUT_V4",
     "PROMPT_LAYOUT_V4_ORDER",
+    "PROMPT_LAYOUT_V5",
+    "PROMPT_LAYOUT_V5_ORDER",
     "PROMPT_SEARCH_BLOCKS",
     "PROMPT_SEARCH_HEAD",
     "PROMPT_SEARCH_TAIL",
     "REPRESENTATIVE_SECTION_CHARS",
     "ROLE_ADVISORY",
+    "ROLE_ABILITY_BOUNDARY",
+    "ROLE_BOUNDARY_SECTION",
     "ROLE_DERIVED",
     "ROLE_EVIDENCE",
     "ROLE_ENGINE_FACT",
@@ -1054,13 +1210,17 @@ __all__ = [
     "SCORE_SCALE",
     "SECTION_ROLES",
     "SEED_KEYS",
+    "SEED_KEYS_V5",
     "TAIL_TIGHT_SECTIONS",
     "V3_CHANGED_FROM_V2",
     "V4_CHANGED_FROM_V3",
+    "V5_CHANGED_FROM_V4",
     "WEAK_MIDDLE_MUST_USE_WEIGHT",
     "adjacency_gap",
     "adopted_layout_score",
     "v3_layout_score",
+    "v4_layout_score",
+    "v5_layout_score",
     "attention_prior",
     "attention_prior_span",
     "attention_zone_for_center",

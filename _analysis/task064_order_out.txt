@@ -1,0 +1,8 @@
+representative total chars: 26340
+1. score=43.58 violations=0 rbound_at=23/32 zones={'primacy': 1910, 'weak_middle': 16850, 'recency': 7580}
+    system_rules output_language self_action_memory fact_ledger private_seer_result actor_private_memo info_boundaries werewolf_theory_card inference_line hypothesis_ledger previous_topics continuity_memo integrity_alerts day1_first_turn_guidance first_night_guidance round_transcript claim_ledger day_timeline conversation_evidence continuity_checkpoint current_task question_block direct_answer role_action_boundary own_speeches reasoning_memo_own reasoning_guidance discussion_guidelines leak_boundary behavior_contract instructions output_checklist
+    gaps: {'conversation_evidence->question_block': 0.0376, 'own_speeches->reasoning_memo_own': 0.0, 'question_block->own_speeches': 0.0175, 'day_timeline->conversation_evidence': 0.0, 'claim_ledger->conversation_evidence': 0.0175, 'behavior_contract->instructions': 0.0, 'own_speeches->reasoning_guidance': 0.0159, 'STATE->conversation_evidence': 0.0, 'STATE->question_block': 0.0034, 'RBOUND->question_block': 0.0099, 'STATE->RBOUND': 0.0262, 'RBOUND->own_speeches': 0.0}
+v3 (no state/rbound): 52.75
+v4 baseline (no rbound): 46.93
+v5 frozen: 43.58
+v4 + rbound before guidelines: 35.28

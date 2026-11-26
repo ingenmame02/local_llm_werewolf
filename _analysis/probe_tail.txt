@@ -1,0 +1,18 @@
+72
+56:     names: list[str] = []
+57:     for event in events:
+58:         for name in event.get("players") or []:
+59:             if isinstance(name, str) and name not in names:
+60:                 names.append(name)
+61:         speaker = event.get("player") or event.get("speaker")
+62:         if isinstance(speaker, str) and speaker.startswith("Player") and speaker
+63:             names.append(speaker)
+64:     if not names:
+65:         raise SystemExit("players not found in log")
+66: 
+67:     def _key(name: str) -> int:
+68:         digits = re.findall(r"\d+", name)
+69:         return int(digits[0]) if digits else 0
+70: 
+71:     return events, tuple(sorted(names, key=_key))
+72: 

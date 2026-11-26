@@ -1,0 +1,10 @@
+.........................F                                               [100%]
+================================== FAILURES ===================================
+__________ test_cap_adopts_loaded_value_when_smaller_than_modelfile ___________
+tests\test_task065_operational_stability.py:630: in test_cap_adopts_loaded_value_when_smaller_than_modelfile
+    assert refreshed.integrity_requested_limit == 12288
+E   AssertionError: assert 8192 == 12288
+E    +  where 8192 = EffectiveContextResolution(limit=4096, source='context_integrity_cap', candidates={'player_setting': 8192, 'api_ps_loa...api_ps_loaded', integrity_requested_limit=8192, integrity_policy='cap', loaded_context_from_ps=4096, provisional=False).integrity_requested_limit
+=========================== short test summary info ===========================
+FAILED tests/test_task065_operational_stability.py::test_cap_adopts_loaded_value_when_smaller_than_modelfile
+1 failed, 25 passed in 0.36s

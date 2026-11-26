@@ -1,0 +1,225 @@
+===== cli.py
+--- [add_argument\("--(prompt-layout|continuity|day-timeline|context-integrity|timeline-intent|name-normalization|thinking|body-reservation)] total_lines=3363 hits=0
+--- [context_strategy|--log-dir|logger\.|GameLogger\(] total_lines=3363 hits=31
+722: strategy = diagnostic_record.get("context_strategy")
+724: strategies = stats["context_strategy_counts"]
+1259: "context_strategy_counts": {},
+1678: "context_strategy": self.metadata.get(
+1679: "context_strategy", "hybrid_retrieval"
+2388: "context_strategy": getattr(
+2389: args, "context_strategy", "hybrid_retrieval"
+2539: logger = GameLogger(game_id, log_dir, meta, private_enabled=private_logging)
+2541: if logger.private_log_file is not None:
+2542: print(f"管理者用JSONLログ保存先: {logger.private_log_file}")
+2560: logger.append_record(public_event, event)
+2785: logger.append_record(public_event, event)
+2818: logger.finalize(state, traces=None, error=err_msg)
+2819: print(f"ログを保存しました: {logger.log_file}")
+2843: context_strategy=getattr(
+2844: args, "context_strategy", "hybrid_retrieval"
+2860: logger.append_record(
+2869: logger.finalize(state, traces=traces, error="interrupted")
+2870: print(f"ログ保存完了: {logger.log_file}")
+2888: logger.append_record({
+2899: logger.append_record({
+2909: logger.append_record({
+2931: logger.append_record({
+2955: logger.append_record({
+2968: logger.finalize(state, traces=traces, error=str(err))
+2969: print(f"ログを保存しました: {logger.log_file}")
+2976: logger.finalize(state, traces=traces, error=str(exc))
+2977: print(f"ログを保存しました: {logger.log_file}")
+3007: logger.finalize(state, traces=traces)
+3009: print(f"JSONLログ保存先: {logger.log_file}")
+3331: "--log-dir",
+--- [actions\s*=|OllamaActions|client\.ping|base_url] total_lines=3363 hits=10
+34: OllamaActions,
+978: leak_actions = stats["secret_leak_actions"]
+1431: actions = int(stats.get("actions", 0)) or 0
+1467: actions = stats["actions"]
+2420: "base_url": args.base_url,
+2814: client = OllamaClient(base_url=args.base_url, timeout=args.timeout, max_retries=2)
+2815: if not client.ping():
+2816: err_msg = f"Ollamaサーバー（{args.base_url}）に接続できません。Ollamaが起動しているか確認してください。"
+2834: actions = OllamaActions(
+2848: actions = MockActions()
+--- ["avg_|ledger_metrics\[|print\(f"] total_lines=3363 hits=60
+389: self._ledger_metrics["discussion_claim_calls"] += 1
+391: self._ledger_metrics["llm_requests_sent"] += 1
+394: self._ledger_metrics["retry_requests_sent"] += 1
+396: self._ledger_metrics["completed_actions"] += 1
+397: self._ledger_metrics["retries"] += int(
+404: self._ledger_metrics["llm_requests_sent"] += transport_retries
+405: self._ledger_metrics["retry_requests_sent"] += transport_retries
+406: self._ledger_metrics["fallbacks"] += int(
+410: self._ledger_metrics["discussion_bodies"] += 1
+411: self._ledger_metrics["discussion_bodies_preserved"] += int(
+415: self._ledger_metrics["discussion_elapsed_seconds"] = round(
+416: float(self._ledger_metrics["discussion_elapsed_seconds"])
+420: self._ledger_metrics["llm_elapsed_seconds"] = round(
+421: float(self._ledger_metrics["llm_elapsed_seconds"])
+427: self._ledger_metrics["question_not_answered"] += 1
+430: self._ledger_metrics["question_checks"] += 1
+432: self._ledger_metrics["question_directed"] += 1
+434: self._ledger_metrics["question_answered"] += 1
+436: self._ledger_metrics["question_answer_forced"] += 1
+438: self._ledger_metrics["ledger_repairs"] += 1
+441: self._ledger_metrics["novelty_measurements"] += 1
+443: self._ledger_metrics["novelty_present"] += 1
+444: self._ledger_metrics["novelty_restated_topics"] += int(
+447: self._ledger_metrics["novelty_legitimate_repetitions"] += int(
+460: self._ledger_metrics["low_novelty_kept"] += 1
+462: self._ledger_metrics["novelty_appends"] += 1
+468: self._ledger_metrics["discussion_regenerations"] += 1
+470: self._ledger_metrics["duplicate_claims_suppressed"] += 1
+477: self._ledger_metrics["public_claim_updates"] += 1
+479: self._ledger_metrics["role_claims_recorded"] += 1
+481: self._ledger_metrics["verdict_lines_self_reported"] += 1
+484: self._ledger_metrics["role_claims_disallowed"] += 1
+511: self._ledger_metrics["timeline_reference_checks"] += 1
+513: self._ledger_metrics["future_event_references"] += findings
+514: self._ledger_metrics["timeline_attributed_references"] += int(
+517: self._ledger_metrics["timeline_unresolvable_references"] += int(
+584: self._ledger_metrics["discussion_context_selections"] += 1
+589: self._ledger_metrics["day_timeline_chars_total"] += max(
+592: self._ledger_metrics["day_timeline_sections"] += 1
+598: self._ledger_metrics["day_timeline_lines_total"] += max(
+605: self._ledger_metrics["evidence_char_count_total"] += max(
+612: self._ledger_metrics["prompt_requests_contracted"] += 1
+613: self._ledger_metrics["prompt_user_char_total"] += max(
+616: if int(user_chars) > int(self._ledger_metrics["prompt_user_char_max"]):
+617: self._ledger_metrics["prompt_user_char_max"] = max(
+643: self._ledger_metrics[metric] += max(0, int(value))
+679: self._ledger_metrics[metric] += max(0, int(value))
+682: self._ledger_metrics["continuity_sections"] += 1
+702: self._ledger_metrics[metric] += max(0.0, float(value))
+704: self._ledger_metrics["layered_compression_requests"] += 1
+710: self._ledger_metrics["prompt_dedup_references"] += max(0, int(dedup_refs))
+717: self._ledger_metrics[key] += 1
+842: self._ledger_metrics["role_boundary_char_total"] += max(0, int(boundary_chars))
+844: self._ledger_metrics["role_boundary_sections"] += 1
+857: self._ledger_metrics[metric] += max(0.0, float(value))
+870: self._ledger_metrics["role_ability_assertions_observed"] += 1
+877: self._ledger_metrics["unsupported_role_action_count"] += 1
+883: self._ledger_metrics["role_action_engine_actions"] += 1
+885: self._ledger_metrics["claim_vs_engine_conflict_count"] += 1
+892: self._ledger_metrics["claim_to_ability_delta_sum"] += float(
+===== llm_actions.py
+--- [options\["num_ctx"\]|"num_ctx"] total_lines=6755 hits=33
+306: requested_ctx = options.get("num_ctx")
+325: fitted_options["num_ctx"] = max(min_ctx, min(needed, ceiling))
+337: fitted_options["num_ctx"] = fitted
+343: fitted_options["num_ctx"] = expanded
+868: "player_setting": options.get("num_ctx") if options else None,
+870: self.options.get("num_ctx") if self.options else None
+1131: allocatable = options.get("num_ctx") if options else None
+5288: options["num_ctx"] = actor.num_ctx
+5290: "num_ctx" not in options
+5296: options["num_ctx"] = (
+5303: and isinstance(options.get("num_ctx"), int)
+5304: and not isinstance(options.get("num_ctx"), bool)
+5306: options["num_ctx"] = min(
+5307: int(options["num_ctx"]), actor.max_num_ctx
+5437: allocatable = options.get("num_ctx") if options else None
+5519: requested_ctx = fitted.get("num_ctx")
+5539: fitted["num_ctx"] = fitted_ctx
+5543: fitted["num_ctx"] = fitted_ctx
+5884: num_ctx=request_options.get("num_ctx"),
+6264: num_ctx_before_dynamic_fit = options.get("num_ctx") if options else None
+6284: num_ctx_before_fit = options.get("num_ctx") if options else None
+6310: requested_num_ctx = options.get("num_ctx") if options else None
+6320: and (self.options is None or self.options.get("num_ctx") is None)
+6326: and (self.options is None or self.options.get("num_ctx") is None)
+6329: elif self.options is not None and self.options.get("num_ctx") is not None:
+6333: and isinstance(self.options.get("num_ctx"), int)
+6334: and self.options["num_ctx"] > actor.max_num_ctx
+6367: requested_num_ctx=request_options.get("num_ctx"),
+6406: effective_requested_num_ctx=request_options.get("num_ctx"),
+6481: request_options.get("num_ctx")
+6483: and isinstance(request_options.get("num_ctx"), int)
+6484: and not isinstance(request_options.get("num_ctx"), bool)
+6596: "num_ctx",
+--- [context_diagnostics|process_env_context|resolve_effective_context_limit|_context_budgets] total_lines=6755 hits=20
+17: process_env_context,
+18: resolve_effective_context_limit,
+684: self._context_budgets: dict[str, EffectiveContextResolution] = {}
+852: cached = self._context_budgets.get(model)
+858: env_value, env_key = process_env_context()
+861: if callable(getattr(self.client, "context_diagnostics", None)):
+862: diagnostics = self.client.context_diagnostics(model)
+866: resolved = resolve_effective_context_limit(
+877: self._context_budgets[model] = resolved
+1371: context_diagnostics=prompt_ctx.diagnostics,
+1468: context_diagnostics=prompt_ctx.diagnostics,
+2169: context_diagnostics: dict[str, object] | None = None,
+2171: if context_diagnostics is not None:
+2177: **context_diagnostics,
+6307: context_diagnostics: dict[str, object] = {}
+6308: if callable(getattr(self.client, "context_diagnostics", None)):
+6309: context_diagnostics = self.client.context_diagnostics(actor.model)
+6396: context_diagnostics=context_diagnostics,
+6475: if callable(getattr(self.client, "context_diagnostics", None)):
+6476: after_diagnostics = self.client.context_diagnostics(actor.model)
+--- [def _emit|def _record_model_timeout|def _slow_model|thinking_budget\"\]] total_lines=6755 hits=5
+4791: def _emit_placeholder_line_dropped(
+5381: def _slow_model(self, actor: Player) -> bool:
+5471: def _record_model_timeout(
+5944: capabilities["thinking_budget"] = False
+6703: def _emit(
+--- [def _transport_failure_reason] total_lines=6755 hits=1
+6603: def _transport_failure_reason(error: OllamaError) -> str:
+--- [answers_previous_question|_is_directed_to_player] total_lines=6755 hits=10
+73: answers_previous_question,
+1170: directed = PromptBuilder._is_directed_to_player(
+1179: and answers_previous_question(extracted, previous_message.content)
+1215: and PromptBuilder._is_directed_to_player(
+1218: and answers_previous_question(extracted, previous_message.content)
+3545: if is_question and PromptBuilder._is_directed_to_player(
+3586: if PromptBuilder._is_directed_to_player(
+3911: ) and PromptBuilder._is_directed_to_player(
+4280: and PromptBuilder._is_directed_to_player(
+4947: and PromptBuilder._is_directed_to_player(
+--- [LEDGER_REPAIR_ISSUES|topic_ledger|claim_ledger|public_timeline] total_lines=6755 hits=8
+395: LEDGER_REPAIR_ISSUES: frozenset[str] = frozenset(
+1198: 既出論点台帳（`state.topic_ledger`）と本人のこれまでの立場
+1224: prior_topics=self.state.topic_ledger.topics_for_day(self.state.day),
+1383: has_claim = player in self.state.claim_ledger.public_claims or any(
+1407: (player, target) not in self.state.claim_ledger.public_seer_results
+2627: and response_issue in LEDGER_REPAIR_ISSUES
+2699: and response_issue in LEDGER_REPAIR_ISSUES
+5224: return self.state.claim_ledger.public_seer_results.get(
+--- [import (context_budget|output_budget_trace|thinking_profile)] total_lines=6755 hits=0
+===== engine.py
+--- [answers_previous_question|register_topic|claim_ledger\.|topic_ledger\.|fact_ledger\.|hypothesis_ledger\.] total_lines=2783 hits=18
+30: answers_previous_question,
+315: for fact in state.fact_ledger.confirmed_facts
+378: def _answers_previous_question(text: str, previous_content: str) -> bool:
+380: return answers_previous_question(text, previous_content)
+395: ) or (claimant, target) in state.claim_ledger.public_seer_results
+495: and not _answers_previous_question(stripped, previous_message.content)
+1225: self.state.fact_ledger.confirmed_facts.append(
+1254: self.state.fact_ledger.confirmed_facts.append(
+1784: self.state.fact_ledger.confirmed_facts.append(
+1892: ledger_claim = self.state.claim_ledger.public_claims.get(speaker)
+1941: self.state.claim_ledger.public_claims[speaker] = ledger_claim
+1982: self.state.fact_ledger.public_claims.append(
+2048: previous_result = self.state.claim_ledger.public_seer_results.get(result_key)
+2071: self.state.claim_ledger.public_seer_results[result_key] = claimed_result
+2110: self.state.fact_ledger.public_claims.append(
+2211: self.state.fact_ledger.model_inferences.append(
+2382: and not _answers_previous_question(content, previous_content)
+2740: self.state.fact_ledger.confirmed_facts.append(
+--- [inspect_public_body|_timeline_reference_fields|observation_metrics] total_lines=2783 hits=4
+72: inspect_public_body,
+2528: self._timeline_reference_fields(appended, snapshot, policy)
+2606: def _timeline_reference_fields(
+2618: report = inspect_public_body(
+===== prompts.py
+--- [def _is_directed_to_player|Player\\\\s|プレイヤー] total_lines=3545 hits=2
+1894: # TASK-055: 結果行は全員一律で「そのプレイヤー自身の申告」だと明示する。
+3457: def _is_directed_to_player(
+--- [pending_speakers|未発言|まだ発言] total_lines=3545 hits=0
+===== discussion_format.py
+--- [def answers_previous_question] total_lines=358 hits=1
+46: def answers_previous_question(text: str, previous_content: str) -> bool:
+new modules import OK

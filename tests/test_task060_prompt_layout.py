@@ -5,7 +5,8 @@
 だからといって口調・論点・結論や推理の順番を決める指示は足さない（発言の自由は契約の
 Free行どおりモデル側に残す）。本テストは以下を固定する（実機LLMは使わない）。
 
-1. ポリシー: 既定 v3。`prompt_contract_policy=legacy` では旧字节順が勝つ（A/B基準を壊さない）。
+1. ポリシー: 既定は v5（TASK-064の能力境界節込み）。`prompt_contract_policy=legacy` では旧字节順
+   が勝つ（A/B基準を壊さない）。v4（TASK-062の論理状態）と v3（TASK-060）も明示指定で参照できる。
 2. 凍結した節順（PROMPT_LAYOUT_V3_ORDER）はハード制約を満たし、コストモデルの貪欲探索が
    同じ順を最良として再現する（決定的・LL不使用）。
 3. v3 では理論カードが独立節（optional／中部帯）になり、段階除去で落とせる。
@@ -48,11 +49,15 @@ from werewolf.prompt_layout import (
     PROMPT_LAYOUT_POLICY_V2,
     PROMPT_LAYOUT_POLICY_V3,
     PROMPT_LAYOUT_POLICY_V4,
+    PROMPT_LAYOUT_POLICY_V5,
     PROMPT_LAYOUT_V3,
     PROMPT_LAYOUT_V3_ORDER,
     PROMPT_LAYOUT_V4,
     PROMPT_LAYOUT_V4_ORDER,
+    PROMPT_LAYOUT_V5,
+    PROMPT_LAYOUT_V5_ORDER,
     REPRESENTATIVE_SECTION_CHARS,
+    ROLE_BOUNDARY_SECTION,
     adopted_layout_score,
     adjacency_gap,
     attention_prior,
@@ -64,7 +69,9 @@ from werewolf.prompt_layout import (
     resolve_prompt_layout,
     score_order,
     search_prompt_orders,
+    search_prompt_orders_v5,
     v3_layout_score,
+    v4_layout_score,
     validate_declared_order,
     weak_middle_must_use_chars,
 )
@@ -141,22 +148,25 @@ def _ctx(state: GameState, actor_name: str, layout: str, contract: str = "simpli
 # ---------------------------------------------------------------------------
 # 1. ポリシー解決（既定 v3 / legacy契約では旧字节順が勝つ）
 # ---------------------------------------------------------------------------
-def test_layout_policy_defaults_to_v4_and_normalizes_aliases() -> None:
-    # TASK-062: 既定は v4（論理状態節を発言証拠の直後・現在質問の直前へ置く配置）。
-    # v3 は A/B比較の基準側として明示指定で残る。
-    assert PROMPT_LAYOUT_POLICY_DEFAULT == PROMPT_LAYOUT_POLICY_V4
-    assert normalize_prompt_layout_policy(None) == "v4"
+def test_layout_policy_defaults_to_v5_and_normalizes_aliases() -> None:
+    # TASK-064: 既定は v5（能力境界節を現在質問の直後・自分の発言の直前へ置く配置）。
+    # v4（論理状態のみ）と v3 は A/B比較の基準側として明示指定で残る。
+    assert PROMPT_LAYOUT_POLICY_DEFAULT == PROMPT_LAYOUT_POLICY_V5
+    assert normalize_prompt_layout_policy(None) == "v5"
     assert normalize_prompt_layout_policy("V2 ") == "v2"
     assert normalize_prompt_layout_policy("v3") == PROMPT_LAYOUT_POLICY_V3
     assert normalize_prompt_layout_policy("continuity") == "v4"
+    assert normalize_prompt_layout_policy("boundary") == "v5"
+    assert normalize_prompt_layout_policy(PROMPT_LAYOUT_V5) == "v5"
     assert normalize_prompt_layout_policy("auto") == PROMPT_LAYOUT_POLICY_AUTO
-    assert normalize_prompt_layout_policy(True) is PROMPT_LAYOUT_POLICY_V4
+    assert normalize_prompt_layout_policy(True) is PROMPT_LAYOUT_POLICY_V5
     assert normalize_prompt_layout_policy(False) is PROMPT_LAYOUT_POLICY_V2
     # 旧ラベル（legacy/off）は「契約に追随」を意味する auto として扱う
     assert normalize_prompt_layout_policy(PROMPT_LAYOUT_LEGACY) == PROMPT_LAYOUT_POLICY_AUTO
-    assert normalize_prompt_layout_policy("未知値") == "v4"
+    assert normalize_prompt_layout_policy("未知値") == "v5"
     assert prompt_layout_policy_label("v2_attention") == "v2"
     # レイアウトラベル（ログに出る値）も設定値へ写る
+    assert prompt_layout_policy_label(PROMPT_LAYOUT_V5) == "v5"
     assert prompt_layout_policy_label(PROMPT_LAYOUT_V4) == "v4"
     assert prompt_layout_policy_label(PROMPT_LAYOUT_V3) == "v3"
 
@@ -166,9 +176,11 @@ def test_legacy_contract_keeps_the_pre_task060_byte_order() -> None:
     assert resolve_prompt_layout("v3", "legacy") == PROMPT_LAYOUT_LEGACY
     assert resolve_prompt_layout("v2", "legacy") == PROMPT_LAYOUT_LEGACY
     assert resolve_prompt_layout("v4", "legacy") == PROMPT_LAYOUT_LEGACY
+    assert resolve_prompt_layout("v5", "legacy") == PROMPT_LAYOUT_LEGACY
     assert resolve_prompt_layout(None, "legacy_v1") == PROMPT_LAYOUT_LEGACY
-    # simplified では auto / v4 が v4、明示した v3 / v2 はそれぞれの配置のまま
-    assert resolve_prompt_layout("auto", "simplified") == PROMPT_LAYOUT_V4
+    # simplified では auto / v5 が v5、明示した v4 / v3 / v2 はそれぞれの配置のまま
+    assert resolve_prompt_layout("auto", "simplified") == PROMPT_LAYOUT_V5
+    assert resolve_prompt_layout("v5", "simplified") == PROMPT_LAYOUT_V5
     assert resolve_prompt_layout("v4", "simplified") == PROMPT_LAYOUT_V4
     assert resolve_prompt_layout("v3", "simplified") == PROMPT_LAYOUT_V3
     assert resolve_prompt_layout("v2", "simplified") == PROMPT_LAYOUT_V2
@@ -180,9 +192,12 @@ def test_game_state_normalizes_layout_policy() -> None:
     state.prompt_layout_policy = "v2_attention"
     GameState.__post_init__(state)
     assert state.prompt_layout_policy == "v2"
-    state.prompt_layout_policy = "bogus"
+    state.prompt_layout_policy = "v4_continuity"
     GameState.__post_init__(state)
     assert state.prompt_layout_policy == "v4"
+    state.prompt_layout_policy = "bogus"
+    GameState.__post_init__(state)
+    assert state.prompt_layout_policy == "v5"
 
 
 # ---------------------------------------------------------------------------
@@ -224,17 +239,17 @@ def test_score_order_penalizes_moving_the_question_away_from_evidence() -> None:
 # ---------------------------------------------------------------------------
 # 3. 凍結した v3 節順（ハード制約と探索再現）
 # ---------------------------------------------------------------------------
-def test_frozen_v4_order_is_legal_and_reproduced_by_the_search() -> None:
-    """凍結した v4 節順がハード制約を満たし、貪欲探索が同じ順を最良として再現する。"""
-    assert validate_declared_order(PROMPT_LAYOUT_V4_ORDER) == []
-    assert len(set(PROMPT_LAYOUT_V4_ORDER)) == len(PROMPT_LAYOUT_V4_ORDER)
+def test_frozen_v5_order_is_legal_and_reproduced_by_the_search() -> None:
+    """凍結した v5 節順がハード制約を満たし、境界込みの探索が同じ順を最良として再現する。"""
+    assert validate_declared_order(PROMPT_LAYOUT_V5_ORDER) == []
+    assert len(set(PROMPT_LAYOUT_V5_ORDER)) == len(PROMPT_LAYOUT_V5_ORDER)
     chars = dict(REPRESENTATIVE_SECTION_CHARS)
     frozen = adopted_layout_score()
     assert frozen.violations == ()
-    assert frozen.order == PROMPT_LAYOUT_V4_ORDER
+    assert frozen.order == PROMPT_LAYOUT_V5_ORDER
     # 代表字数での貪欲探索（単一ブロック移動＋2ブロック入替）が凍結順をそのまま出す
-    best = search_prompt_orders(chars, top_k=1)[0]
-    assert tuple(best["layout_order"]) == PROMPT_LAYOUT_V4_ORDER
+    best = search_prompt_orders_v5(chars, top_k=1)[0]
+    assert tuple(best["layout_order"]) == PROMPT_LAYOUT_V5_ORDER
     assert best["hard_violations"] == []
     # v2 の宣言順はハード制約で弾かれる（案内が形式の後／自分の記録が分断）
     v2_like = score_order(PROMPT_LAYOUT_V2_ORDER, chars)
@@ -243,21 +258,30 @@ def test_frozen_v4_order_is_legal_and_reproduced_by_the_search() -> None:
         "guidelines_after_format",
     }
     assert frozen.score > v2_like.score
-    # 同じ節を末尾側（議論案内の直前）へ足すだけの配置より、v4 は上（順番が挙動を決める）
-    appended = list(PROMPT_LAYOUT_V3_ORDER)
-    appended.insert(appended.index("discussion_guidelines"), CONTINUITY_STATE_SECTION)
+    # 境界節を末尾側（議論案内の直前）へ足すだけの配置より、v5 は上（順番が挙動を決める）
+    appended = list(PROMPT_LAYOUT_V4_ORDER)
+    appended.insert(appended.index("discussion_guidelines"), ROLE_BOUNDARY_SECTION)
     assert score_order(tuple(appended), chars).score < frozen.score
 
 
-def test_v3_baseline_stays_legal_and_is_kept_for_ab_reference() -> None:
-    """A/B基準（TASK-060の v3）は節順そのままで無傷のまま参照できる。"""
-    assert validate_declared_order(PROMPT_LAYOUT_V3_ORDER) == []
-    assert len(set(PROMPT_LAYOUT_V3_ORDER)) == len(PROMPT_LAYOUT_V3_ORDER)
-    baseline = v3_layout_score()
-    assert baseline.order == PROMPT_LAYOUT_V3_ORDER
+def test_v4_baseline_stays_legal_and_is_kept_for_ab_reference() -> None:
+    """A/B基準（TASK-062の v4）は節順そのままで無傷のまま参照できる（境界節なし）。"""
+    assert validate_declared_order(PROMPT_LAYOUT_V4_ORDER) == []
+    assert len(set(PROMPT_LAYOUT_V4_ORDER)) == len(PROMPT_LAYOUT_V4_ORDER)
+    baseline = v4_layout_score()
+    assert baseline.order == PROMPT_LAYOUT_V4_ORDER
     assert baseline.violations == ()
-    assert CONTINUITY_STATE_SECTION not in PROMPT_LAYOUT_V3_ORDER
+    assert ROLE_BOUNDARY_SECTION not in PROMPT_LAYOUT_V4_ORDER
     assert CONTINUITY_STATE_SECTION in PROMPT_LAYOUT_V4_ORDER
+    # v3（状態節も境界節なし）も参照可能
+    v3_chars = {
+        key: value
+        for key, value in dict(REPRESENTATIVE_SECTION_CHARS).items()
+        if key not in {CONTINUITY_STATE_SECTION, ROLE_BOUNDARY_SECTION}
+    }
+    v3_baseline = v3_layout_score(v3_chars)
+    assert v3_baseline.order == PROMPT_LAYOUT_V3_ORDER
+    assert v3_baseline.violations == ()
 
 
 def test_state_section_must_follow_its_id_index() -> None:

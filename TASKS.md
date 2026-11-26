@@ -2690,3 +2690,215 @@ thinking を一律 off にしたり推理手順を示す変更はしていない
 観測済み思考を静的天井で削らないこと、checkpoint先頭の短縮再要求（投票台帳を省く）、
 CLIのカテゴリ集計。`python -m pytest -q` で 269 passed（実機テストは行っていない）。
 
+## TASK-064 最新ゲーム分析 — 役職騙りと能力行使の境界整理・コンテキスト配置改善
+
+状態：未着手（実機ログ `game_bcd7c97e7e48` で課題を確認）
+
+### 背景
+
+`game_bcd7c97e7e48` でPlayer 4は実際には村人だったが、Day 1 T3に「Player 1を占って狼と判定した」と発言した。直前のT1/T2ではPlayer 1の占い師COを慎重に検討しており、自分が占い師である根拠は提示していなかった。直前の送信は`seer_result_without_claim`で解析失敗し、再要求後に占い師COと占い結果が公開された。
+
+設定上は`allow_bluff_role_claim=true`なので、村人・人狼・狂人が占い師COをする自由そのものは残すべきである。一方、現在のログでは「占い師だと主張する」ことと「エンジン上で実際に占い能力を行使した」ことが、compatibility text経路では同じ`public_seer_results`へ入りやすい。今回、秘密情報漏洩は検出されていないが、未検証のブラフがモデル・診断・再要求側で実結果のように読まれる余地がある。
+
+また、同ゲームでは全体の平均user promptが約19,513字、最大25,298字、平均coreが約15,278字で、Player 4の当該プロンプトも約20,877字だった。`[CONTINUITY_CHECKPOINT]`、Fact/Claim/Hypothesisの各台帳、役職主張、セオリーカード、出力契約が同時に提示されるため、役職能力の境界情報が長い文脈の中で埋もれ、再要求時により強い表現へ変換された可能性がある。
+
+### 目的
+
+役職騙り・ブラフ・疑いの表明は自由に保ちながら、エンジンが実際に実行した能力行動と、プレイヤーが公開した未検証の主張を明確に分離する。役職能力の境界を短く目立つ位置へ配置し、コンテキスト量と再要求時の混同を減らす。
+
+### 実装案
+
+1. `RoleActionProvenance`を追加し、役職情報を`engine_action`（実際に実行された占い・襲撃等）、`public_role_claim`（本人がそう主張した）、`unsupported_role_action`（実行記録がないのに能力行使として発言した）、`inference`（他者の推測）へ分離する。`true_role`・非公開占い結果は公開台帳へ混ぜない。
+2. 「私は占った」「占い結果は狼だった」のような能力行使表現を検出しても本文は変更せず、`unsupported_role_action`として観測する。COそのものは許可し、`allow_bluff_role_claim`の設定で拒否・許可を選べるようにする。
+3. Claim Ledgerには「Player 4が占い師を名乗った」「Player 1を狼と主張した」だけを載せ、Fact Ledgerには実際のエンジン占い結果だけを載せる。両者の表示記号と`authority`を短い固定行で分ける。
+4. プロンプト順は、`[CONTINUITY_CHECKPOINT]`の直後または現在質問の直前に、次の短い境界節を置く。
+   - 実行済みの自分の能力行動
+   - 自分が公開した役職主張
+   - 公開主張は真実とは限らないこと
+   - 役職騙り・疑い・立場変更は自由であること
+   エンジン結果・公開主張・推測の本文を重複掲載しない。
+5. `seer_result_without_claim`の再要求では、長い旧プロンプトを再送せず、能力行動の実行記録、公開主張の状態、現在質問、出力形式だけを渡す。再要求が未検証の能力行使を新たに生成していないかを比較する。
+6. `role_action_provenance_counts`、`unsupported_role_action_count`、`claim_vs_engine_conflict_count`、`claim_boundary_chars`、役職主張の初出から能力行使表現までの距離をモデル別・行動別に記録する。
+
+### 設計上の制約
+
+- 役職騙り、ブラフ、疑問形、仮定形、他者の発言引用を自動修正・禁止しない。
+- 「村人は占い師COしてはいけない」のようなゲーム外のセオリーを強制しない。
+- `unsupported_role_action`は観測・分類を目的とし、本文を再生成して無害化する目的には使わない。
+- 能力行動の事実性だけを分離し、口調・論点・結論・推理順はモデルに委ねる。
+
+### 完了条件
+
+- Player 4型の発言を、役職騙りとして公開可能な主張と、エンジン未実行の能力行使表現へ分類できる。
+- 実際の占い結果・襲撃対象・真役職が公開台帳やcheckpointへ混入しない。
+- `seer_result_without_claim`再要求で未検証結果を事実化せず、短縮プロンプトが通常プロンプトより明確に短い。
+- 役職騙りを許可した状態で、CO・ブラフ・疑問・仮定の本文が変更されない。
+- 既存の`role_provenance`、`continuity`、`prompt_layout v4`、秘密情報ガード、時系列検査との整合をLL不使用テストで確認する。
+- モックA/Bでコンテキスト量・能力境界違反・再要求率を測定し、実機Ollamaでは同一seedでモデル別比較を行う。
+
+## TASK-064 実装記録 — 役職騙りと能力行使の境界整理（2026-11-24）
+
+### 追加・変更ファイル
+
+- 新規: `src/werewolf/role_action_provenance.py`（`engine_action` / `public_role_claim` / `unsupported_role_action` / `inference` の4分類台帳と能力表現検出）、`tests/test_task064_role_action_boundary.py`（22テスト）。
+- 変更: `models.py`（`GameState.role_action_provenance`）、`prompt_contract.py`（core節 `role_action_boundary` を登録）、`core_compression.py`（`anchor`層＝どの設定でも無傷）、`prompt_layout.py`（`v5`ポリシー・代表字数・隣接目標・「主張索引より前に置かない」ハード制約・`search_prompt_orders_v5()`）、`prompts.py`（`_role_action_boundary_section` と診断キー `role_boundary_section_chars`）、`engine.py`（夜の実行を本人用実行記録へ登録し、公開CO初出と能力断定の距離を中立イベントで発行。公開本文には一切書き込まない）、`llm_actions.py`（CO補正プロンプトを短縮改稿し、再要求で増えた能力表現を差分観測。ツールCO publish でも初出距離を記録）、`cli.py`（`--prompt-layout v5` を既定化し境界節・観測の指標を総合／モデル別に配線）、`tests/test_task060_prompt_layout.py`（既定 v5、A/B基準は v4 / v3 のまま参照できる形へ更新）。
+
+### 挙動（設計思想との対応）
+
+1. **節約**: `[ROLE_ACTION_BOUNDARY]` はエンジン実行（`[DONE]`＝占いを実施した夜数・襲撃夜数だけ）と本人申告（`[CLAIM]`＝直近2件の `[claim:N]` と unverified 注記）を2行相当に畳む固定節。エンジン結果・公開主張・推測の本文は再掲しない（結果は私人欄、CO本文は CLAIM_LEDGER が既に持つ）。CO補正の再要求では旧プロンプトを再送せず、実行記録・主張状態・現在の質問（200字まで）・出力形式だけを送る。
+2. **一貫性**: 実行済み行動（エンジン）と自分の発言（申告）を台帳で分けて保つ。「Player 4が占い師を名乗った」は claim、「実際に占った夜」は engine で、表記記号も `[SAID]`/`[CONFIRMED]` 系と同じ権威分離。CO初出→能力断定のターン距離（`avg_claim_to_ability_turn_delta`）を距離指標として残す。
+3. **合理的な議論**: `[DONE]`／`[CLAIM]` の1行説明で「エンジン実行の事実」と「自分の申告（未検証）」の読み違えを防ぐ。CO補正は Options A/B を並べ、継続か撤回かの結論はモデルに残す。
+4. **自由の非拘束**: 検出は観測専用。疑問形・仮定形・引用・否定は行使として数えず（`hedged_mentions_observed`）、三人称言及は `inference` に逃がす。本文の再生成・無害化・言い換えは一切しない。ブラフ可否は従来の `--bluff-role-claim`（既定 allow）のままで、境界節に命令文・誘導文言を増やさないことはテストで禁止語照合済み。
+
+### プロンプト順の最適化（LL不使用プローブで凍結）
+
+代表字数26,340での貪欲探索（単一ブロック移動＋2ブロック入替・乱数固定）が最良とした位置—現在質問の直後・自分の発言の直前（`question_block → direct_answer → role_action_boundary → own_speeches → reasoning_memo_own`、索引 `claim_ledger` より前禁止のハード制約充足、violations=0）—を `PROMPT_LAYOUT_V5_ORDER` として凍結し、`search_prompt_orders_v5()` が同じ節順を再現する。同じ節を議論案内の直前へ足すだけの配置は同コストモデルで下位（`_analysis/task064_order_out.txt`）。隣接距離は RBOUND→質問 0.0099／RBOUND→自分の発言 0.0000、STATE→質問 0.0034 のまま維持（v4の連鎖は壊さない）。
+
+### 効果の実測（モック・LL不使用: `_analysis/task064_effect_probe.py`）
+
+- 議論プロンプト典型例（Day1・発言あり）: v5=14,011字 / v4=13,831字（+180字＝境界節そのものの実費。節顺の崩れ 0）。節約ではなく「読み違えの防止」に使う最小限のコストとして計上した。
+- 検出コーパス10行（`game_bcd7c97e7e48` の Player 4 型「私が占った結果、Player 1は狼だった」、対象=判定形式、婉曲、三人称、COなし能力語、英語、疑問形）: 断定4・非行使3・三人称3を正しく分離し誤検出0。婉曲・疑問は unsupported に数えない。
+- CO補正プロンプト（`seer_result_without_claim`）: 通常プロンプト 13,994字 → 補正時 688字（比率 0.049、全seed共通で0.1未満）。完了条件の「再要求が通常プロンプトより明確に短い」を充足。結果行を伴う選択肢Aを出すのはエンジン実行記録のある本人だけで、非保有者は結果行なしの主張か質問への回答のみ（未検証結果が事実として再強化されない）。
+
+### テストとA/B比較の進め方
+
+- `python -m pytest -q` → **291 passed**、`compileall`／`git diff --check`もクリーン（`_analysis/task064_pytest_full.txt`）。
+- A/Bは同一seedで `--prompt-layout v5` と `v4` を走らせ、`avg_claim_boundary_chars`、`avg_gap_role_boundary_to_question`、`avg_gap_role_boundary_to_own_speeches`、`unsupported_role_action_count`、`claim_vs_engine_conflict_count`、`retry_added_ability_expressions`、`co_correction_events` / `avg_co_correction_reask_prompt_chars` / `co_correction_shortening_ratio`、`avg_claim_to_ability_turn_delta` と、CO補正リトライ率・parse失敗率・立場一貫性を突き合わせる。
+- 実機Ollamaでの同一seed比較（v5 vs v4、Player 4型の CO補正挙動を含む）は、ローカル環境の都合上まだ行っていない。
+
+## TASK-065 最新ゲーム分析 — 実効コンテキスト整合・thinking安定化・時系列検出精度・プレイヤー名正規化
+
+状態：実装済み（2026-11-25。LL不使用テスト313件とモック診断で確認。実機Ollamaの同一seed比較はローカル環境の都合上未実施で、同じ題名の「TASK-065 実装記録」を文末に置く）
+
+### 背景
+
+`game_425755ce9a83` は、議論の根拠接続・立場変更・投票理由の比較がこれまでで最も自然に行われたゲームの一つだった。`prompt_layout_violations=0`、`unsupported_role_action_count=0`、`claim_vs_engine_conflict_count=0`、本文保持率100%、フォールバック0件であり、TASK-062〜064の設計は議論品質を損なわずに機能している。
+
+一方、運用・診断面には次の残課題があった。
+
+1. Player 1の設定は`num_ctx=16384`だったが、ログ上の`Modelfile`とプロセス環境は4096だった。`effective_context_limit=16384`として送信を続けたものの、Player 1で通信失敗、約360秒のtimeout、思考予算枯渇が発生した。設定値・サーバー観測値・実際にロードされた値の不一致を、ゲーム開始前に検出できていない。
+2. 全体でパース失敗8件、再試行11件が発生した。Player 8のthinking-only、Player 1の投票時thinking-only、Player 3の出力上限切れなど、議論論理の問題ではなくモデル×行動別の出力予算問題が残っている。
+3. Day 2 T1のPlayer 1は、まだ発言していないPlayer 6へ説明を求めただけだったが、`speech_from_unspoken_player`として未来参照1件に分類された。過去発言を根拠にした未発言者の帰属と、これから質問する行為を分離できていない。
+4. `Player1`／`Player 1`などの表記ゆれにより`unknown_player_reference`のledger repairが発生した。本文は保持されているが、台帳・時系列診断・質問回答判定のノイズになっている。
+
+### 目的
+
+実際に使用されるコンテキスト長とログ上の採用値を一致させ、thinking・timeout・形式失敗を議論論理の失敗と混同せずに安定運用できるようにする。同時に、質問行為を未来参照として誤検出せず、プレイヤー名の表記ゆれを台帳の入口で吸収する。
+
+### 実装案
+
+1. **起動時のコンテキスト整合チェック**
+   - プレイヤー設定、Modelfile、`OLLAMA_CONTEXT_LENGTH`、`/api/ps`の実測値を`configured / server_observed / loaded / requested`として分離記録する。
+   - 設定値がサーバーまたはロード済みモデルの観測値を超える場合、送信前に明確なwarningまたは安全な採用値への縮退を行う。
+   - `num_ctx`を無条件に16kとして扱わず、実機で確認できた上限と動的コンテキストの要求値を区別する。
+   - Player 1のような強化モデルでは、ゲーム開始時に一度だけロード確認を行い、timeout発生後に初めて不一致を知る状態を避ける。
+
+2. **モデル×行動別のthinking安定化**
+   - `thinking-only`、`generation_cap`、`timeout`、`transport`、`output_format`を引き続き相互排他的に記録する。
+   - 実測されたthinking消費量に基づき、議論・投票・占い・CO補正ごとの本文最低量とthinking上限を調整する。
+   - 投票・短い能力行動でthinkingが本文予算を食い潰した場合は、長い通常プロンプトを再送せず、短縮状態＋現在の行動形式だけで再要求する。
+   - timeout後のモデル切替・`num_predict`縮小・thinking無効化は、モデル全体へ恒久適用せず、モデル×行動×直近失敗履歴に限定する。
+   - 本文が得られた場合は内容を保持し、予算安定化を理由に口調・論点・結論・推理順を変更しない。
+
+3. **時系列検出の意図分離**
+   - 未発言者について、次のカテゴリを分ける。
+     - `past_attribution_to_unspoken`: 未発言者が過去に述べたと断定する実質的な未来参照
+     - `future_question_to_unspoken`: これから説明・回答を求める質問
+     - `future_action_speculation`: これからの投票・夜行動などの推測
+   - 疑問文・依頼文・仮定文を無条件に無害扱いするのではなく、過去の発言内容を根拠としているか、未来の回答を求めているかを診断する。
+   - `future_event_references`は実質的な未来参照だけを集計し、質問行為は別メトリクスへ分離する。
+   - 本文は検出結果にかかわらず変更せず、自由な質問・誘導・疑いの表明を維持する。
+
+4. **プレイヤー名の正規化**
+   - 台帳登録・証拠ID解決・質問回答判定の入口で、`Player1`、`Player 1`、`player 1`などを正規名へ正規化する。
+   - 正規化前の本文は公開ログにそのまま残し、診断・台帳内部だけでcanonical nameを使用する。
+   - 存在しないプレイヤー名、曖昧な番号、引用内の名前は正規化しすぎず、従来どおり未解決参照として観測する。
+   - `unknown_player_reference`、`ledger_repair`、`unresolvable_references`の減少をモデル別・ゲーム別に確認する。
+
+5. **統合評価**
+   - `game_425755ce9a83`を基準ログとして、通常設定と整合チェック・安定化・意図分離・名前正規化を有効にした構成を同一seedで比較する。
+   - 勝敗だけでなく、`effective_context_limit`の不一致、実ロード値、timeout、thinking-only、再試行、本文保持率、未来参照率、質問行為数、ledger repair、時系列根拠率を比較する。
+   - 強化モデルをPlayer 1だけに置く場合と、通常モデルだけで構成する場合を分け、改善がモデル能力によるものか運用安定化によるものかを切り分ける。
+
+### 設計上の制約
+
+- コンテキスト整合チェックは実効値の把握と安全な縮退のために使い、議論本文へ余分な制約文を追加しない。
+- thinking安定化は生成予算・再要求・通信処理の制御に限定し、推理手順、結論、口調、話題を指定しない。
+- 未発言者への質問、ブラフ、疑い、仮定、立場変更を未来参照として禁止しない。
+- 時系列検出は観測専用であり、本文の自動修正・削除・再生成の理由にしない。
+- プレイヤー名正規化は内部台帳だけに適用し、公開発言の表記を改変しない。
+- 秘密情報境界、役職主張とエンジン行動のプロヴェナンス、発言本文の自由をTASK-064以前より弱めない。
+
+### 完了条件
+
+- 起動時または最初のロード時に、プレイヤー設定・Modelfile・サーバー・実ロード値の不一致を検出・記録できる。
+- Player 1型の強化モデルで、timeout・通信失敗・thinking-onlyをモデル×行動別に切り分け、再要求時の本文保持率を測定できる。
+- `future_event_references`が実質的な過去帰属だけを数え、未発言者への質問は別カウンタとして記録される。
+- `Player1`／`Player 1`の表記ゆれによる不要な`unknown_player_reference`とledger repairを削減できる。
+- 通常議論の本文、CO、ブラフ、疑問、仮定、立場変更は一字一句保持され、役職プロヴェナンス・秘密情報ガード・継続状態・prompt layout v5を壊さない。
+- LL不使用テスト、モック診断、同一seedの実機A/Bで、速度・コンテキスト量・再試行率・時系列精度・議論品質を比較して記録する。
+## TASK-065 実装記録 — 運用安定化4整理（2026-11-25）
+
+状態：実装済み（テスト・モック診断まで完了。実機Ollama比較はローカル環境の都合上まだ行っていない）
+
+### 追加・変更ファイル
+
+- 新規: `src/werewolf/context_integrity.py`（`configured / server_observed / loaded / requested` の分離評価と `off / warn / cap`）、`src/werewolf/name_resolution.py`（NFKC＋空白類束ね・全角・カタカナ・略称の内部索引解決と番号境界ガード）、`src/werewolf/output_stability.py`（モデル×行動の直近窓・`timeout_fit`／`thinking_off` のスコープ・成功ストリーク解除）、`tests/test_task065_operational_stability.py`（22テスト）。
+- 変更: `models.py`（`GameState`へ4ポリシーと`context_integrity_checks`を追加し`__post_init__`で正規化）、`day_timeline.py`（意図分類`classify_unspoken_intent`・`TimelineReferenceReport.intent_counts`ほか・報告の`to_log_fields()`へ`timeline_intent_*`を追記・`問いただ／問い質／問い正／問い詰め`を質問動詞へ追加）、`engine.py`（`inspect_public_body()`へstateの意図方策を渡す・台帳への観察積上げ）、`llm_actions.py`（整合チェックを初回解決時へ統合・cap採用値は`EffectiveContextResolution`自体へ反映し送信オプション・動的予算・再要求fitまで同じ枠に揃える・`name_reference_resolution`イベントと未知名判定・質問回答判定の内部解決・タイムアウト縮小とthinking offを`OutputStabilityTracker`経由のスコープ付き適用へ変更・送信カテゴリの窓記録と解除）、`context_budget.py`（`EffectiveContextResolution`へ `integrity_requested_limit / integrity_policy / loaded_context_from_ps / provisional` と `CONTEXT_INTEGRITY_CAP_SOURCE` を追加）、`cli.py`（`--context-integrity / --timeline-intent / --player-name-resolution / --output-stability-scope`と起動時`run_context_integrity_preflight()`、モデル別集計・ゲームサマリへ新規指標配線）、`prompts.py`（`_is_directed_to_player()`が表記ゆれを吸収）、`self_consistency.py`（事実突合の名前集合を内部解決へ）、README表4行＋TASK-065節。
+
+### 設計思想との対応
+
+1. **コンテキスト節約**: 新設する診断文はすべてログ・運用警告側だけで、議論プロンプトには1文字も足さない（整合チェック kinds とスナップショット数値のみ）。送信前の縮退は `cap` のときだけ数値を変える。名前解決は本文を畳むのではなく索引照合だけなのでプロンプト字数は不変。
+2. **一貫性**: 「どこの値で送ったか」を1つに潰さない（configured≠server_observed≠loaded≠requested）。台帳・質問回答・時系列診断は内部で正規名を使い、表記ゆれで同じ人物の追跡が切れないようにする。thinking/timeout処置も「モデル全体」ではなくモデル×行動の履歴として持つため、投票での失敗が議論の質に化けない。
+3. **合理的な議論**: 未来参照は実質的な過去帰属（`past_attribution_to_unspoken`）だけに絞り、質問行為（`future_question_to_unspoken`）とこれからの行動推測（`future_action_speculation`）を別立てにしたことで、「質問を提案しただけで違反」というノイズが議論評価から消える。
+4. **自由の非拘束**: どの検出も観測専用（`body_modified=false`を踏襲）で本文を再生成・無害化しない。名前正規化は公開ログの表記を変えず、存在しない番号（`Player 9`／`P 12`／`player 100`）は正規化しない。方策は既定（warn/separated/normalized/action）を保ちつつ `cap / literal / literal / model` で旧挙動に戻せる。
+
+### プロンプト順について（今回は動かさない）
+
+- 節順そのものは TASK-064 で凍結した `PROMPT_LAYOUT_V5_ORDER`（現在質問の直後・自分の発言の直前に `[ROLE_ACTION_BOUNDARY]`、代表字数26,340の貪欲探索で最良・violations=0）をそのまま維持する。TASK-065 の4機能は**発話プロンプトの文言を増やさない**設計なので、節順を変えずに検証できる。既存の順序プローブ（`_analysis/task064_order_probe.py`系）が v5 を再現し続けることを `tests/test_task060_prompt_layout.py` と本タスクのテストで確認している。
+- 変更したのは検出と数値だけである。議論案内・契約文・チェックリストへ新しい命令文は足しておらず、「質問するな」「名前の表記を直せ」といった誘導も入れていない（テストで本文不変＝`body_modified=false`とイベントの中立性を確認）。
+
+### 効果の実測（モック・LL不使用: `_analysis/task065_effect_probe.py` / `task065_api_view.txt`）
+
+- プレイヤー名（基準ログの公開本文40件・言及132箇所）: canonical 103／whitespace_or_label_variant 22／katakana 9 を解決。存在しない番号は吸収しないガード（`Player 9`・`P 12`・`プレイヤー１２`・`player 100` がいずれも unresolved のまま）を確認。隣接発言ペア39件中、旧来は文字列一致で31件しか立てられなかった回答帰属のうち **6件** が表記ゆれ経由で補えることを確認（公開本文は無傷）。
+- 意図分離（同一本文・発言順snapshot）: separated で `future_question_to_unspoken=5`／`future_action_speculation=3` を別カウンタへ separation。既存 findings は1件のみで、separated/literal とも同じ判定結果を維持（=既存検出強度を落としていない）。「問いただすことを提案します」型の質問行為は future_event_reference に数えない。
+- コンテキスト整合: Player 1型の構成（configured 16384 / modelfile 4096 / env 4096 / loaded 未取得）で kinds=`configured_above_server_observed + loaded_context_unavailable`、warn では adopted 16384・applied=false、cap では adopted 4096・applied=true、aligned 構成では kinds=(aligned,)・警告なし。preflight はモデル数ぶんだけ `context_integrity_preflight` を記録し、off では記録ゼロ。
+- 安定化スコープ: tracker の unit で vote への `timeout_fit` が discussion を縛らないこと、同 kind が2行動で model-wide evidence になること、本文成功3回で relax されること、形式・論理失敗を予算偏りに数えないことを確認。
+
+### レビュー対応（2026-11-25）— capの実送信反映と実ロード値の再取得
+
+指摘1「`cap`で`adopted_value`を計算しても保存・返却が`resolved`のままだった」への修正:
+
+- 縮退時は `replace(resolved, limit=int(adopted), source=context_integrity_cap, integrity_requested_limit=<設定値>, integrity_policy=...)` で**解決結果そのもの**を更新し、それをキャッシュにも返り値にも残す。これで `.limit` を読む全経路（動的コンテキスト逆算 `_dynamic_evidence_budget`、再要求fit `_fit_retry_budget(effective_limit=...)`、`llm_request_configuration` の `effective_context_limit`）が採用値で揃う。
+- `_chat` は `_options_for()` → 整合解決の順で走るため、**モデル初回リクエストだけ整合台帳が空＝旧設定値を送出**しうる。解決直後に `context_resolution.limit` へ切り替える処理を入れ、`num_ctx_source=context_integrity_cap`（`setting_num_ctx_source`には元の由来を残す）と `context_integrity_applied / integrity_requested_num_ctx` をリクエスト設定イベントへ記録した。
+- `_options_for()` は整合台帳に加えてキャッシュ済み解決（`source==context_integrity_cap`）も同じ枠に揃える。
+- 由来の保存: `_options_for` はcap適用済みの値を返すので、再解決時に縮退値を「設定値」と誤読しないよう `_original_configured_num_ctx()`（プレイヤー/CLIの生設定＋max_num_ctx）で初回観測をモデル別に据え置いた。
+
+指摘2「起動時は未ロードで `loaded_context_from_ps=None`、以後もキャッシュが返り実測を取り直せない」への修正:
+
+- ロード値が取れなかった解決は `provisional=True` マークを付け、恒久確定させない。
+- モデル別の完了送信数を数え（`_note_model_request`、失敗送信でもロードは起きるため `_record_generation_failure` でも加算）、**新しい送信が増えたときだけ**再解決して `/api/ps` を取り直す（`context_resolution_stage=post_load_refresh`、試行上限 `CONTEXT_RESOLUTION_MAX_REFRESH_ATTEMPTS=3`）。ロード値を取得できたら `provisional=False` で以後は確定キャッシュ（毎アクションの診断呼び出しを増やさない）。
+- `/api/ps` が一瞬空でも、送信後に判明する実ロード値（`ChatResponse.effective_num_ctx`）を `_loaded_context_observations` に残して代替証拠として使う。timeout時は `resolve_context_budget_for_model()` で解決を破棄し、以後の枠を実測基準に引き直す。
+
+実測（モック・LL不使用 `_analysis/task065_context_fix_probe_out.txt`。設定16384／env・Modelfile 4096のPlayer 1型）:
+
+| policy | 初回解決 limit | send#1 num_ctx | 送信後の再解決 | send#2 num_ctx | stages |
+|---|---|---|---|---|---|
+| cap | 4096 (cap) | **4096** | loaded=4096・provisional=False | **4096** | initial→post_load_refresh |
+| warn | 16384 (player_setting) | 16384 | 同一値のまま | 16384 | initial→post_load_refresh |
+| off | 16384 | 16384 | 同一値のまま | 16384 | 同上 |
+
+- 修正前は cap でも送信が 16384 のままだった（初回解決時は整合台帳が空で `_options_for` が縮退を適用する前／返却値が旧limit）。上記表のとおり初回から 4096 で送られ、`cfg log` の requested / eff_limit / src_after も 4096・context_integrity_cap で一致。
+- テスト追加: `tests/test_task065_operational_stability.py` に 4件（cap実送信・warn不変・ロード後再取得・Modelfileより小さいロード値をcap採用）。`python -m pytest -q` → **317 passed**。
+
+### テストとA/B比較の進め方
+
+- `python -m pytest -q` → **313 passed**（TASK-065新規22件を含む。`_analysis/task065_pytest_full.txt`）。compileall・git diff --check もクリーン。
+- A/Bは同一seedで次を突き合わせる: `--timeline-intent separated|literal`（`timeline_unspoken_intent_counts` / `avg_timeline_question_acts_per_body` / `future_event_reference_rate`）、`--player-name-resolution normalized|literal`（`name_variants_absorbed_total` / `legacy_unknown_name_flags_avoided_total` / `unresolved_name_references_total` と `ledger_repairs` の reason別内訳）、`--output-stability-scope action|model`（`output_stabilization_scope_events` / `stabilization_relaxations_total` / モデル別`stabilized_actions`・モデル×行動別の parse失敗・timeout・thinking-only・本文保持率）、`--context-integrity warn|cap|off`（`context_integrity_mismatches` / `context_integrity_caps_applied` / `context_integrity_evidence` と、timeout・通信失敗の実発生率）。
+- 強化モデルを Player 1 に置く盤面と全員通常モデルの盤面を分け、改善が「モデル能力」由来か「運用安定化」由来かを切り分ける（TASK-065実装案5）。**実機Ollamaでの同一seed比較はローカル環境の都合上まだ行っていない**。
+
+### 既知の残課題
+
+- `loaded_context_unavailable` はpreflightでは確定できない（未ロードを観測するだけ）。以後は解決ごとに `provisional` マークを持つ限り「新しい送信が終わった時点」で `/api/ps` を取り直し、実ロード値を採用値へ反映する（試行上限3回。ロード値取得後は確定キャッシュ）。実機で `/api/ps` が常に空を返す環境では、送信後の `effective_num_ctx` を代替証拠にするため、そこで初めて枠の実測が入る。
+- 意図分離の語彙は決定的ルールで、比喩・複合文の境界は観測漏れが起こりうる（検出自体は观測専用なので本文被害はない）。literal 側との差分ログで語彙を増やす運用にしている。
+

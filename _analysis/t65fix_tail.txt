@@ -1,0 +1,28 @@
+539
+1:     )
+2:     canonical = Message("Player 2", "Player 6縲∝・譌･縺ｮ謚慕･ｨ逅・罰繧呈蕗縺医※縺上□縺輔＞縲・)
+3:     variant = Message("Player 2", f"Player{NARROW_NBSP}6縲∝・譌･縺ｮ謚慕･ｨ逅・罰繧呈蕗縺医※縺上□縺輔＞縲・)
+4:     unrelated = Message("Player 2", "莉頑律縺ｯ螟懊′關ｽ縺｡逹縺阪◎縺・□縲・)
+5:     assert PromptBuilder._is_directed_to_player(actor, canonical, history)
+6:     # 陦ｨ險倥ｆ繧後〒繧ゅ瑚・蛻・∈縺ｮ雉ｪ蝠上阪ｒ隱崎ｭ倥☆繧具ｼ亥・髢区悽譁・・陦ｨ險倥・縺昴・縺ｾ縺ｾ・・
+7:     assert PromptBuilder._is_directed_to_player(actor, variant, history)
+8:     assert not PromptBuilder._is_directed_to_player(actor, unrelated, history)
+9:     assert not PromptBuilder._is_directed_to_player(actor, unrelated, history)
+10: 
+11: 
+12: # ---------------------------------------------------------------------------
+13: # 6. cap譁ｹ遲悶′螳滄圀縺ｮ騾∽ｿ｡蛟､縺ｸ蜉ｹ縺上°・医Ξ繝薙Η繝ｼ蟇ｾ蠢懊・邨ｱ蜷育｢ｺ隱阪・LL荳堺ｽｿ逕ｨ・・
+14: # ---------------------------------------------------------------------------
+15: class _SendCaptureClient:
+16:     """騾∽ｿ｡繧ｪ繝励す繝ｧ繝ｳ繧定ｨ倬鹸縺吶ｋ繝｢繝・け・亥ｮ欅llama縺ｫ縺ｯ荳蛻・√ｉ縺ｪ縺・ｼ峨・
+17: 
+18:     ps 縺ｯ縲瑚ｵｷ蜍墓凾・域悴繝ｭ繝ｼ繝会ｼ・None 竊・騾∽ｿ｡蠕・螳溘Ο繝ｼ繝牙､縲阪→谿ｵ髫守噪縺ｫ螟峨ｏ繧区ｧ区・縺ｫ縺ｧ縺阪・
+19:     螳滓ｩ溘〒縺ｮ豬√ｌ・医Ο繝ｼ繝峨・騾∽ｿ｡譎ゅ↓襍ｷ縺阪ｋ・峨ｒ蜀咲樟縺吶ｋ縲・
+20:     """
+21: 
+22:     def __init__(self, *, modelfile=4096, ps_before=None, ps_after=None) -> None:
+23:         self.timeout = 120.0
+24:         self.max_retries = 1
+25:         self.timeout_retries = 0
+26:         self._modelfile = modelfile
+27:         self._ps_before = ps_before

@@ -361,8 +361,13 @@ def test_allowance_widening_keeps_thinking_and_off_only_after_maxed() -> None:
     assert records[0]["thinking_allowance_widened"] is True
     assert int(records[0]["thinking_allowance_tokens"]) > 0
     assert records[-1]["thinking_off_switched"] is True
-    assert state.model_capabilities[actor.model]["thinking_budget"] is False
-    # off化後は思考行動がoffへ落ちる（最終手段であることを解決元ラベルで示す）。
+    # TASK-065: 既定の処置スコープは action。voteでthinkingが枯れても、その処置を
+    # モデル全体へ恒久適用しない（同じモデルの議論・占いでは自由な思考が残る）。
+    assert state.model_capabilities.get(actor.model, {}).get("thinking_budget") is not False
+    stabilization = [event for event in events if event["type"] == "thinking_stabilization"]
+    assert stabilization and stabilization[-1]["action_budget_key"] == "vote"
+    assert stabilization[-1]["stabilization_scope"] == "action"
+    assert stabilization[-1]["model_wide_application"] is False
     actor.thinking_by_action = {
         **(actor.thinking_by_action or {}),
         "discussion": True,
@@ -370,8 +375,8 @@ def test_allowance_widening_keeps_thinking_and_off_only_after_maxed() -> None:
     _options, _source, thinking_enabled, thinking_source = actions._options_for(
         actor, "discussion"
     )
-    assert thinking_enabled is False
-    assert thinking_source == THINKING_BUDGET_SOURCE
+    # voteの枯渇観測が議論まで縛らない（方策 action の約束）。
+    assert thinking_enabled is not False
 
 
 def test_cli_model_stats_split_generation_observations_per_action(tmp_path) -> None:

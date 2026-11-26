@@ -1,0 +1,98 @@
+\action_parser.py 26 def _player_mentions(text: str, candidates: tuple[str, ...]) -> list[str]:
+\action_parser.py 57 mentions = ActionParser._player_mentions(text, candidates)
+\action_parser.py 58 return mentions[0] if mentions else None
+\action_parser.py 81 first_line_mentions = ActionParser._player_mentions(first_line, candidates)
+\action_parser.py 82 if len(first_line_mentions) == 1:
+\action_parser.py 83 return first_line_mentions[0]
+\action_parser.py 84 whole_mentions = ActionParser._player_mentions(stripped, candidates)
+\action_parser.py 85 if len(whole_mentions) == 1:
+\action_parser.py 86 return whole_mentions[0]
+\cli.py 343 "hedged_ability_mentions_observed": 0,
+\cli.py 357 "name_variant_mentions_absorbed": 0,
+\cli.py 383 self._unattributed_name_mentions = 0
+\cli.py 500 self._ledger_metrics["name_variant_mentions_absorbed"] += absorbed
+\cli.py 506 stats["name_variant_mentions_absorbed"] += absorbed
+\cli.py 509 labels = diagnostic_record.get("mention_labels")
+\cli.py 511 bucket = stats.setdefault("name_mention_labels", {})
+\cli.py 683 self._unattributed_name_mentions += int(
+\cli.py 684 diagnostic_record.get("mentions_without_attribution_observed") or 0
+\cli.py 735 stats["unattributed_name_mentions"] += int(
+\cli.py 736 diagnostic_record.get("mentions_without_attribution_observed") or 0
+\cli.py 1510 "name_variant_mentions_absorbed": 0,
+\cli.py 1513 "name_mention_labels": {},
+\cli.py 1528 "unattributed_name_mentions": 0,
+\cli.py 2023 self._ledger_metrics["name_variant_mentions_absorbed"]
+\cli.py 2223 "hedged_ability_mentions_observed": int(
+\cli.py 2226 "hedged_mentions_observed",
+\cli.py 2266 "mentions_without_attribution_observed": int(
+\cli.py 2267 self._unattributed_name_mentions
+\day_timeline.py 90 SUBTYPE_GENERAL_MENTION_UNSPOKEN = "general_mention_without_attribution_observed"
+\day_timeline.py 358 mentions_without_attribution_observed: int = 0
+\day_timeline.py 522 "mentions_without_attribution_observed": int(
+\day_timeline.py 523 self.mentions_without_attribution_observed
+\day_timeline.py 557 self.mentions_without_attribution_observed += int(
+\day_timeline.py 558 report.mentions_without_attribution
+\day_timeline.py 946 "mentioned",
+\day_timeline.py 1005 def mentions_players(sentence: str, player_names: tuple[str, ...]) -> tuple[str, ...]:
+\day_timeline.py 1148 mentions: tuple[str, ...],
+\day_timeline.py 1159 for name in mentions
+\day_timeline.py 1245 mentions_without_attribution: int = 0
+\day_timeline.py 1284 "mentions_without_attribution_observed": int(
+\day_timeline.py 1285 self.mentions_without_attribution
+\day_timeline.py 1341 mentions_no_attribution = 0
+\day_timeline.py 1355 names_intent = mentions_players(sentence, tuple(player_names))
+\day_timeline.py 1374 names = mentions_players(sentence, tuple(player_names))
+\day_timeline.py 1407 mentions_no_attribution += 1
+\day_timeline.py 1504 mentions_without_attribution=int(mentions_no_attribution),
+\dead_player_resolution.py 18 - 讀懷・縺ｯ隴ｦ蜻奇ｼ・ead_player_mention・峨ｒ蝓ｺ譛ｬ縺ｨ縺励∽ｿｮ蠕ｩ縺ｯ迴ｾ蝨ｨ螳溯｡御ｸ崎・縺ｪ隕∵ｱよ枚縺ｮ縺ｿ縺ｮ譛蟆城剞縺ｮ鄂ｮ謠帙↓逡吶ａ繧九・
+\dead_player_resolution.py 130 matching_dead = [name for name in dead_names if name in sentence]
+\discussion_format.py 67 mentioned = re.findall(r"Player\s+\d+|P\d+", previous_content)
+\discussion_format.py 68 if any(name in text for name in mentioned):
+\engine.py 322 mentioned = [name for name in alive if name in sentence]
+\engine.py 323 if not mentioned:
+\engine.py 325 if any(name in confirmed_text for name in mentioned):
+\engine.py 479 reasons.append("dead_player_mention")
+\engine.py 2365 or player.name in previous_content
+\engine.py 2454 if player.name in text and player.name != "system"
+\leak_gate_policy.py 102 RULE_PARTNER_CO_MENTION = "wolf_partner_co_mention"
+\llm_actions.py 91 mention_labels,
+\llm_actions.py 96 shares_mentioned_players,
+\llm_actions.py 1648 "You mentioned an unpublished divination result. Either publish it with a Seer CO "
+\llm_actions.py 1661 "You used the wolf camp's internal perspective or mentioned your partner. Speak in "
+\llm_actions.py 3346 mentions_result_target = latest_target in response
+\llm_actions.py 3361 return mentions_result_target and any(
+\llm_actions.py 3504 "unknown_player_reference": "Do not mention non-existent player names; refer only to current players.",
+\llm_actions.py 3526 "seer_result_without_claim": "You mentioned divination target or result, so you must explicitly claim Seer CO in the sam
+\llm_actions.py 5587 return shares_mentioned_players(previous_content, body, names, policy=policy)
+\llm_actions.py 5617 for label, count in mention_labels(text, names, policy=policy).items():
+\llm_actions.py 5641 mention_labels=dict(labels),
+\models.py 858 player.name in message.content
+\name_resolution.py 297 def variant_mention_count(
+\name_resolution.py 311 def mention_labels(
+\name_resolution.py 338 def shares_mentioned_players(
+\prompts.py 140 "[Holding] If you hold, output '[CO] Hold' and never mention targets, verdicts, or divination "
+\prompts.py 413 "- If the previous speech mentions your name, asks you a question, or clearly reacts to "
+\prompts.py 1317 if player.name in latest_content
+\prompts.py 2049 f"- Day {day} Attack: {target}{dead_tag} [internal - never mention in public speech]"
+\prompts.py 2106 " Night-action entries above are internal: never mention attacks or their targets in public speech.\n\n"
+\prompts.py 2337 "- Human-only verdicts: holding is entirely free. Output '[CO] Hold' and never mention "
+\prompts.py 2889 "- If the previous speech mentions your name, asks you a question, or clearly reacts to your speech, answer them directl
+\prompts.py 3049 "- If the previous speech mentions your name, asks you a question, or clearly reacts to your speech, answer them directl
+\prompts.py 3536 "- Never mention private information (your role, verdicts, night actions, ally) in the reason.\n"
+\role_action_provenance.py 115 if name and name != exclude and name in sentence:
+\role_action_provenance.py 268 hedged_mentions_observed: int = 0
+\role_action_provenance.py 366 self.hedged_mentions_observed += 1
+\role_action_provenance.py 426 "hedged_mentions_observed": int(self.hedged_mentions_observed),
+\secret_leak_guard.py 378 def _name_mentioned(sentence: str, name: str | None) -> bool:
+\secret_leak_guard.py 758 and cls._name_mentioned(text, actor.partner)
+\secret_leak_guard.py 793 if not cls._name_mentioned(text, target):
+\secret_leak_guard.py 812 if roles and any(cls._name_mentioned(text, name) for name in other_names):
+\self_consistency.py 162 mentioned_target = match.group("target") or match.group("target_en")
+\self_consistency.py 165 and mentioned_target != latest_vote.vote_target
+\self_consistency.py 230 player.name != actor.name and player.name in content
+\self_consistency.py 250 mentioned_players = {
+\self_consistency.py 251 player.name for player in state.players if player.name in content
+\self_consistency.py 281 not mentioned_players
+\self_consistency.py 282 or mentioned_players.issubset(
+\self_consistency.py 286 if player.name in fact.description
+\setup.py 80 if player.name in state.player_self_memories:

@@ -13,7 +13,9 @@ from .dead_player_resolution import (
     classify_dead_player_sentence,
 )
 from .context_budget import (
+    CONTEXT_INTEGRITY_CAP_SOURCE,
     EffectiveContextResolution,
+    parse_positive_int,
     process_env_context,
     resolve_effective_context_limit,
 )
@@ -65,6 +67,42 @@ from .output_budget_trace import (
     is_thinking_fixed_model,
     issue_category,
 )
+# TASK-065: thinking・timeout・生成上限の処置を「モデル×行動×直近失敗履歴」へ限定する台帳。
+# モデル単位の恒久フラグで全行動を絞らないための分離であり、推理手順・結論・口調には
+# 干渉しない。プレイヤー名の表記ゆれは内部照合の入口だけで吸収し、公開本文は触らない。
+# コンテキスト整合チェック（configured / server_observed / loaded / requested）は運用面の
+# 数値と警告だけを持っていき、議論本文へ制約文を追加しない。
+from .output_stability import (
+    CATEGORY_GENERATION_CAP,
+    CATEGORY_OK,
+    CATEGORY_OUTPUT_FORMAT,
+    CATEGORY_THINKING_BUDGET,
+    CATEGORY_TIMEOUT,
+    CATEGORY_TRANSPORT,
+    OUTPUT_STABILIZATION_SCOPE_ACTION,
+    OUTPUT_STABILIZATION_SCOPE_DEFAULT,
+    OUTPUT_STABILIZATION_SCOPE_MODEL,
+    DOWNGRADE_THINKING_OFF,
+    DOWNGRADE_TIMEOUT_FIT,
+    OutputStabilityTracker,
+)
+from .name_resolution import (
+    NAME_RESOLUTION_POLICY_LITERAL,
+    NAME_RESOLUTION_POLICY_NORMALIZED,
+    has_unresolved_reference,
+    mention_labels,
+    names_in_text,
+    normalize_name_resolution_policy,
+    resolve_known_names,
+    scan_references,
+    shares_mentioned_players,
+)
+from .context_integrity import (
+    CONTEXT_INTEGRITY_POLICY_CAP,
+    CONTEXT_INTEGRITY_POLICY_DEFAULT,
+    assess_context_integrity,
+    normalize_context_integrity_policy,
+)
 from .discussion_format import (
     DEFAULT_QUESTION_HINT_MODE,
     QUESTION_HINT_NONE,
@@ -113,6 +151,9 @@ from .core_compression import normalize_core_compression_policy
 # TASK-060: 議論プロンプトの節順（layout v2 / v3）をstateから解決してbuilderへ渡す。
 # 内容（発言の口調・論点・結論）には干渉せず、情報の載る位置と重複行だけを変える設定。
 from .prompt_layout import normalize_prompt_layout_policy
+# TASK-064: 能力行使表現の検出は「CO補正の再要求が未検証の能力表現を増やしたか」を
+# 比べる観測専用（本文も選択肢も変えない）。エンジン実行記録台帳の定数もここで使う。
+from .role_action_provenance import KIND_DIVINATION, detect_ability_expressions
 from .leak_gate_policy import (
     DEFAULT_LEAK_GUARD_POLICY,
     RULE_INTERNAL_CONFIG,
@@ -185,6 +226,11 @@ RETRY_NUM_CTX_SOURCE = "retry_context_fit"
 RETRY_NUM_CTX_TOKENS_PER_CHAR = 0.5
 RETRY_NUM_CTX_MARGIN_TOKENS = 1024
 RETRY_NUM_CTX_MIN_FIT = 2048
+
+# TASK-065（レビュー対応）: ロード値が取れていない解決（provisional）を、送信完了後に
+# 取り直す最大回数。`/api/ps` と `ollama show --modelfile` を毎アクション走らせるのは
+# 重いので、「新しい送信が1件以上増えたときだけ」「高々この回数まで」に絞る。
+CONTEXT_RESOLUTION_MAX_REFRESH_ATTEMPTS = 3
 
 # TASK-036: 動的コンテキスト。送信プロンプトの実測サイズと行動別生成上限（思考込みの
 # 残余を含む）から、実際に必要なコンテキストだけ確保する。ローカル環境では 65536 の
@@ -679,12 +725,32 @@ class OllamaActions(ActionPolicy):
         # TASK-046: モデル別の実効コンテキスト上限（env・Modelfile・/api/ps・設定の単一値解決）。
         # 初回リクエスト時に1回だけ解決してキャッシュし、解決イベントを記録する。
         self._context_budgets: dict[str, EffectiveContextResolution] = {}
+        # TASK-065（レビュー対応）: provisional解決の再試行管理と、送信後に判明した
+        # 実ロード値の観測（/api/psが空でも、send後のeffective_num_ctxを採用値の根拠に使える）。
+        self._model_completed_requests: dict[str, int] = {}
+        self._context_refresh_seen: dict[str, int] = {}
+        self._context_refresh_attempts: dict[str, int] = {}
+        self._loaded_context_observations: dict[str, int] = {}
+        # 初回解決時の「設定が元々要求していた値」。capで縮退させた後に再解決すると、
+        # 送信オプション側が既に縮退値になっていて由来が分からなくならないようにする。
+        self._context_configured_origin: dict[str, int] = {}
+        self._context_configured_origin_source: dict[str, str] = {}
         # TASK-053: モデル×アクション別の生成観測プロファイル（thinking消費・空応答率・
         # 待ち時間）。初回リクエストの本文予約とモデル別thinking余白の算出元に使う。
         self._thinking_profiles = ThinkingProfiles()
         # TASK-063: モデル×アクション別の出力予算トレース（thinking予算・timeout・生成上限・
         # 出力形式・通信・プロンプト論理を分離する）。観測のみで生成挙動そのものは変えない。
         self._output_trace = OutputBudgetTrace()
+        # TASK-065: thinking・timeout・生成上限の処置を「モデル×行動×直近失敗履歴」へ限定する。
+        # 投票でthinkingが本文を食い潰したとき、その処置が議論・占いまで及ばないようにする
+        # （方策 action が既定。model は旧挙動＝A/B比較用の逃げ道）。解除条件も持つ。
+        self._stability = OutputStabilityTracker(
+            getattr(state, "output_stabilization_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT)
+        )
+        # TASK-065: プレイヤー名表記ゆれの内部解決カウンタ（公開本文は変更しない観測値）
+        self._name_reference_counts: dict[str, dict[str, int]] = {}
+        # TASK-065: コンテキスト整合チェックで送信値を縮退させたモデル（cap時のみ）
+        self._context_integrity_applied: set[str] = set()
 
     def thinking_profiles_snapshot(self) -> dict[str, dict[str, dict[str, object]]]:
         """TASK-053: モデル×アクション別のプロファイル（評価ログ・CLI表示用）。"""
@@ -804,7 +870,7 @@ class OllamaActions(ActionPolicy):
         key = normalize_action_budget_key(budget_key)
         profile = self._thinking_profiles.get(actor.model, key)
         cap = BODY_RESERVATION_MAX_NUM_PREDICT.get(key)
-        timeout_fit = self._slow_model(actor) and key in {"discussion", "wolf_discussion"}
+        timeout_fit = self._timeout_fit_applies(actor, key)
         # TASK-063: thinking-fixed系モデルでは行動別の「本文最低量」を強化し、その分だけ
         # 生成上限キャップも引き上げる（思考に食われて本文が空になる事故を防ぐためで、
         # 推理手順や論点を決める変更ではない）。
@@ -830,6 +896,66 @@ class OllamaActions(ActionPolicy):
             return replace(reservation, skip_reason=RESERVATION_SKIPPED_TIMEOUT)
         return reservation
 
+    def _original_configured_num_ctx(
+        self, model: str, actor: Player
+    ) -> tuple[int | None, str | None]:
+        """cap適用後の送信オプションではなく「設定が元々要求していた値」を返す（TASK-065）。
+
+        `_options_for` は整合チェックの安全値を適用済みのため、再解決で素直に読むと縮退値を
+        そのまま設定値としてしまい、由来が追えなくなる。プレイヤー設定・CLI設定の生値を
+        見て、初回に観測した値をモデル別に据え置く。
+        """
+        override = bool(self.options and self.options.get("override_player_num_ctx"))
+        cli_value = parse_positive_int(self.options.get("num_ctx") if self.options else None)
+        player_value = parse_positive_int(actor.num_ctx)
+        candidate: int | None = None
+        origin: str | None = None
+        if player_value is not None and not override:
+            candidate = player_value
+            origin = "player_setting"
+        elif cli_value is not None:
+            candidate = cli_value
+            origin = "cli_setting"
+        else:
+            recommended = parse_positive_int(actor.recommended_num_ctx)
+            maximum = parse_positive_int(actor.max_num_ctx)
+            if recommended is not None or maximum is not None:
+                candidate = recommended if recommended is not None else maximum
+                origin = "player_recommended_or_maximum_setting"
+        stored = self._context_configured_origin.get(model)
+        if candidate is None and stored is not None:
+            return stored, self._context_configured_origin_source.get(model)
+        if candidate is not None and (model not in self._context_configured_origin):
+            self._context_configured_origin[model] = candidate
+            self._context_configured_origin_source[model] = origin or ""
+        return candidate, origin
+
+    def _note_model_request(self, model: str) -> None:
+        """送信が1件完了するごとにモデル別カウンタを進める（TASK-065）。
+
+        provisionalな解決を「新しい送信が終わったときだけ」再解決するための基準にする。
+        """
+        self._model_completed_requests[model] = (
+            self._model_completed_requests.get(model, 0) + 1
+        )
+
+    def _note_loaded_context(self, model: str, value: object) -> None:
+        """送信後に判明した実ロード値（/api/psの代替）を観測する（TASK-065）。"""
+        parsed = parse_positive_int(value)
+        if parsed is not None:
+            self._loaded_context_observations[model] = parsed
+
+    def resolve_context_budget_for_model(self, model: str) -> None:
+        """特定モデルのコンテキスト解決を破棄し、次回の解決で実測値を取り直す（TASK-065）。
+
+        タイムアウトや生成失敗など「想定より小さい枠で動いていた」ことが分かった状況から
+        呼び出す。キャッシュだけを落とし、方策・設定は変えない（発言内容には干渉しない）。
+        """
+        cached = self._context_budgets.pop(model, None)
+        if cached is not None:
+            self._context_refresh_attempts[model] = 0
+            self._context_refresh_seen[model] = self._model_completed_requests.get(model, 0)
+
     def _resolve_context_budget(
         self,
         actor: Player,
@@ -848,7 +974,22 @@ class OllamaActions(ActionPolicy):
         model = actor.model
         cached = self._context_budgets.get(model)
         if cached is not None:
-            return cached
+            if not cached.provisional:
+                return cached
+            # TASK-065（レビュー対応）: 起動時・初回解決はモデル未ロードで /api/ps が空の
+            # まま（provisional）になりやすい。送信が1件でも完了したら＝モデルがロードされた
+            # 可能性が高いので、実ロード値を取り直す。旧来的な恒久キャッシュだと、その後に
+            # 判明した実効値を二度と参照できない。試行回数は上限で頭打ちにする。
+            completed = self._model_completed_requests.get(model, 0)
+            seen = self._context_refresh_seen.get(model, 0)
+            attempts = self._context_refresh_attempts.get(model, 0)
+            if completed <= seen or attempts >= CONTEXT_RESOLUTION_MAX_REFRESH_ATTEMPTS:
+                return cached
+            self._context_refresh_seen[model] = completed
+            self._context_refresh_attempts[model] = attempts + 1
+            resolution_stage = "post_load_refresh"
+        else:
+            resolution_stage = "initial"
         options, _num_predict_source, _thinking, _thinking_source = self._options_for(
             actor, "discussion"
         )
@@ -860,9 +1001,20 @@ class OllamaActions(ActionPolicy):
             if isinstance(diagnostics, dict):
                 modelfile_value = diagnostics.get("modelfile_num_ctx")
                 ps_value = diagnostics.get("ollama_ps_context")
+        # TASK-065（レビュー対応）: /api/ps が今この瞬間に空でも、直近の送信で観測した
+        # 実ロード値（ChatResponse.effective_num_ctx）をロード証拠として使う。ロードは
+        # 送信時に起きるため、起動直後の診断では取れないが送信後には判明している。
+        loaded_observation = self._loaded_context_observations.get(model)
+        if parse_positive_int(ps_value) is None and loaded_observation is not None:
+            ps_value = loaded_observation
+        # TASK-065（レビュー対応）: cap適用後の options をそのまま設定値として読まない
+        # （再解決で「縮退値＝設定値」に見えるのを防ぐ）。生設定の初回観測を据え置く。
+        configured_origin, configured_origin_source = self._original_configured_num_ctx(
+            model, actor
+        )
         resolved = resolve_effective_context_limit(
             {
-                "player_setting": options.get("num_ctx") if options else None,
+                "player_setting": configured_origin,
                 "cli_setting": (
                     self.options.get("num_ctx") if self.options else None
                 ),
@@ -870,6 +1022,64 @@ class OllamaActions(ActionPolicy):
                 "process_env": env_value,
                 "modelfile": modelfile_value,
             }
+        )
+        # TASK-065: 整合チェック（configured / server_observed / loaded / requested）を同じ
+        # 由来で評価する。方策 cap のときだけ安全値（観測実効値）へ縮退させ、warn（既定）は
+        # 記録のみで送信値を変えない。num_ctx を無条件に16kとして扱わないための分離である。
+        integrity_policy = normalize_context_integrity_policy(
+            getattr(self.state, "context_integrity_policy", CONTEXT_INTEGRITY_POLICY_DEFAULT)
+        )
+        player_max: object = None
+        for candidate in self.state.players:
+            if candidate.model == model:
+                player_max = candidate.max_num_ctx
+                break
+        integrity = assess_context_integrity(
+            model,
+            configured=configured_origin,
+            configured_source=(
+                configured_origin_source
+                if configured_origin is not None
+                else "cli_setting_or_auto"
+            ),
+            ps_loaded_context=ps_value,
+            modelfile_num_ctx=modelfile_value,
+            process_env_num_ctx=env_value,
+            max_num_ctx=player_max,
+            policy=integrity_policy,
+        )
+        adopted_value: object = resolved.limit
+        requested_before_cap: int | None = (
+            int(resolved.limit) if isinstance(resolved.limit, int) else None
+        )
+        if (
+            integrity.applied
+            and integrity.adopted_num_ctx is not None
+            and (
+                resolved.limit is None
+                or int(integrity.adopted_num_ctx) < int(resolved.limit)
+            )
+        ):
+            adopted_value = integrity.adopted_num_ctx
+            # TASK-065（レビュー対応）: 採用値を解決結果そのものへ反映する。キャッシュにも
+            # 返り値にも残さないと、送信側（動的コンテキスト逆算・再要求fit・リクエスト設定
+            # ログ）が旧 limit（例: 16384）を使い続けてしまう。
+            resolved = replace(
+                resolved,
+                limit=int(integrity.adopted_num_ctx),
+                source=CONTEXT_INTEGRITY_CAP_SOURCE,
+                integrity_requested_limit=requested_before_cap,
+                integrity_policy=integrity_policy,
+            )
+        # 由来別の証拠をstateへ残す（warnでも数は揃う。秘密情報は含まれない）
+        self.state.context_integrity_checks[model] = integrity.to_fields()
+        # ロード値が取れていなければ provisional にする（以後の送信で実ロード値が判明した
+        # ときに再解決する。起動時はモデル未ロードで ps が取れないのが既定パターン）。
+        loaded_ps = parse_positive_int(ps_value)
+        resolved = replace(
+            resolved,
+            loaded_context_from_ps=loaded_ps,
+            provisional=(loaded_ps is None),
         )
         self._context_budgets[model] = resolved
         # 初回解決時に必ず記録する（呼び出し元がactionを持たない経路でも、
@@ -889,6 +1099,28 @@ class OllamaActions(ActionPolicy):
                 configured_context_source=resolved.configured_source,
                 server_observed_context_limit=resolved.server_observed,
                 server_observed_context_source=resolved.server_observed_source,
+                # TASK-065: 由来を1つの値へ潰さない（loaded / requested / adopted を分けて残す）
+                loaded_context_from_ps=ps_value,
+                modelfile_num_ctx=modelfile_value,
+                context_integrity_policy=integrity_policy,
+                context_integrity_policy_label=(
+                    "safe_value_adoption"
+                    if integrity_policy == CONTEXT_INTEGRITY_POLICY_CAP
+                    else ("integrity_check_disabled" if integrity_policy == "off" else "warn_before_send")
+                ),
+                context_integrity_mismatch=bool(integrity.mismatch),
+                context_integrity_kinds=list(integrity.kinds),
+                requested_num_ctx=integrity.requested_num_ctx,
+                adopted_num_ctx=adopted_value,
+                safe_context_value=integrity.safe_value,
+                context_integrity_applied=bool(integrity.applied),
+                # TASK-065（レビュー対応）: 縮退を解決結果へ反映したか（送信側が同じ値を
+                # 使う）と、ロード値が取れていないため今後再解決し得ることを分けて残す。
+                integrity_requested_limit=resolved.integrity_requested_limit,
+                context_budget_source_after_integrity=resolved.source,
+                context_resolution_provisional=bool(resolved.provisional),
+                # initial（初回）か post_load_refresh（送信後に実ロード値を取り直した）か
+                context_resolution_stage=resolution_stage,
                 process_env_key=env_key,
                 note=(
                     "設定値がサーバー観測値（/api/ps・env・Modelfile）を超えるため、"
@@ -1173,7 +1405,10 @@ class OllamaActions(ActionPolicy):
             and previous_message.speaker != actor.name
             and extracted.strip()
             and not is_pass_body(extracted)
-            and answers_previous_question(extracted, previous_message.content)
+            # TASK-065: 名前の表記ゆれを内部解決で吸収してから回答判定する
+            and self._answers_previous_question_resolved(
+                extracted, previous_message.content
+            )
         )
         details: dict[str, object] = {
             "question_hint_mode": self.question_hint_mode,
@@ -1184,6 +1419,13 @@ class OllamaActions(ActionPolicy):
             ),
             "question_retry_allowed": self.question_hint_mode == QUESTION_HINT_STRICT,
         }
+        # TASK-065: 名前言及の内部解決を同じ入口で観測する（質問回答判定のノイズ削減量を、
+        # 旧判定なら未知名前になっていた数と分けて残す。公開本文の表記は変えない）。
+        name_stats = self._record_name_references(actor, action, started_at, (body,))
+        details["name_variants_absorbed"] = int(name_stats.get("variants_absorbed", 0))
+        details["unresolved_name_references"] = int(name_stats.get("unresolved", 0))
+        details["legacy_unknown_flags_avoided"] = int(name_stats.get("legacy_flaggable", 0))
+        details["player_name_resolution_policy"] = self._name_resolution_policy()
         self._emit("discussion_question_check", action, actor, started_at, **details)
         return details
 
@@ -1212,7 +1454,10 @@ class OllamaActions(ActionPolicy):
             and PromptBuilder._is_directed_to_player(
                 actor, previous_message, current_day_history
             )
-            and answers_previous_question(extracted, previous_message.content)
+            # TASK-065: 表記ゆれ（Player\u202f6 / player6 等）を内部解決してから照合する
+            and self._answers_previous_question_resolved(
+                extracted, previous_message.content
+            )
         )
         return classify_novelty(
             extracted,
@@ -2389,6 +2634,50 @@ class OllamaActions(ActionPolicy):
             metadata = chat_response.to_metadata()
             response_metadata_history.append(metadata)
             raw_responses.append(chat_response.content)
+            # TASK-064: CO補正の再要求が未検証の能力表現を新たに生成しなかったかを
+            # 前後の個数比較で観測する（管理者ログ用・観測専用で本文は変更しない）。
+            # 短縮効果も通常プロンプト長と直接並べられる形で残す（実装案5の検証項目）。
+            if is_co_correction and len(raw_responses) >= 2:
+                tracker = getattr(self.state, "role_action_provenance", None)
+                known_names = tuple(player.name for player in self.state.players)
+
+                def _ability_assertions(text: object) -> int:
+                    if not isinstance(text, str):
+                        return 0
+                    return sum(
+                        1
+                        for expression in detect_ability_expressions(
+                            text,
+                            actor_name=actor.name,
+                            known_player_names=known_names,
+                        )
+                        if expression.get("first_person")
+                        and not expression.get("hedged")
+                    )
+
+                before_assertions = _ability_assertions(raw_responses[-2])
+                after_assertions = _ability_assertions(chat_response.content)
+                if tracker is not None:
+                    added_assertions = tracker.note_retry_delta(
+                        before_assertions, after_assertions
+                    )
+                else:
+                    added_assertions = max(0, after_assertions - before_assertions)
+                self._emit(
+                    "co_correction_boundary",
+                    action,
+                    actor,
+                    started_at,
+                    reask_prompt_chars=len(user_prompt),
+                    normal_prompt_chars=len(prompt_ctx.user_prompt),
+                    ability_assertions_before=before_assertions,
+                    ability_assertions_after=after_assertions,
+                    ability_assertions_added=int(added_assertions),
+                    engine_backed=bool(
+                        tracker is not None
+                        and tracker.own_engine_days(actor.name, KIND_DIVINATION)
+                    ),
+                )
             response_text = self._final_response(chat_response.content).strip()
             is_pass = self._is_pass(response_text)
             leak_findings = self._public_response_leak_findings(
@@ -3647,8 +3936,7 @@ class OllamaActions(ActionPolicy):
                 else RETRY_NUM_PREDICT_LIMIT
             )
         if (
-            self._slow_model(actor)
-            and normalize_action_budget_key(budget_key) in {"discussion", "wolf_discussion"}
+            self._timeout_fit_applies(actor, budget_key)
             and not retry_cap
         ):
             # タイムアウト観測モデルでは実際送信の上限も絞る（プロンプト指示と一致させる）。
@@ -3789,40 +4077,116 @@ class OllamaActions(ActionPolicy):
     def _seer_co_correction_prompt(
         self, actor: Player, spoken_result: tuple[str, str] | None
     ) -> str:
-        """Short correction prompt for missing Seer CO."""
+        """TASK-064 の短縮再要求（能力実行記録・主張状態・現在質問・出力形式だけ送る）。
+
+        旧実装（game_bcd7c97e7e48 で問題化した形）は、保有していないプレイヤーの
+        「以前口にした結果」へ "Publish this result" を付けて再送し、未検証のブラフを
+        実結果のように再強化していた。ここでは次だけを行う:
+        - [DONE]: エンジンが本人のために実行した能力行動（実施済みの占い日と本人の占い
+          結果だけ。他者分は絶対に載せない）
+        - [CLAIM]: 本人の公開COをID参照で示す（本文の再掲なし）
+        - 現在質問（本人宛ての未回答質問を200字まで）と出力形式
+        - 継続主張か撤回かの選択はモデルに委ねる（ブラフは自由）。ただし表現が
+          「エンジン実行の事実」と「自分の申告」のどちらに属するかだけを明記する。
+        長い旧プロンプトは再送しない（通常プロンプトより明確に短い）。
+        """
+        tracker = getattr(self.state, "role_action_provenance", None)
+        allow_bluff = bool(getattr(self.state, "allow_bluff_role_claim", True))
+        divination_days = (
+            tracker.own_engine_days(actor.name, KIND_DIVINATION)
+            if tracker is not None
+            else ()
+        )
+        engine_backed = bool(
+            actor.role is Role.SEER and divination_days and self.state.seer_results
+        )
         lines = [
-            "[CO Correction] Your statement mentions divination results without a Seer CO. "
-            "You must explicitly claim Seer CO in the same statement.",
+            "[CO Correction] Your last reply used divination wording without a Seer CO line. "
+            "Fix only the output form now; this message carries no long old prompt.",
             f"- You: {actor.name}",
         ]
         co_target: str | None = None
         co_result: str | None = None
-        if actor.role is Role.SEER and self.state.seer_results:
+        if engine_backed:
+            days_text = ", ".join(f"Day {d}" for d in divination_days[-4:])
             target, result = self._latest_seer_result()
             co_target, co_result = target, result
             lines.append(
-                f"- Your divination result: Target={target}, Result={self._result_label(result)}"
+                f"[DONE] Engine executed divination for you: "
+                f"{len(divination_days)} time(s) ({days_text})."
             )
-            lines.append("Publish this result together with a Seer CO.")
-        elif spoken_result is not None:
-            co_target, co_result = spoken_result
             lines.append(
-                f"- Previously stated result: Target={spoken_result[0]}, "
-                f"Result={self._result_label(spoken_result[1])}"
+                f"- Your engine-issued result: Target={target}, "
+                f"Result={self._result_label(result)}. Pair it with your CO line."
             )
-            lines.append("Publish this result together with a Seer CO.")
-        lines.extend(
-            [
-                f"Output strictly in {actor.response_language} using these 2 lines only without extra text:",
-                "[CO] Seer",
-                # TASK-043: 案内文に「Player X」のようなプレースホルダを書かない。
-                # 弱いモデル（game_e2991441d6f0 Player 3）はそれを模倣して実在しない
-                # 対象の判定を公開したため、実際の対象名を出す。
-                f"[RESULT] Target={co_target or '<the player you actually divined>'} "
-                f"Result={self._result_label(co_result) if co_result is not None else 'Werewolf or Human'}",
-                "Reason and vote proposal are optional; if adding them, put [BODY] on the 3rd line.",
-            ]
-        )
+        else:
+            lines.append(
+                "[DONE] The engine has never executed a divination action for you. "
+                "The divination wording you used is not an engine record."
+            )
+        own_claims = [
+            (index, claim)
+            for index, claim in enumerate(self.state.public_role_claims, 1)
+            if claim.claimant == actor.name
+        ]
+        if own_claims:
+            refs = ", ".join(
+                f"[claim:{index}] Day {claim.day} "
+                f"{ROLE_NAMES_EN.get(Role(claim.claimed_role), claim.claimed_role)}"
+                for index, claim in own_claims[-3:]
+            )
+            lines.append(f"[CLAIM] You already published: {refs} (unverified).")
+        else:
+            lines.append(
+                "[CLAIM] You have published no role claim yet."
+            )
+        conversation = tuple(self.state.conversation_log)
+        current_day_history = PromptBuilder.current_day_messages(conversation)
+        for message in reversed(current_day_history[-8:]):
+            if message.speaker == actor.name:
+                continue
+            content = message.content if isinstance(message.content, str) else ""
+            if any(
+                cue in content
+                for cue in ("?", "？", "なぜ", "理由は", "質問", "確認", "教えて", "聞かせて")
+            ) and PromptBuilder._is_directed_to_player(
+                actor, message, current_day_history
+            ):
+                lines.append(
+                    f"- Current question to answer: {message.speaker}: {content[:200]}"
+                )
+                break
+        keep_claim_option = bool(engine_backed or (allow_bluff and spoken_result))
+        if keep_claim_option:
+            target = co_target or (spoken_result[0] if spoken_result else None)
+            result = co_result or (spoken_result[1] if spoken_result else None)
+            source_label = (
+                "your engine-issued result"
+                if engine_backed
+                else "the reading you stated publicly (unverified - it will be logged "
+                "as a claim, not as an engine fact)"
+            )
+            lines.extend(
+                [
+                    f"Option A - publish the Seer CO together with {source_label}:",
+                    "[CO] Seer",
+                    f"[RESULT] Target={target} Result={self._result_label(result)}",
+                ]
+            )
+        if allow_bluff:
+            lines.append(
+                "Option B - publish the Seer CO without any result line "
+                "([CO] Seer then optionally [BODY]), or answer the current question "
+                "without ability wording. Which form you choose is yours; tone, topics "
+                "and reasoning order stay free."
+            )
+        else:
+            lines.append(
+                "Option B - answer the current question without claiming a role: this "
+                "game setting disallows publishing a role you do not hold, so keep the "
+                "answer plain (no [CO] / no divination verdict)."
+            )
+        lines.append(f"出力は厳密に{actor.response_language}で行ってください。")
         return "\n".join(lines)
 
     @staticmethod
@@ -4572,10 +4936,7 @@ class OllamaActions(ActionPolicy):
                 or issue == "third_person_self_reference"
                 and sentence in third_person_sentences
                 or issue == "unknown_player_reference"
-                and any(
-                    name not in known_players
-                    for name in re.findall(r"Player\s+\d+", sentence)
-                )
+                and self._sentence_has_unresolved_reference(sentence)
                 or issue == "unverified_attributed_speech"
                 and self._attributed_quote_sentences(sentence, repair_history)
                 # TASK-043: プレースホルダ・案内文の模倣を含む文だけ除去する。
@@ -4830,8 +5191,11 @@ class OllamaActions(ActionPolicy):
             if previous_message is not None and previous_message.speaker not in first_sentence:
                 return "question_not_answered_first"
 
-        mentioned_players = re.findall(r"Player\s+\d+", response)
-        if any(name not in known_players for name in mentioned_players):
+        # TASK-065: 旧判定は `Player\\s+\\d+` と実在名の文字列一致だったため、`Player\\u202f6`
+        # （NARROW NO-BREAK SPACE）や `player6` を「存在しないプレイヤーを呼んだ」と誤った。
+        # 内部解決で表記ゆれを吸収し、実在しない番号だけ未解決として観測する。
+        # 公開本文の表記はそのまま（書き換え・再生成はしない）。literal はA/B比較用の旧挙動。
+        if self._unknown_player_reference(response):
             return "unknown_player_reference"
         if self._references_external_game_memory(body):
             return "external_game_memory"
@@ -5183,6 +5547,35 @@ class OllamaActions(ActionPolicy):
             options["num_ctx"] = min(
                 int(options["num_ctx"]), actor.max_num_ctx
             )
+        # TASK-065: 整合チェックの方策 cap では、実測で確認できた上限を超えて送らない。
+        # warn（既定）では送信値を変えない。設定値を無条件に16k扱いしないための縮退であり、
+        # プロンプト本文・発言の自由度には干渉しない（数値だけの処置）。
+        integrity_check = self.state.context_integrity_checks.get(actor.model)
+        if (
+            isinstance(integrity_check, dict)
+            and integrity_check.get("context_integrity_applied") is True
+            and isinstance(integrity_check.get("adopted_num_ctx"), int)
+            and not isinstance(integrity_check.get("adopted_num_ctx"), bool)
+            and isinstance(options.get("num_ctx"), int)
+            and not isinstance(options.get("num_ctx"), bool)
+            and int(integrity_check["adopted_num_ctx"]) < int(options["num_ctx"])
+        ):
+            options["num_ctx"] = int(integrity_check["adopted_num_ctx"])
+            self._context_integrity_applied.add(actor.model)
+        # TASK-065（レビュー対応）: 解決済みの採用値（capで縮退済み）も同じ枠に揃える。
+        # 整合台帳がまだ無い経路（初回・動的予算の逆算）で旧設定値だけを見るのを防ぐ。
+        budget = self._context_budgets.get(actor.model)
+        if (
+            budget is not None
+            and budget.source == CONTEXT_INTEGRITY_CAP_SOURCE
+            and isinstance(budget.limit, int)
+            and not isinstance(budget.limit, bool)
+            and isinstance(options.get("num_ctx"), int)
+            and not isinstance(options.get("num_ctx"), bool)
+            and int(budget.limit) < int(options["num_ctx"])
+        ):
+            options["num_ctx"] = int(budget.limit)
+            self._context_integrity_applied.add(actor.model)
         if num_predict is not None:
             options["num_predict"] = num_predict
         # TASK-043: プレイヤー別の生成サンプリングは全体設定（CLI）より優先する。
@@ -5204,9 +5597,16 @@ class OllamaActions(ActionPolicy):
             thinking_enabled = False
             thinking_source = THINKING_BUDGET_SOURCE
         if (
-            capabilities.get("timed_out") is True
-            and key in {"discussion", "wolf_discussion"}
+            thinking_enabled is True
+            and self._stabilization_scope() == OUTPUT_STABILIZATION_SCOPE_ACTION
+            and self._stability.has_downgrade(actor.model, key, DOWNGRADE_THINKING_OFF)
         ):
+            # TASK-065: 方策 action では「この行動でthinkingが枯れた」観測だけを反映する。
+            # 同じモデルの占い・襲撃・CO補正まで思考を縛らない（推理の自由を残す）。
+            thinking_enabled = False
+            thinking_source = "thinking_off_for_action"
+        timeout_fit = self._timeout_fit_applies(actor, key)
+        if timeout_fit:
             # TASK-036: このモデルの議論がタイムアウトしたため、以後の思考・生成上限を
             # 動的に絞る（思考onの大上限はローカル環境で最も応答時間が長い）。
             if (
@@ -5256,10 +5656,140 @@ class OllamaActions(ActionPolicy):
         return self.options.get("dynamic_context") is not False
 
     def _slow_model(self, actor: Player) -> bool:
-        """このモデルで過去にタイムアウトが観測されているか（TASK-036）。"""
+        """このモデルで過去にタイムアウトが観測されているか（TASK-036・モデル単位）。"""
         return bool(
             self.state.model_capabilities.get(actor.model, {}).get("timed_out") is True
         )
+
+    # --- TASK-065: 処置のスコープ（モデル×行動×直近失敗履歴） -----------------------
+    def _stabilization_scope(self) -> str:
+        """安定化処置のスコープ（既定 action、A/B比較用の model）。state の値を尊重する。"""
+        scope = getattr(self.state, "output_stabilization_scope", None)
+        if isinstance(scope, str) and scope.strip().lower() == OUTPUT_STABILIZATION_SCOPE_MODEL:
+            return OUTPUT_STABILIZATION_SCOPE_MODEL
+        return OUTPUT_STABILIZATION_SCOPE_ACTION
+
+    def _timeout_fit_applies(self, actor: Player, budget_key: str) -> bool:
+        """timeout縮小をこの行動へ掛けるか（action は同じ行動で失敗したときだけ）。
+
+        方策 model（旧挙動）ではモデル単位の `timed_out` を引き継ぐ。action では別行動の
+        タイムアウトが議論まで及ばせない。本文が得られている行動は絞らない。
+        """
+        key = normalize_action_budget_key(budget_key)
+        if self._stabilization_scope() == OUTPUT_STABILIZATION_SCOPE_MODEL:
+            return self._slow_model(actor) and key in {"discussion", "wolf_discussion"}
+        return self._stability.has_downgrade(actor.model, key, DOWNGRADE_TIMEOUT_FIT)
+
+    def _thinking_off_applies(self, actor: Player, budget_key: str) -> bool:
+        """thinking枯渇の処置をこの行動へ掛けるか（action は同じ行動だけで絞る）。"""
+        key = normalize_action_budget_key(budget_key)
+        if self._stabilization_scope() == OUTPUT_STABILIZATION_SCOPE_MODEL:
+            return False  # 方策modelでは従来の capabilities["thinking_budget"] だけで決まる
+        return self._stability.has_downgrade(actor.model, key, DOWNGRADE_THINKING_OFF)
+
+    def output_stabilization_snapshot(self) -> dict[str, object]:
+        """CLI・ログ用の逐表（処置中の行動と直近窓。発言内容は含まれない）。"""
+        return self._stability.serialize()
+
+    def name_reference_snapshot(self) -> dict[str, dict[str, int]]:
+        """モデル別の名前内部解決カウンタ（吸収した表記ゆれ／未解決／旧判定なら誤検出数）。"""
+        return {model: dict(counts) for model, counts in self._name_reference_counts.items()}
+
+    # --- TASK-065: プレイヤー名表記ゆれの内部解決（公開本文は変更しない） ----------
+    def _name_resolution_policy(self) -> str:
+        """state の名前正規化ポリシー（既定 normalized / A/B比較用の literal）。"""
+        policy = getattr(self.state, "player_name_resolution_policy", None)
+        return normalize_name_resolution_policy(policy if isinstance(policy, str) else None)
+
+    def _player_names_tuple(self) -> tuple[str, ...]:
+        return tuple(player.name for player in self.state.players)
+
+    def _unknown_player_reference(self, text: object) -> bool:
+        """実在しないプレイヤーを指しているか（旧 `Player\\s+\\d+` の文字列一致を吸収）。"""
+        return has_unresolved_reference(
+            text, self._player_names_tuple(), policy=self._name_resolution_policy()
+        )
+
+    def _sentence_has_unresolved_reference(self, sentence: object) -> bool:
+        """1文だけの未知名前照合（台帳修復で「その文」だけを特定するための内部判定）。"""
+        return self._unknown_player_reference(sentence)
+
+    def _resolved_names_in(self, text: object) -> tuple[str, ...]:
+        """本文から解決できる正式名（内部照合専用・公開テキストは変換しない）。"""
+        return names_in_text(text, self._player_names_tuple(), policy=self._name_resolution_policy())
+
+    def _answers_previous_question_resolved(self, body: str, previous_content: str) -> bool:
+        """直前の発言への回答判定（TASK-065: 名前の表記ゆれを内部解決で吸収）。
+
+        旧判定は `Player\\u202f6` と `Player 6` を別物として扱い、回答していても「未回答」と
+        数えた。ここでは語彙重複の旧判定に加えて、内部解決した正式名の共通言及も回答と見る。
+        判定材料が増えるだけで、公開本文の表記・口調には干渉しない。
+        """
+        if answers_previous_question(body, previous_content):
+            return True
+        names = self._player_names_tuple()
+        policy = self._name_resolution_policy()
+        if not resolve_known_names(previous_content, names, policy=policy):
+            # 直前の発言が誰も話題にしていなければ、名前の一致では回答とみなさない
+            return False
+        return shares_mentioned_players(previous_content, body, names, policy=policy)
+
+    def _record_name_references(
+        self,
+        actor: Player,
+        action: str,
+        started_at: float,
+        texts: tuple[object, ...],
+    ) -> dict[str, int]:
+        """名前言及の内訳を数えて記録する（表記ゆれ吸収の実測。本文は一切変更しない）。
+
+        旧判定（文字列一致）なら未知名前と誤った件数を `legacy_flaggable` として分けることで、
+        正規化が台帳・時系列診断・質問回答判定のノイズをどれだけ減らしたかをA/Bで比較できる。
+        """
+        policy = self._name_resolution_policy()
+        names = self._player_names_tuple()
+        variants = 0
+        unresolved = 0
+        legacy_flaggable = 0
+        labels: dict[str, int] = {}
+        for text in texts:
+            if not isinstance(text, str) or not text:
+                continue
+            refs = scan_references(text, names, policy=policy)
+            unresolved += sum(1 for ref in refs if not ref.resolved)
+            variants += sum(1 for ref in refs if ref.resolved and not ref.exact)
+            # literal（旧来）なら未解決になっていたトークンを数える（吸収実績の分子）
+            for ref in scan_references(text, names, policy=NAME_RESOLUTION_POLICY_LITERAL):
+                if not ref.resolved:
+                    legacy_flaggable += 1
+            for label, count in mention_labels(text, names, policy=policy).items():
+                labels[label] = labels.get(label, 0) + int(count)
+        stats = self._name_reference_counts.setdefault(
+            actor.model,
+            {"references": 0, "variants_absorbed": 0, "unresolved": 0, "legacy_flaggable": 0},
+        )
+        stats["references"] += len([text for text in texts if isinstance(text, str) and text])
+        stats["variants_absorbed"] += variants
+        stats["unresolved"] += unresolved
+        stats["legacy_flaggable"] += max(0, legacy_flaggable - unresolved)
+        self._emit(
+            "name_reference_resolution",
+            action,
+            actor,
+            started_at,
+            name_resolution_policy=policy,
+            name_resolution_policy_label=(
+                "canonical_reference_lookup"
+                if policy == NAME_RESOLUTION_POLICY_NORMALIZED
+                else "exact_string_reference_lookup"
+            ),
+            name_variants_absorbed=variants,
+            unresolved_name_references=unresolved,
+            legacy_unknown_flags_avoided=max(0, legacy_flaggable - unresolved),
+            mention_labels=dict(labels),
+            body_modified=False,
+        )
+        return stats
 
     @staticmethod
     def _request_token_estimate(
@@ -5339,30 +5869,60 @@ class OllamaActions(ActionPolicy):
             (available_input_tokens - fixed_tokens) / CONTEXT_TOKENS_PER_CHAR
         )
         budget = min(CONTEXT_EVIDENCE_MAX_CHARS, max(CONTEXT_EVIDENCE_MIN_CHARS, budget))
-        if self._slow_model(actor):
+        if self._timeout_fit_applies(actor, budget_key):
             budget = int(budget * TIMEOUT_EVIDENCE_RATIO)
         if budget >= evidence_chars:
             return None
         return budget
 
     def _record_model_timeout(
-        self, actor: Player, action: str | None, started_at: float | None
+        self,
+        actor: Player,
+        action: str | None,
+        started_at: float | None,
+        budget_key: str | None = None,
     ) -> None:
-        """タイムアウトをモデル能力情報へ記録し、以後の議論・人狼相談を絞って送る。"""
+        """タイムアウトを記録し、以後の送信を絞る（TASK-036 + TASK-065のスコープ）。
+
+        方策 `action`（既定）では「そのモデル×その行動」にだけ縮小・offを当てる。
+        投票で詰まっても議論の思考は自由のまま残す。方策 `model` は旧挙動（モデル単位の
+        恒久フラグ）で、A/B比較のための逃げ道としてだけ残す。本文は変更しない。
+        """
+        key = normalize_action_budget_key(budget_key or action or "discussion")
+        scope = self._stabilization_scope()
         capabilities = self.state.model_capabilities.setdefault(actor.model, {})
         first_detection = capabilities.get("timed_out") is not True
-        capabilities["timed_out"] = True
-        if first_detection and action is not None and started_at is not None:
-            self._emit(
-                "model_timeout_downgrade",
-                action,
-                actor,
-                started_at,
-                reason="model_timeout_observed",
-                num_predict=TIMEOUT_SAFE_NUM_PREDICT,
-                thinking_enabled=False,
-                evidence_ratio=TIMEOUT_EVIDENCE_RATIO,
-            )
+        if scope == OUTPUT_STABILIZATION_SCOPE_MODEL:
+            # 旧挙動: モデル単位で恒久適用する（--output-stability-scope model のときだけ）
+            capabilities["timed_out"] = True
+        window = self._stability.record(actor.model, key, CATEGORY_TIMEOUT)
+        payload = self._stability.apply_downgrade(actor.model, key, DOWNGRADE_TIMEOUT_FIT)
+        if action is None or started_at is None:
+            return
+        self._emit(
+            "model_timeout_downgrade",
+            action,
+            actor,
+            started_at,
+            reason="model_timeout_observed" if first_detection else "timeout_recurred",
+            num_predict=TIMEOUT_SAFE_NUM_PREDICT,
+            thinking_enabled=False,
+            evidence_ratio=TIMEOUT_EVIDENCE_RATIO,
+            # TASK-065: 処置が及ぶ範囲（action はその行動だけ／model は旧来の恒久適用）。
+            # 同じ kind が別行動でも確認できたかだけの証拠合算で、恒久化は行わない。
+            stabilization_scope=scope,
+            action_budget_key=key,
+            scoped_to_action=(scope == OUTPUT_STABILIZATION_SCOPE_ACTION),
+            model_wide_evidence=self._stability.model_wide_evidence(
+                actor.model, DOWNGRADE_TIMEOUT_FIT
+            ),
+            actions_with_downgrade=sorted(
+                self._stability.actions_with(actor.model, DOWNGRADE_TIMEOUT_FIT)
+            ),
+            recent_categories=list(window.get("recent_categories") or []),
+            downgrade_events=int(payload.get("downgrade_events", 0)),
+            body_modified=False,
+        )
 
     def _fit_retry_budget(
         self,
@@ -5610,6 +6170,10 @@ class OllamaActions(ActionPolicy):
 
         key = normalize_action_budget_key(budget_key)
         profile = self._profile_for(actor, key)
+        # TASK-065（レビュー対応）: この送信でロードされた実効コンテキストを観測し、
+        # provisionalな解決があれば次解決時に実ロード値へ更新できるようにする。
+        self._note_model_request(actor.model)
+        self._note_loaded_context(actor.model, response.effective_num_ctx)
         body_text = self._final_response(response.content).strip()
         elapsed_seconds = max(0.0, time.perf_counter() - send_started)
         thinking_present = bool(response.thinking_present) or self._has_thinking(
@@ -5657,6 +6221,31 @@ class OllamaActions(ActionPolicy):
                         "content_length": len(body_text),
                     },
                 )
+        # TASK-065: 1送信の結果を「モデル×行動の直近窓」へ積む。縮小・offの解除判断にだけ
+        # 使い、本文の内容・口調・推理順には干渉しない（成功が続けば処置を解く）。
+        if thinking_only:
+            stability_category = CATEGORY_THINKING_BUDGET
+        elif empty and response.done_reason == "length":
+            stability_category = CATEGORY_GENERATION_CAP
+        elif empty:
+            # 通信でも予算でもない空応答（形式側）は、絞る材料にしない種別で数える
+            stability_category = CATEGORY_OUTPUT_FORMAT
+        else:
+            stability_category = CATEGORY_OK
+        self._stability.record(actor.model, key, stability_category)
+        relaxed = self._stability.relax(actor.model, key)
+        if relaxed is not None and action is not None and started_at is not None:
+            self._emit(
+                "output_stabilization_relaxed",
+                action,
+                actor,
+                started_at,
+                stabilization_scope=self._stabilization_scope(),
+                action_budget_key=key,
+                cleared_downgrades=sorted(relaxed.get("cleared_downgrades") or []),
+                success_streak=int(relaxed.get("success_streak", 0)),
+                note="直近の本文付き成功が続いたため、この行動の縮小・offを解除した",
+            )
         if action is not None and started_at is not None:
             self._emit(
                 "llm_generation_attempt",
@@ -5720,6 +6309,12 @@ class OllamaActions(ActionPolicy):
 
         key = normalize_action_budget_key(budget_key)
         profile = self._profile_for(actor, key)
+        # TASK-065（レビュー対応）: 失敗してもサーバー側ではモデルがロードされている。
+        # 送信回数を数え、タイムアウトでは解決を引き直して実ロード値の証拠を拾う
+        # （設定16384 / 実ロード4096 の不一致を「後のtimeoutで初めて知る」状態を減らす）。
+        self._note_model_request(actor.model)
+        if error.kind == "timeout":
+            self.resolve_context_budget_for_model(actor.model)
         elapsed_seconds = max(0.0, time.perf_counter() - send_started)
         timed_out = error.kind == "timeout"
         profile.record_attempt(
@@ -5728,6 +6323,10 @@ class OllamaActions(ActionPolicy):
             empty=True,
             timed_out=timed_out,
             transport_error=not timed_out,
+        )
+        # TASK-065: 通信側の失敗も行動別の直近窓へ積む（縮小の解除判断に使う種別分離）。
+        self._stability.record(
+            actor.model, key, CATEGORY_TIMEOUT if timed_out else CATEGORY_TRANSPORT
         )
         if action is not None and started_at is not None:
             self._emit(
@@ -5818,7 +6417,32 @@ class OllamaActions(ActionPolicy):
         )
         if keep_thinking:
             return
-        capabilities["thinking_budget"] = False
+        # TASK-065: thinking枯渇のoffをモデル全体へ恒久適用しない。方策 action では
+        # 「その行動」だけoffにし、占い・襲撃・CO補正などの思考は自由のまま残す。
+        # 同じ種の枯渇が2つ以上の行動で確認できたときだけ、証拠の合算として落とす。
+        scope = self._stabilization_scope()
+        self._stability.record(actor.model, budget_key, CATEGORY_THINKING_BUDGET)
+        payload = self._stability.apply_downgrade(
+            actor.model, budget_key, DOWNGRADE_THINKING_OFF
+        )
+        model_wide = self._stability.model_wide_evidence(actor.model, DOWNGRADE_THINKING_OFF)
+        if scope == OUTPUT_STABILIZATION_SCOPE_MODEL or model_wide:
+            capabilities["thinking_budget"] = False
+        self._emit(
+            "thinking_stabilization",
+            action,
+            actor,
+            started_at,
+            stabilization_scope=scope,
+            action_budget_key=budget_key,
+            thinking_off_for_action=True,
+            model_wide_application=bool(
+                scope == OUTPUT_STABILIZATION_SCOPE_MODEL or model_wide
+            ),
+            actions_with_downgrade=sorted(payload.get("model_wide_actions") or []),
+            recent_categories=list(payload.get("recent_categories") or []),
+            body_preserved=False,
+        )
 
     def _record_tool_unsupported(
         self, actor: Player, action: str, started_at: float
@@ -6063,6 +6687,29 @@ class OllamaActions(ActionPolicy):
             result=result,
             discussion_turn=self.state.discussion_turn,
         )
+        # TASK-064: CO初出を能力境界台帳にも刻む。先に能力表現が出ていた場合は
+        # 距離だけを中立な数値イベントにする（どのCOが本物かを示す情報は載せない）。
+        boundary_tracker = getattr(self.state, "role_action_provenance", None)
+        claim_to_ability_delta = (
+            boundary_tracker.mark_public_claim(
+                actor.name,
+                int(self.state.day),
+                int(self.state.discussion_turn or 1),
+            )
+            if boundary_tracker is not None
+            else None
+        )
+        if claim_to_ability_delta is not None:
+            self._emit(
+                "claim_to_ability_distance",
+                action,
+                actor,
+                started_at,
+                day=int(self.state.day),
+                discussion_turn=int(self.state.discussion_turn or 1),
+                turn_delta=int(claim_to_ability_delta),
+                order="ability_then_claim",
+            )
         self._emit(
             "claim_role_published",
             action,
@@ -6112,6 +6759,23 @@ class OllamaActions(ActionPolicy):
         # TASK-046: env・Modelfile・/api/ps・設定から実効コンテキスト予算の採用値を
         # 単一値として解決（モデル別キャッシュ・初回のみeffective_context_resolutionイベント記録）。
         context_resolution = self._resolve_context_budget(actor, action, started_at)
+        # TASK-065（レビュー対応）: 整合チェックの方策 cap で採用した安全値を、解決結果
+        # （context_resolution.limit）から直接反映する。`_options_for` は整合台帳が書かれる
+        # 前（＝モデル初回リクエスト前）にも走るため、この順序で当てないと初回送信だけが
+        # 旧設定値（例: 16384）を送出してしまう。num_ctx の由来は区別して残す。
+        integrity_cap_applied_here = False
+        if (
+            context_resolution.source == CONTEXT_INTEGRITY_CAP_SOURCE
+            and isinstance(context_resolution.limit, int)
+            and not isinstance(context_resolution.limit, bool)
+            and options is not None
+            and isinstance(options.get("num_ctx"), int)
+            and not isinstance(options.get("num_ctx"), bool)
+            and int(options["num_ctx"]) > int(context_resolution.limit)
+        ):
+            options = dict(options)
+            options["num_ctx"] = int(context_resolution.limit)
+            integrity_cap_applied_here = True
         # TASK-036: 動的コンテキスト。過大割り当てを実測サイズへ縮小し、不足時は
         # max_num_ctxまで拡張する。タイムアウト・漏洩の再要求（retry_budget_fit）では
         # 既に要求サイズへ絞るため、ここでは適用しない。CLIの明示上書きでは尊重する。
@@ -6193,6 +6857,9 @@ class OllamaActions(ActionPolicy):
         else:
             num_ctx_source = "ollama_service_default_or_environment"
         setting_num_ctx_source = num_ctx_source
+        if integrity_cap_applied_here:
+            # TASK-065: 整合チェックの安全値を採用した送信であることを由来として残す
+            num_ctx_source = CONTEXT_INTEGRITY_CAP_SOURCE
         if dynamic_context_applied:
             num_ctx_source = DYNAMIC_CONTEXT_SOURCE
         if retry_num_ctx_applied:
@@ -6258,6 +6925,15 @@ class OllamaActions(ActionPolicy):
                 configured_context_limit=context_resolution.configured,
                 server_observed_context_limit=context_resolution.server_observed,
                 effective_requested_num_ctx=request_options.get("num_ctx"),
+                # TASK-065（レビュー対応）: cap方策の採用値が実際の送信へ効いたかを
+                # リクエストごとに残す（ログ上で adopted と requested が割れないようにする）
+                context_integrity_applied=bool(
+                    context_resolution.source == CONTEXT_INTEGRITY_CAP_SOURCE
+                ) or integrity_cap_applied_here,
+                integrity_requested_num_ctx=context_resolution.integrity_requested_limit,
+                loaded_context_from_ps=context_resolution.loaded_context_from_ps,
+                # 採用値が設定由来のままか、整合チェックで縮退させたか（cap）を分ける
+                context_budget_source_after_integrity=context_resolution.source,
                 context_budget_breakdown=context_budget_breakdown(
                     messages,
                     request_options.get("num_predict"),
@@ -6396,7 +7072,9 @@ class OllamaActions(ActionPolicy):
                 if error.kind == "timeout":
                     # TASK-036: タイムアウトをモデル別能力情報へ記録し、以後の議論・
                     # 人狼相談の思考・生成上限・発言予算を動的に絞る。
-                    self._record_model_timeout(actor, action, started_at)
+                    # TASK-065: ここでは行動名（budget_key）も渡す。方策 action では
+                    # 「その行動」だけを絞り、同じモデルの別行動まで縛らない。
+                    self._record_model_timeout(actor, action, started_at, budget_key)
                 # 思考生成非対応のモデルでは400が返る。同じ要求を再送せず、
                 # think=offで1回だけ再送し、能力情報を記録して以後の行動もoffにする。
                 if not self._is_thinking_unsupported(error) or not (

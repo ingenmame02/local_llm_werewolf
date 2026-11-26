@@ -1,0 +1,179 @@
+===== consumers_of_name_resolution =====
+  cli.py:509: labels = diagnostic_record.get("mention_labels")
+  cli.py:511: bucket = stats.setdefault("name_mention_labels", {})
+  cli.py:1513: "name_mention_labels": {},
+  llm_actions.py:90: has_unresolved_reference,
+  llm_actions.py:91: mention_labels,
+  llm_actions.py:92: names_in_text,
+  llm_actions.py:94: resolve_known_names,
+  llm_actions.py:95: scan_references,
+  llm_actions.py:96: shares_mentioned_players,
+  llm_actions.py:4805: and self._sentence_has_unresolved_reference(sentence)
+  llm_actions.py:5561: return has_unresolved_reference(
+  llm_actions.py:5565: def _sentence_has_unresolved_reference(self, sentence: object) -> bool:
+  llm_actions.py:5571: return names_in_text(text, self._player_names_tuple(), policy=self._name_resolution_policy())
+  llm_actions.py:5584: if not resolve_known_names(previous_content, names, policy=policy):
+  llm_actions.py:5587: return shares_mentioned_players(previous_content, body, names, policy=policy)
+  llm_actions.py:5610: refs = scan_references(text, names, policy=policy)
+  llm_actions.py:5614: for ref in scan_references(text, names, policy=NAME_RESOLUTION_POLICY_LITERAL):
+  llm_actions.py:5617: for label, count in mention_labels(text, names, policy=policy).items():
+  llm_actions.py:5641: mention_labels=dict(labels),
+  name_resolution.py:157: def scan_references(
+  name_resolution.py:259: def resolve_known_names(
+  name_resolution.py:269: for ref in scan_references(text, player_names, policy=policy)
+  name_resolution.py:283: ref for ref in scan_references(text, player_names, policy=policy) if not ref.resolved
+  name_resolution.py:287: def has_unresolved_reference(
+  name_resolution.py:297: def variant_mention_count(
+  name_resolution.py:306: for ref in scan_references(text, player_names, policy=policy)
+  name_resolution.py:311: def mention_labels(
+  name_resolution.py:319: for ref in scan_references(text, player_names, policy=policy):
+  name_resolution.py:324: def names_in_text(
+  name_resolution.py:335: return resolve_known_names(text, player_names, policy=policy)
+  name_resolution.py:338: def shares_mentioned_players(
+  name_resolution.py:350: shared = set(names_in_text(left, player_names, policy=policy)) & set(
+  name_resolution.py:351: names_in_text(right, player_names, policy=policy)
+===== stabilization_flags_in_cli =====
+  cli.py:133: from werewolf.output_stability import (
+  cli.py:135: output_stabilization_scope_label,
+  cli.py:136: normalize_output_stabilization_scope,
+  cli.py:365: "output_stabilization_scope_events": 0,
+  cli.py:369: "stabilization_relaxations": 0,
+  cli.py:393: self._stability_actions: dict[str, set[str]] = {}
+  cli.py:541: self._ledger_metrics["output_stabilization_scope_events"] += 1
+  cli.py:545: scope = str(diagnostic_record.get("stabilization_scope") or "")
+  cli.py:548: self._stability_actions.setdefault(str(model), set()).add(entry)
+  cli.py:555: if event_type == "thinking_stabilization":
+  cli.py:557: self._ledger_metrics["output_stabilization_scope_events"] += 1
+  cli.py:559: scope = str(diagnostic_record.get("stabilization_scope") or "")
+  cli.py:561: self._stability_actions.setdefault(str(model), set()).add(
+  cli.py:570: if event_type == "output_stabilization_relaxed":
+  cli.py:571: self._ledger_metrics["stabilization_relaxations"] += 1
+  cli.py:576: stats["stabilization_relaxations"] += 1
+  cli.py:578: bucket = self._stability_actions.setdefault(str(model), set())
+  cli.py:1523: "stabilization_relaxations": 0,
+  cli.py:1957: "output_stabilization_scope": output_stabilization_scope_label(
+  cli.py:1959: state, "output_stabilization_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT
+  cli.py:2038: "stabilization_relaxations_total": int(
+  cli.py:2039: self._ledger_metrics["stabilization_relaxations"]
+  cli.py:2669: output_stabilization_scope = normalize_output_stabilization_scope(
+  cli.py:2670: getattr(args, "output_stability_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT)
+  llm_actions.py:73: from .output_stability import (
+  llm_actions.py:730: self._stability = OutputStabilityTracker(
+  llm_actions.py:731: getattr(state, "output_stabilization_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT)
+  llm_actions.py:3934: "villager keeping village order or praising a village-side player's stability.\n"
+  llm_actions.py:5453: and self._stabilization_scope() == OUTPUT_STABILIZATION_SCOPE_ACTION
+  llm_actions.py:5454: and self._stability.has_downgrade(actor.model, key, DOWNGRADE_THINKING_OFF)
+  llm_actions.py:5517: def _stabilization_scope(self) -> str:
+  llm_actions.py:5519: scope = getattr(self.state, "output_stabilization_scope", None)
+  llm_actions.py:5531: if self._stabilization_scope() == OUTPUT_STABILIZATION_SCOPE_MODEL:
+  llm_actions.py:5533: return self._stability.has_downgrade(actor.model, key, DOWNGRADE_TIMEOUT_FIT)
+  llm_actions.py:5538: if self._stabilization_scope() == OUTPUT_STABILIZATION_SCOPE_MODEL:
+  llm_actions.py:5540: return self._stability.has_downgrade(actor.model, key, DOWNGRADE_THINKING_OFF)
+  llm_actions.py:5542: def output_stabilization_snapshot(self) -> dict[str, object]:
+  llm_actions.py:5544: return self._stability.serialize()
+  llm_actions.py:5744: scope = self._stabilization_scope()
+  llm_actions.py:5748: # 旧挙動: モデル単位で恒久適用する（--output-stability-scope model のときだけ）
+  llm_actions.py:5750: window = self._stability.record(actor.model, key, CATEGORY_TIMEOUT)
+  llm_actions.py:5751: payload = self._stability.apply_downgrade(actor.model, key, DOWNGRADE_TIMEOUT_FIT)
+  llm_actions.py:5765: stabilization_scope=scope,
+  llm_actions.py:5768: model_wide_evidence=self._stability.model_wide_evidence(
+  llm_actions.py:5772: self._stability.actions_with(actor.model, DOWNGRADE_TIMEOUT_FIT)
+  llm_actions.py:6075: stability_category = CATEGORY_THINKING_BUDGET
+  llm_actions.py:6077: stability_category = CATEGORY_GENERATION_CAP
+  llm_actions.py:6080: stability_category = CATEGORY_OUTPUT_FORMAT
+  models.py:80: from .output_stability import (
+  models.py:82: normalize_output_stabilization_scope,
+  models.py:594: output_stabilization_scope: str = OUTPUT_STABILIZATION_SCOPE_DEFAULT
+  models.py:628: self.output_stabilization_scope = normalize_output_stabilization_scope(
+  models.py:629: self.output_stabilization_scope
+  output_stability.py:51: def normalize_output_stabilization_scope(value: object) -> str:
+  output_stability.py:60: def output_stabilization_scope_label(scope: object) -> str:
+  output_stability.py:62: if normalize_output_stabilization_scope(scope) == OUTPUT_STABILIZATION_SCOPE_MODEL:
+  output_stability.py:130: self.scope = normalize_output_stabilization_scope(scope)
+  prompts.py:105: "villager's stability check.\n"
+  prompts.py:1059: "village vigilance, or a villager's stability check, and do not praise a village-side player as "
+===== unknown_name_checks_in_llm =====
+  llm_actions.py:96: shares_mentioned_players,
+  llm_actions.py:448: "unknown_player_reference",
+  llm_actions.py:1246: def _question_answer_check(
+  llm_actions.py:3504: "unknown_player_reference": "Do not mention non-existent player names; refer only to current players.",
+  llm_actions.py:4743: elif issue == "unknown_player_reference":
+  llm_actions.py:4766: "unknown_player_reference",
+  llm_actions.py:4804: or issue == "unknown_player_reference"
+  llm_actions.py:4805: and self._sentence_has_unresolved_reference(sentence)
+  llm_actions.py:5064: if self._unknown_player_reference(response):
+  llm_actions.py:5065: return "unknown_player_reference"
+  llm_actions.py:5559: def _unknown_player_reference(self, text: object) -> bool:
+  llm_actions.py:5565: def _sentence_has_unresolved_reference(self, sentence: object) -> bool:
+  llm_actions.py:5567: return self._unknown_player_reference(sentence)
+  llm_actions.py:5587: return shares_mentioned_players(previous_content, body, names, policy=policy)
+  name_resolution.py:338: def shares_mentioned_players(
+  self_consistency.py:250: mentioned_players = {
+  self_consistency.py:281: not mentioned_players
+  self_consistency.py:282: or mentioned_players.issubset(
+===== ledger_entry_points_engine =====
+  cli.py:1875: for claim in state.claim_ledger.public_claims.values()
+  cli.py:1884: in state.claim_ledger.public_seer_results.items()
+  cli.py:1890: for fact in state.fact_ledger.confirmed_facts
+  cli.py:1894: asdict(claim) for claim in state.fact_ledger.public_claims
+  cli.py:1897: asdict(fact) for fact in state.fact_ledger.model_inferences
+  cli.py:1901: "hypothesis_ledger": state.hypothesis_ledger.serialize_public(),
+  cli.py:1903: "topic_ledger": state.topic_ledger.serialize(),
+  cli.py:1972: **state.hypothesis_ledger.metrics(),
+  cli.py:1973: **state.topic_ledger.metrics(),
+  cli.py:2451: asdict(fact) for fact in state.fact_ledger.confirmed_facts
+  cli.py:2454: asdict(claim) for claim in state.fact_ledger.public_claims
+  cli.py:2457: asdict(fact) for fact in state.fact_ledger.model_inferences
+  cli.py:2461: "hypothesis_ledger": state.hypothesis_ledger.serialize(),
+  engine.py:315: for fact in state.fact_ledger.confirmed_facts
+  engine.py:395: ) or (claimant, target) in state.claim_ledger.public_seer_results
+  engine.py:1225: self.state.fact_ledger.confirmed_facts.append(
+  engine.py:1254: self.state.fact_ledger.confirmed_facts.append(
+  engine.py:1784: self.state.fact_ledger.confirmed_facts.append(
+  engine.py:1892: ledger_claim = self.state.claim_ledger.public_claims.get(speaker)
+  engine.py:1941: self.state.claim_ledger.public_claims[speaker] = ledger_claim
+  engine.py:1982: self.state.fact_ledger.public_claims.append(
+  engine.py:2048: previous_result = self.state.claim_ledger.public_seer_results.get(result_key)
+  engine.py:2071: self.state.claim_ledger.public_seer_results[result_key] = claimed_result
+  engine.py:2110: self.state.fact_ledger.public_claims.append(
+  engine.py:2211: self.state.fact_ledger.model_inferences.append(
+  engine.py:2745: self.state.fact_ledger.confirmed_facts.append(
+  llm_actions.py:1332: prior_topics=self.state.topic_ledger.topics_for_day(self.state.day),
+  llm_actions.py:1491: has_claim = player in self.state.claim_ledger.public_claims or any(
+  llm_actions.py:1515: (player, target) not in self.state.claim_ledger.public_seer_results
+  llm_actions.py:5331: return self.state.claim_ledger.public_seer_results.get(
+  models.py:637: self.claim_ledger.public_claims.setdefault(
+  models.py:649: self.claim_ledger.public_seer_results[
+  models.py:654: self.claim_ledger.public_seer_results[
+  models.py:785: for index, fact in enumerate(self.fact_ledger.confirmed_facts, 1)
+  models.py:994: self.hypothesis_ledger.record(
+  models.py:1031: self.hypothesis_ledger.record(
+  models.py:1048: self.hypothesis_ledger.resolve(self)
+  models.py:1052: return self.hypothesis_ledger.render_for(actor_name)
+  models.py:1056: self.hypothesis_ledger.snapshot_presentation(actor_name)
+  models.py:1121: return self.topic_ledger.record_speech(
+  models.py:1133: return self.topic_ledger.summarize_for(actor_name, day, dead_names=dead_names)
+  models.py:1138: for record in self.hypothesis_ledger.records.values():
+  models.py:1163: for claim in self.claim_ledger.public_claims.values()
+  models.py:1170: in self.claim_ledger.public_seer_results.items()
+  prompts.py:858: for fact in state.fact_ledger.confirmed_facts
+  prompts.py:873: for fact in state.fact_ledger.model_inferences[-6:]
+  prompts.py:1685: summary = state.hypothesis_ledger.summary_for(actor.name)
+  prompts.py:1691: for fact in state.fact_ledger.model_inferences[-6:]:
+  prompts.py:1870: for index, fact in enumerate(state.fact_ledger.confirmed_facts, 1)
+  prompts.py:3446: len(state.claim_ledger.public_seer_results) if state else 0
+  self_consistency.py:294: for fact in state.fact_ledger.confirmed_facts
+===== directed_to_actor_prompts =====
+  day_timeline.py:327: "pending_speakers": list(self.speakers_pending),
+  day_timeline.py:676: pending_speakers = tuple(
+  day_timeline.py:692: speakers_pending=pending_speakers,
+  day_timeline.py:848: "timeline_pending_speakers": len(snapshot.speakers_pending),
+  llm_actions.py:1265: directed = PromptBuilder._is_directed_to_player(
+  llm_actions.py:1320: and PromptBuilder._is_directed_to_player(
+  llm_actions.py:3653: if is_question and PromptBuilder._is_directed_to_player(
+  llm_actions.py:3694: if PromptBuilder._is_directed_to_player(
+  llm_actions.py:4018: ) and PromptBuilder._is_directed_to_player(
+  llm_actions.py:4387: and PromptBuilder._is_directed_to_player(
+  llm_actions.py:5051: and PromptBuilder._is_directed_to_player(
+  prompts.py:2533: directly_addressed = cls._is_directed_to_player(
+  prompts.py:3457: def _is_directed_to_player(

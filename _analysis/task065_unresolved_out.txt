@@ -1,0 +1,17 @@
+ledger_repairs=8
+- reason=unknown_player_reference player=Player 1 model=llm-jp-4.1-33b-thinking-fixed preserved=True seq=17
+- reason=unknown_player_reference player=Player 1 model=llm-jp-4.1-33b-thinking-fixed preserved=True seq=100
+- reason=unknown_player_reference player=Player 7 model=werewolf-gpt-oss-20b-16k preserved=True seq=156
+- reason=dead_player_question player=Player 3 model=werewolf-mistral-small-16k preserved=True seq=331
+- reason=unverified_attributed_speech player=Player 8 model=werewolf-gemma4-16k preserved=True seq=366
+- reason=unknown_player_reference player=Player 1 model=llm-jp-4.1-33b-thinking-fixed preserved=True seq=375
+- reason=unknown_player_reference player=Player 7 model=werewolf-gpt-oss-20b-16k preserved=True seq=414
+- reason=unverified_attributed_speech player=Player 8 model=werewolf-gemma4-16k preserved=True seq=423
+
+== detector mismatches in generated/discussion bodies (repr) ==
+total_mismatch=0 nfkc_recoverable=0
+
+== mention label variants present in bodies ==
+203x kind=canonical target=known
+34x kind=nbsp_or_no_space target=known
+19x kind=katakana target=known

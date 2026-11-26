@@ -1,0 +1,21 @@
+711 timed_out: bool = False,
+737 timed_out=timed_out,
+810 timeout_fit = self._slow_model(actor) and key in {"discussion", "wolf_discussion"}
+3697 self._slow_model(actor)
+4437 known_players = {player.name for player in self.state.players}
+4699 name not in known_players
+4905 known_players = {player.name for player in self.state.players}
+4907 public_result = extract_public_seer_result(result_content, tuple(known_players))
+4953 if previous_message is not None and previous_message.speaker not in first_sentence:
+4957 if any(name not in known_players for name in mentioned_players):
+5330 capabilities.get("timed_out") is True
+5381 def _slow_model(self, actor: Player) -> bool:
+5384 self.state.model_capabilities.get(actor.model, {}).get("timed_out") is True
+5465 if self._slow_model(actor):
+5476 first_detection = capabilities.get("timed_out") is not True
+5477 capabilities["timed_out"] = True
+5847 timed_out = error.kind == "timeout"
+5852 timed_out=timed_out,
+5853 transport_error=not timed_out,
+5880 timed_out=timed_out,
+5881 transport_error=not timed_out,

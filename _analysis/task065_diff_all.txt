@@ -1,0 +1,2378 @@
+diff --git a/README.md b/README.md
+index 3928217..38d235c 100644
+--- a/README.md
++++ b/README.md
+@@ -116,7 +116,7 @@ ollama serve
+ | `--day-timeline {explicit,off}` | `explicit` | 議論プロンプトに発言時点の時系列欄 `[DAY_TIMELINE]` を出すか。`explicit` は現在時点（Day / Turn / #順序）・自分の発言順（`[speech:N]`）・このターンで既知の先行発言・**まだ起きていないこと**（自分より後の発言者、今日の投票、今夜の夜行動）を5行／460字以内で示します。口調・論点・結論や推理の順番は決めず、公開本文は書き換えません（未来参照の検出は観測専用で `body_modified=false`）。`off` は時系列欄と検査を行わない旧挙動（A/B比較用）。発言ヘッダの短縮と台帳の時点スタンプは両設定で効きます |
+ | `--prompt-contract {simplified,legacy}` | `simplified` | プロンプト契約の整理。`simplified` は強い制約（非公開情報の秘匿・創作禁止・一人称視点・メタ話禁止・`[REASONING]` を `[BODY]` に混ぜない・ブロック順・応答言語）を `[BEHAVIOR_CONTRACT]` へ1箇所に集め、同じ命令文の再掲を減らします。発言本文は `[CONVERSATION_EVIDENCE]` の1箇所だけに出し、質問引用・自分の発言欄・行動記録の発言行・推測行は `[ref:sN]` 参照にします（履歴から削られた発言の空参照は作りません）。割り当てが足りないときだけ optional 節（論点要約・推理誘導・仮説差分・推測行・期限切れガイダンス・整合アラート・派生メモ）を段階的に落とし、確定事実台帳・現在の質問・自分の行動記録・自分の推理メモ・発言本文・時系列欄は落としません。口調・文量・構成・論点・結論は自由のままです。`legacy` は旧来の形（命令文の重複と本文再掲）でA/B比較用 |
+ | `--core-compression {layered,off}` | `layered` | core予算の段階圧縮。`layered` は証拠欄の中で、既に台帳へ正規化済みの過去の低優先発言の本文だけを時点・話者・`[speech:N]` を残す約70字の行へ畳みます（`[body withheld ...]`＝削除ではなくプロンプトでの省略で、公開ログの本文はそのまま）。質問対象・反証・投票・役職主張と占い判定の根拠、直近の発言は本文のまま温存し、単純な末尾切り捨ては行いません。ルール・秘匿境界・現在の質問・行動形式・自分の行動記録・エンジン発行情報（`anchor`層）はどの設定でも無傷です。`off` はTASK-057まで旧挙動（予算超過時はレコード削除のみ）でA/B比較用。※節順そのものは `--prompt-layout` で選びます
+-| `--prompt-layout {v4,v3,v2,auto}` | `v4` | 議論プロンプトに載せる情報の**位置**を決める設定（言い方・論点・結論・推理順には干渉せず、口調・文量・構成の自由は変わりません）。`v4`（TASK-062の既定）は `v3` の連鎖へ `[CONTINUITY_CHECKPOINT]`（エンジン発行の論理状態）を挟み、発言証拠の直後・現在質問の直前に置きます。`v3` は ルール→応答言語→自分の行動記録→盤面の確定事実→本人限定情報、中部（セオリーカード・仮説差分・既出論点・派生メモ・期限付き案内といった落とせる派生情報のみ）、終端へ 公開主張の索引→時点→発言証拠→現在質問→**自分の発言と自分の推理メモ**→中立な議論の案内→秘匿境界→強い契約→出力形式→最終チェックリスト。人狼セオリーカード（約2,300字）は事実台帳の内側（先頭帯）から独立節へ出し、割り当て不足時に落ちる optional にしました。出力形式仕様の後ろに案内が載って形式指定が遠のく配置も解消済みです。`v2` はTASK-058の節順、`auto` は `--prompt-contract` に追随（legacy ではTASK-057までの字节順）。A/Bは同じseedで `ledger_metrics` の `avg_prompt_zone_{primacy,middle,recency}_chars` / `avg_prompt_instructions_to_end_chars` / `avg_gap_question_to_evidence` / `avg_gap_timeline_to_evidence` / `avg_gap_own_speeches_to_question` / `duplicate_constraint_total` / `dedup_saved_chars_total` と、照応率・立場の一貫性・parse失敗率を突き合わせます |
++| `--prompt-layout {v5,v4,v3,v2,auto}` | `v5` | 議論プロンプトに載せる情報の**位置**を決める設定（言い方・論点・結論・推理順には干渉せず、口調・文量・構成の自由は変わりません）。`v5`（TASK-064の既定）は `v4` の連鎖へ `[ROLE_ACTION_BOUNDARY]`（エンジンが実際に実行した能力と本人の公開主張の境界）を挟み、現在質問の直後・自分の発言の直前に置きます（代表字数26,340での貪欲探索が最良と出した位置で凍結済み）。中身は `[DONE]`（エンジンがそのプレイヤー分として実行した占い・襲撃の日数だけで、判定本文は本人限定節のまま）と `[CLAIM]`（本人の公開CO `[claim:N]` は未検証である事実）の2行相当のみ。`v4` は境界節なしのTASK-062配置でA/B比較の基準側です。`v3` は ルール→応答言語→自分の行動記録→盤面の確定事実→本人限定情報、中部（セオリーカード・仮説差分・既出論点・派生メモ・期限付き案内といった落とせる派生情報のみ）、終端へ 公開主張の索引→時点→発言証拠→現在質問→**自分の発言と自分の推理メモ**→中立な議論の案内→秘匿境界→強い契約→出力形式→最終チェックリスト。人狼セオリーカード（約2,300字）は事実台帳の内側（先頭帯）から独立節へ出し、割り当て不足時に落ちる optional にしました。出力形式仕様の後ろに案内が載って形式指定が遠のく配置も解消済みです。`v2` はTASK-058の節順、`auto` は `--prompt-contract` に追随（legacy ではTASK-057までの字节順）。A/Bは同じseedで `ledger_metrics` の `avg_prompt_zone_{primacy,middle,recency}_chars` / `avg_prompt_instructions_to_end_chars` / `avg_gap_question_to_evidence` / `avg_gap_timeline_to_evidence` / `avg_gap_own_speeches_to_question` / `avg_gap_state_to_{evidence,question}` / `avg_gap_role_boundary_to_{question,own_speeches}` / `avg_claim_boundary_chars` / `duplicate_constraint_total` / `dedup_saved_chars_total` と、照応率・立場の一貫性・parse失敗率を突き合わせます |
+ | `--continuity {normalized,off}` | `normalized` | 日をまたぐ論理状態の正規化。エンジンが発行する短い状態差分 `[CONTINUITY_CHECKPOINT]`（確定事実 `[CONFIRMED]`／公開申告 `[SAID-unverified]`／自分の未検証仮説 `[YOUR-UNVERIFIED]`／反証済み `[NO-LONGER-STANDS]` を権威タグで分け、`observed DdTt` と証拠ID付きの1行だけ）を次の発言へ渡します。表示は変わった項目・反証・未解決の問いのみで、変わっていない項目は「個数＋チェックポイントID」の1行に畳み、正規化した日の平常発言本文は ID 行へ縮約（`evidence_continuity_folded_count`）して、プロンプトが日に比例して増えるのを止めます。反証された読みは履歴として出し、古い行が新しい事実として読まれるのを防ぎます。「結論を維持せよ」等の指示はなく、立場を自由に変えられます。`off` はチェックポイントを出さない旧挙動（A/B比較用） |
+ | `--language {English,Japanese}` | 設定／日本語 | 応答言語 |
+ | `--personality {…profiles…,free}` | 設定そのまま | 全プレイヤーの個性プロファイルを上書き。`free` は自由発言モード（話し方の preset なし） |
+@@ -217,6 +217,7 @@ ollama serve
+ - core予算の段階圧縮（既定 `layered` / `--core-compression off` で比較）: TASK-057でも8k系モデルは optional を stage4まで削った後に core が残って割り当てを超えていました。`core_compression.py` が core を `anchor`（常に全文）/ `recent`（本文保持を優先する直近情報）/ `historical`（台帳済みの古い低優先発言）へ分け、`[CONVERSATION_EVIDENCE]` の中だけを stub 行（時点・ID・話者を残す約70字）へ畳みます。同じ群では古い順に畳み、質問対象・反証・投票・役職主張と占い判定（`looks_like_claim`）には触らないため、単純な末尾切り捨てで最新の議論や根拠が消えることはありません。実測は `core_anchor_chars`（layered/off で一致するはず）、`core_recent_chars`、`core_historical_chars`、`evidence_withheld_body_total`、`evidence_withheld_saved_chars_total` で行い、公開ログの本文は不変です。
+ - プロンプトの節順（attention最適化・layout v2）: `simplified` では先頭（primacy）にルール→確定事実台帳→自分の一貫性アンカー（行動記録・今日の発言・エンジン発行情報・自分の推理メモ）、中部（注意が弱い帯）に落としやすい派生節（仮説差分・既出論点・期限切れ案内・派生メモ・整合アラート）、その直後に発言証拠と現在の質問、終端（recency）に秘匿境界→強い契約→出力形式→チェックリストを置きます。`PROMPT_LAYOUT_V2_ORDER` を `validate_prompt_layout` で検査し、崩れは `prompt_layout_violations` として記録します（口調・論点・結論や推理順を決める文言を追加する節は存在しません）。この節順は TASK-060 で `v3`（セオリーカードを独立optional節へ、索引→時点→証拠→質問→自分の記録の連鎖を終端帯へ）、TASK-062 で `v4`（同じ連鎖へ `[CONTINUITY_CHECKPOINT]` を発言証拠の直後・現在質問の直前に追加）へ更新され、`PROMPT_LAYOUT_V4_ORDER` を同じ検査器で検証します。代表字数での貪欲探索が最良として再現する順を凍結しており、A/Bは `adopted_layout_score()` / `v3_layout_score()` と `avg_prompt_zone_*`、`avg_gap_*`、照応率・立場の一貫性・parse失敗率で行います。`legacy` は旧来の字节順のままなので、同一seedで `--prompt-contract legacy --core-compression off` を回せば基準側が壊れていないことを確認できます。
+ - 日をまたぐ論理状態の正規化（既定 `normalized` / `--continuity off` で比較・TASK-062）: `continuity_state.py` が、エンジン確定の事実（襲撃死・投票・処刑・生存者）、公開されたCOと占い申告、本人の未検証仮説、反証されて成り立たなくなった読みを、それぞれ権威レベルを明記したID付き短行（1行280字上限）としてプレイヤー別に保持します。プロンプトには「前回から変わった項目」「反証・差し替え」「未解決の問い」だけを出し（changed 4／overturned 3／unresolved 3行）、変わっていない項目は本文もIDも再掲せず個数とチェックポイントIDの1行に畳みます。エンジン日誌では `continuity_state_chars`（実測 約1.0k字／リクエスト）、`avg_continuity_items_changed`、`avg_continuity_items_unchanged`、`evidence_continuity_folded_total`、`continuity_fold_saved_chars_total`、ゲーム終了時に `continuity_chars_by_day` と `continuity_max_day_delta`（過去の発言を積み増さないため日跨ぎで線形増加しないことを見る）を記録します。状態節には口調・論点・結論・推理順を決める命令文を置いていません（テストで禁止語を照合）。
++- 役職能力の境界整理（既定・TASK-064）: `role_action_provenance.py` が役職情報を4つへ分けます。`engine_action`（エンジンがそのプレイヤー分として実際に実行した占い・襲撃の日付だけ。判定内容そのものは本人限定節から出しません）、`public_role_claim`（本人が名乗った公開COと `[claim:N]`。ブラフもこの分類で受理し本文は書き換えません）、`unsupported_role_action`（実行記録がないのに能力を行使したかのように断定した発言）、`inference`（他者の能力についての推測）です。検出は**観測専用**で、疑問形・仮定形・引用・否定は行使として数えず、本文の無害化・再生成には使いません（CO可否は従来どおり `--bluff-role-claim`、既定は許可）。議論プロンプトには `[ROLE_ACTION_BOUNDARY]` として「エンジン実行＝ `[DONE]`（何夜分やったか）／本人申告＝ `[CLAIM]`（未検証）」の2行相当だけを現在質問の直後・自分の発言の直前に置き、エンジン結果・公開主張・推測の本文は重複掲載しません（代表字数プローブで最良と出た位置を `PROMPT_LAYOUT_V5_ORDER` として凍結し、同じ検査器で節順の崩れを `prompt_layout_violations` に記録）。実測は境界節 平均194字（プロンプト増加は約+180字）、`avg_gap_role_boundary_to_question` 0.0076・`avg_gap_role_boundary_to_own_speeches` 0.0。どのCOが本物か・エンジン結果との一致／不一致は管理者ログ（`serialize_admin()`）だけが持ち、公開ログ・checkpoint・プロンプトへは中立な合計値だけを出します（`role_boundary_sections` / `avg_claim_boundary_chars` / `role_ability_assertions_observed` / `hedged_ability_mentions_observed` / `unsupported_role_action_count` / `claim_vs_engine_conflict_count` / `retry_added_ability_expressions` / `avg_claim_to_ability_turn_delta`）。夜の実行（占い・襲撃決定）は engine 側で [DONE] 実行記録へ積み、公開発言から能力断定を観測したときは CO初出→能力断定（またはその逆）のターン距離を数値だけのイベントとして積むので、「自分が実際にやった行動」と「自分が言った主張」の混同を抑えつつ、騙り・疑い・立場変更の自由はそのままです（命令文・誘導文言は増やさず、テストで禁止語を照合）。
+ - 引用の時点分類と未解決参照の原因分解（観測専用・本文は書き換えない）: `TurnSnapshot.citation_status()` が引用相手の状態を「同一ターンの先行発言／別ターン・別日の既発言／死亡後の履歴参照／まだ公開発言なし」へ分け、実際の未来参照候補は最後だけに絞ります。婉曲での仮定引用（`hedged_pending_citations_observed`）や未発言者名の一般言及（`mentions_without_attribution_observed`）は違反に数えず、自由な議論を萎ませません。本文中の `[speech:N]` / `[ref:sN]` は `evidence_reference_counts` で「時点で解決済み／まだ存在しないID＝実際の未来参照／時点情報がない旧ログ互換／帰属なのにIDなし」へ分解し、空本文のリクエストは `timeline_checks_skipped_empty_body` として検査対象に水増ししません。公開台帳の `serialize()["metrics"]` の形はTASK-056のまま据え置き、内訳はイベント診断と `observation_metrics()`（非公開面）だけで見ます。
+ - 発言時点の時系列明示（既定 on / `--day-timeline off` で比較）: `[DAY_TIMELINE]` に「現在時点・自分の発言順・このターンで既知の先行発言・まだ起きていないこと（後発プレイヤー／今日の投票／今夜の夜行動）」を5行460字以内で出します。エンジン側は発言ごとに `day / discussion_turn / speech_id / timeline_index` をスタンプし、日の開始・投票・処刑・襲撃死も登順で台帳（`public_timeline`）へ登録するため、「自分が先に言ったのか、相手が後に言ったのか」を本文を引かずに追えます。口調・論点・結論や推理の順番は指示しません。
+ - 同じ機能で節約も行う: 発言履歴ヘッダを従来形 `[Day 1 / Speech 3 / Player 2 / In-game speech]`（45字）から時点つき短縮形 `[D1 T2 s14 Player 2]`（約21字）へ縮約したため、ローカル模擬の実測では新しい欄の実費（約256字／リクエスト）より大きい削減（ヘッダ合計 約557字／同一履歴）となり、プロンプト总量は旧構成より約300字減少しました（`avg_day_timeline_chars`、`avg_evidence_char_count`、`evidence_header_style` でA/B検証可）。
+diff --git a/TASKS.md b/TASKS.md
+index 219eba4..485d900 100644
+--- a/TASKS.md
++++ b/TASKS.md
+@@ -2690,3 +2690,150 @@ thinking を一律 off にしたり推理手順を示す変更はしていない
+ 観測済み思考を静的天井で削らないこと、checkpoint先頭の短縮再要求（投票台帳を省く）、
+ CLIのカテゴリ集計。`python -m pytest -q` で 269 passed（実機テストは行っていない）。
+ 
++## TASK-064 最新ゲーム分析 — 役職騙りと能力行使の境界整理・コンテキスト配置改善
++
++状態：未着手（実機ログ `game_bcd7c97e7e48` で課題を確認）
++
++### 背景
++
++`game_bcd7c97e7e48` でPlayer 4は実際には村人だったが、Day 1 T3に「Player 1を占って狼と判定した」と発言した。直前のT1/T2ではPlayer 1の占い師COを慎重に検討しており、自分が占い師である根拠は提示していなかった。直前の送信は`seer_result_without_claim`で解析失敗し、再要求後に占い師COと占い結果が公開された。
++
++設定上は`allow_bluff_role_claim=true`なので、村人・人狼・狂人が占い師COをする自由そのものは残すべきである。一方、現在のログでは「占い師だと主張する」ことと「エンジン上で実際に占い能力を行使した」ことが、compatibility text経路では同じ`public_seer_results`へ入りやすい。今回、秘密情報漏洩は検出されていないが、未検証のブラフがモデル・診断・再要求側で実結果のように読まれる余地がある。
++
++また、同ゲームでは全体の平均user promptが約19,513字、最大25,298字、平均coreが約15,278字で、Player 4の当該プロンプトも約20,877字だった。`[CONTINUITY_CHECKPOINT]`、Fact/Claim/Hypothesisの各台帳、役職主張、セオリーカード、出力契約が同時に提示されるため、役職能力の境界情報が長い文脈の中で埋もれ、再要求時により強い表現へ変換された可能性がある。
++
++### 目的
++
++役職騙り・ブラフ・疑いの表明は自由に保ちながら、エンジンが実際に実行した能力行動と、プレイヤーが公開した未検証の主張を明確に分離する。役職能力の境界を短く目立つ位置へ配置し、コンテキスト量と再要求時の混同を減らす。
++
++### 実装案
++
++1. `RoleActionProvenance`を追加し、役職情報を`engine_action`（実際に実行された占い・襲撃等）、`public_role_claim`（本人がそう主張した）、`unsupported_role_action`（実行記録がないのに能力行使として発言した）、`inference`（他者の推測）へ分離する。`true_role`・非公開占い結果は公開台帳へ混ぜない。
++2. 「私は占った」「占い結果は狼だった」のような能力行使表現を検出しても本文は変更せず、`unsupported_role_action`として観測する。COそのものは許可し、`allow_bluff_role_claim`の設定で拒否・許可を選べるようにする。
++3. Claim Ledgerには「Player 4が占い師を名乗った」「Player 1を狼と主張した」だけを載せ、Fact Ledgerには実際のエンジン占い結果だけを載せる。両者の表示記号と`authority`を短い固定行で分ける。
++4. プロンプト順は、`[CONTINUITY_CHECKPOINT]`の直後または現在質問の直前に、次の短い境界節を置く。
++   - 実行済みの自分の能力行動
++   - 自分が公開した役職主張
++   - 公開主張は真実とは限らないこと
++   - 役職騙り・疑い・立場変更は自由であること
++   エンジン結果・公開主張・推測の本文を重複掲載しない。
++5. `seer_result_without_claim`の再要求では、長い旧プロンプトを再送せず、能力行動の実行記録、公開主張の状態、現在質問、出力形式だけを渡す。再要求が未検証の能力行使を新たに生成していないかを比較する。
++6. `role_action_provenance_counts`、`unsupported_role_action_count`、`claim_vs_engine_conflict_count`、`claim_boundary_chars`、役職主張の初出から能力行使表現までの距離をモデル別・行動別に記録する。
++
++### 設計上の制約
++
++- 役職騙り、ブラフ、疑問形、仮定形、他者の発言引用を自動修正・禁止しない。
++- 「村人は占い師COしてはいけない」のようなゲーム外のセオリーを強制しない。
++- `unsupported_role_action`は観測・分類を目的とし、本文を再生成して無害化する目的には使わない。
++- 能力行動の事実性だけを分離し、口調・論点・結論・推理順はモデルに委ねる。
++
++### 完了条件
++
++- Player 4型の発言を、役職騙りとして公開可能な主張と、エンジン未実行の能力行使表現へ分類できる。
++- 実際の占い結果・襲撃対象・真役職が公開台帳やcheckpointへ混入しない。
++- `seer_result_without_claim`再要求で未検証結果を事実化せず、短縮プロンプトが通常プロンプトより明確に短い。
++- 役職騙りを許可した状態で、CO・ブラフ・疑問・仮定の本文が変更されない。
++- 既存の`role_provenance`、`continuity`、`prompt_layout v4`、秘密情報ガード、時系列検査との整合をLL不使用テストで確認する。
++- モックA/Bでコンテキスト量・能力境界違反・再要求率を測定し、実機Ollamaでは同一seedでモデル別比較を行う。
++
++## TASK-064 実装記録 — 役職騙りと能力行使の境界整理（2026-11-24）
++
++### 追加・変更ファイル
++
++- 新規: `src/werewolf/role_action_provenance.py`（`engine_action` / `public_role_claim` / `unsupported_role_action` / `inference` の4分類台帳と能力表現検出）、`tests/test_task064_role_action_boundary.py`（22テスト）。
++- 変更: `models.py`（`GameState.role_action_provenance`）、`prompt_contract.py`（core節 `role_action_boundary` を登録）、`core_compression.py`（`anchor`層＝どの設定でも無傷）、`prompt_layout.py`（`v5`ポリシー・代表字数・隣接目標・「主張索引より前に置かない」ハード制約・`search_prompt_orders_v5()`）、`prompts.py`（`_role_action_boundary_section` と診断キー `role_boundary_section_chars`）、`engine.py`（夜の実行を本人用実行記録へ登録し、公開CO初出と能力断定の距離を中立イベントで発行。公開本文には一切書き込まない）、`llm_actions.py`（CO補正プロンプトを短縮改稿し、再要求で増えた能力表現を差分観測。ツールCO publish でも初出距離を記録）、`cli.py`（`--prompt-layout v5` を既定化し境界節・観測の指標を総合／モデル別に配線）、`tests/test_task060_prompt_layout.py`（既定 v5、A/B基準は v4 / v3 のまま参照できる形へ更新）。
++
++### 挙動（設計思想との対応）
++
++1. **節約**: `[ROLE_ACTION_BOUNDARY]` はエンジン実行（`[DONE]`＝占いを実施した夜数・襲撃夜数だけ）と本人申告（`[CLAIM]`＝直近2件の `[claim:N]` と unverified 注記）を2行相当に畳む固定節。エンジン結果・公開主張・推測の本文は再掲しない（結果は私人欄、CO本文は CLAIM_LEDGER が既に持つ）。CO補正の再要求では旧プロンプトを再送せず、実行記録・主張状態・現在の質問（200字まで）・出力形式だけを送る。
++2. **一貫性**: 実行済み行動（エンジン）と自分の発言（申告）を台帳で分けて保つ。「Player 4が占い師を名乗った」は claim、「実際に占った夜」は engine で、表記記号も `[SAID]`/`[CONFIRMED]` 系と同じ権威分離。CO初出→能力断定のターン距離（`avg_claim_to_ability_turn_delta`）を距離指標として残す。
++3. **合理的な議論**: `[DONE]`／`[CLAIM]` の1行説明で「エンジン実行の事実」と「自分の申告（未検証）」の読み違えを防ぐ。CO補正は Options A/B を並べ、継続か撤回かの結論はモデルに残す。
++4. **自由の非拘束**: 検出は観測専用。疑問形・仮定形・引用・否定は行使として数えず（`hedged_mentions_observed`）、三人称言及は `inference` に逃がす。本文の再生成・無害化・言い換えは一切しない。ブラフ可否は従来の `--bluff-role-claim`（既定 allow）のままで、境界節に命令文・誘導文言を増やさないことはテストで禁止語照合済み。
++
++### プロンプト順の最適化（LL不使用プローブで凍結）
++
++代表字数26,340での貪欲探索（単一ブロック移動＋2ブロック入替・乱数固定）が最良とした位置—現在質問の直後・自分の発言の直前（`question_block → direct_answer → role_action_boundary → own_speeches → reasoning_memo_own`、索引 `claim_ledger` より前禁止のハード制約充足、violations=0）—を `PROMPT_LAYOUT_V5_ORDER` として凍結し、`search_prompt_orders_v5()` が同じ節順を再現する。同じ節を議論案内の直前へ足すだけの配置は同コストモデルで下位（`_analysis/task064_order_out.txt`）。隣接距離は RBOUND→質問 0.0099／RBOUND→自分の発言 0.0000、STATE→質問 0.0034 のまま維持（v4の連鎖は壊さない）。
++
++### 効果の実測（モック・LL不使用: `_analysis/task064_effect_probe.py`）
++
++- 議論プロンプト典型例（Day1・発言あり）: v5=14,011字 / v4=13,831字（+180字＝境界節そのものの実費。節顺の崩れ 0）。節約ではなく「読み違えの防止」に使う最小限のコストとして計上した。
++- 検出コーパス10行（`game_bcd7c97e7e48` の Player 4 型「私が占った結果、Player 1は狼だった」、対象=判定形式、婉曲、三人称、COなし能力語、英語、疑問形）: 断定4・非行使3・三人称3を正しく分離し誤検出0。婉曲・疑問は unsupported に数えない。
++- CO補正プロンプト（`seer_result_without_claim`）: 通常プロンプト 13,994字 → 補正時 688字（比率 0.049、全seed共通で0.1未満）。完了条件の「再要求が通常プロンプトより明確に短い」を充足。結果行を伴う選択肢Aを出すのはエンジン実行記録のある本人だけで、非保有者は結果行なしの主張か質問への回答のみ（未検証結果が事実として再強化されない）。
++
++### テストとA/B比較の進め方
++
++- `python -m pytest -q` → **291 passed**、`compileall`／`git diff --check`もクリーン（`_analysis/task064_pytest_full.txt`）。
++- A/Bは同一seedで `--prompt-layout v5` と `v4` を走らせ、`avg_claim_boundary_chars`、`avg_gap_role_boundary_to_question`、`avg_gap_role_boundary_to_own_speeches`、`unsupported_role_action_count`、`claim_vs_engine_conflict_count`、`retry_added_ability_expressions`、`co_correction_events` / `avg_co_correction_reask_prompt_chars` / `co_correction_shortening_ratio`、`avg_claim_to_ability_turn_delta` と、CO補正リトライ率・parse失敗率・立場一貫性を突き合わせる。
++- 実機Ollamaでの同一seed比較（v5 vs v4、Player 4型の CO補正挙動を含む）は、ローカル環境の都合上まだ行っていない。
++
++## TASK-065 最新ゲーム分析 — 実効コンテキスト整合・thinking安定化・時系列検出精度・プレイヤー名正規化
++
++状態：未着手（実機ログ `game_425755ce9a83` で課題を確認）
++
++### 背景
++
++`game_425755ce9a83` は、議論の根拠接続・立場変更・投票理由の比較がこれまでで最も自然に行われたゲームの一つだった。`prompt_layout_violations=0`、`unsupported_role_action_count=0`、`claim_vs_engine_conflict_count=0`、本文保持率100%、フォールバック0件であり、TASK-062〜064の設計は議論品質を損なわずに機能している。
++
++一方、運用・診断面には次の残課題があった。
++
++1. Player 1の設定は`num_ctx=16384`だったが、ログ上の`Modelfile`とプロセス環境は4096だった。`effective_context_limit=16384`として送信を続けたものの、Player 1で通信失敗、約360秒のtimeout、思考予算枯渇が発生した。設定値・サーバー観測値・実際にロードされた値の不一致を、ゲーム開始前に検出できていない。
++2. 全体でパース失敗8件、再試行11件が発生した。Player 8のthinking-only、Player 1の投票時thinking-only、Player 3の出力上限切れなど、議論論理の問題ではなくモデル×行動別の出力予算問題が残っている。
++3. Day 2 T1のPlayer 1は、まだ発言していないPlayer 6へ説明を求めただけだったが、`speech_from_unspoken_player`として未来参照1件に分類された。過去発言を根拠にした未発言者の帰属と、これから質問する行為を分離できていない。
++4. `Player1`／`Player 1`などの表記ゆれにより`unknown_player_reference`のledger repairが発生した。本文は保持されているが、台帳・時系列診断・質問回答判定のノイズになっている。
++
++### 目的
++
++実際に使用されるコンテキスト長とログ上の採用値を一致させ、thinking・timeout・形式失敗を議論論理の失敗と混同せずに安定運用できるようにする。同時に、質問行為を未来参照として誤検出せず、プレイヤー名の表記ゆれを台帳の入口で吸収する。
++
++### 実装案
++
++1. **起動時のコンテキスト整合チェック**
++   - プレイヤー設定、Modelfile、`OLLAMA_CONTEXT_LENGTH`、`/api/ps`の実測値を`configured / server_observed / loaded / requested`として分離記録する。
++   - 設定値がサーバーまたはロード済みモデルの観測値を超える場合、送信前に明確なwarningまたは安全な採用値への縮退を行う。
++   - `num_ctx`を無条件に16kとして扱わず、実機で確認できた上限と動的コンテキストの要求値を区別する。
++   - Player 1のような強化モデルでは、ゲーム開始時に一度だけロード確認を行い、timeout発生後に初めて不一致を知る状態を避ける。
++
++2. **モデル×行動別のthinking安定化**
++   - `thinking-only`、`generation_cap`、`timeout`、`transport`、`output_format`を引き続き相互排他的に記録する。
++   - 実測されたthinking消費量に基づき、議論・投票・占い・CO補正ごとの本文最低量とthinking上限を調整する。
++   - 投票・短い能力行動でthinkingが本文予算を食い潰した場合は、長い通常プロンプトを再送せず、短縮状態＋現在の行動形式だけで再要求する。
++   - timeout後のモデル切替・`num_predict`縮小・thinking無効化は、モデル全体へ恒久適用せず、モデル×行動×直近失敗履歴に限定する。
++   - 本文が得られた場合は内容を保持し、予算安定化を理由に口調・論点・結論・推理順を変更しない。
++
++3. **時系列検出の意図分離**
++   - 未発言者について、次のカテゴリを分ける。
++     - `past_attribution_to_unspoken`: 未発言者が過去に述べたと断定する実質的な未来参照
++     - `future_question_to_unspoken`: これから説明・回答を求める質問
++     - `future_action_speculation`: これからの投票・夜行動などの推測
++   - 疑問文・依頼文・仮定文を無条件に無害扱いするのではなく、過去の発言内容を根拠としているか、未来の回答を求めているかを診断する。
++   - `future_event_references`は実質的な未来参照だけを集計し、質問行為は別メトリクスへ分離する。
++   - 本文は検出結果にかかわらず変更せず、自由な質問・誘導・疑いの表明を維持する。
++
++4. **プレイヤー名の正規化**
++   - 台帳登録・証拠ID解決・質問回答判定の入口で、`Player1`、`Player 1`、`player 1`などを正規名へ正規化する。
++   - 正規化前の本文は公開ログにそのまま残し、診断・台帳内部だけでcanonical nameを使用する。
++   - 存在しないプレイヤー名、曖昧な番号、引用内の名前は正規化しすぎず、従来どおり未解決参照として観測する。
++   - `unknown_player_reference`、`ledger_repair`、`unresolvable_references`の減少をモデル別・ゲーム別に確認する。
++
++5. **統合評価**
++   - `game_425755ce9a83`を基準ログとして、通常設定と整合チェック・安定化・意図分離・名前正規化を有効にした構成を同一seedで比較する。
++   - 勝敗だけでなく、`effective_context_limit`の不一致、実ロード値、timeout、thinking-only、再試行、本文保持率、未来参照率、質問行為数、ledger repair、時系列根拠率を比較する。
++   - 強化モデルをPlayer 1だけに置く場合と、通常モデルだけで構成する場合を分け、改善がモデル能力によるものか運用安定化によるものかを切り分ける。
++
++### 設計上の制約
++
++- コンテキスト整合チェックは実効値の把握と安全な縮退のために使い、議論本文へ余分な制約文を追加しない。
++- thinking安定化は生成予算・再要求・通信処理の制御に限定し、推理手順、結論、口調、話題を指定しない。
++- 未発言者への質問、ブラフ、疑い、仮定、立場変更を未来参照として禁止しない。
++- 時系列検出は観測専用であり、本文の自動修正・削除・再生成の理由にしない。
++- プレイヤー名正規化は内部台帳だけに適用し、公開発言の表記を改変しない。
++- 秘密情報境界、役職主張とエンジン行動のプロヴェナンス、発言本文の自由をTASK-064以前より弱めない。
++
++### 完了条件
++
++- 起動時または最初のロード時に、プレイヤー設定・Modelfile・サーバー・実ロード値の不一致を検出・記録できる。
++- Player 1型の強化モデルで、timeout・通信失敗・thinking-onlyをモデル×行動別に切り分け、再要求時の本文保持率を測定できる。
++- `future_event_references`が実質的な過去帰属だけを数え、未発言者への質問は別カウンタとして記録される。
++- `Player1`／`Player 1`の表記ゆれによる不要な`unknown_player_reference`とledger repairを削減できる。
++- 通常議論の本文、CO、ブラフ、疑問、仮定、立場変更は一字一句保持され、役職プロヴェナンス・秘密情報ガード・継続状態・prompt layout v5を壊さない。
++- LL不使用テスト、モック診断、同一seedの実機A/Bで、速度・コンテキスト量・再試行率・時系列精度・議論品質を比較して記録する。
+diff --git a/src/werewolf/cli.py b/src/werewolf/cli.py
+index 2d30175..6b2ae30 100644
+--- a/src/werewolf/cli.py
++++ b/src/werewolf/cli.py
+@@ -91,12 +91,13 @@ from werewolf.core_compression import (
+     core_compression_policy_label,
+     normalize_core_compression_policy,
+ )
+-# TASK-060: 議論プロンプトの節順（layout）。実測した帯字数・隣接距離・重複行の削減を
+-# ログで比べられるようにし、同じseedで v4 / v3 / v2 / auto を切り替えてA/B評価できるようにする。
++# TASK-060 / TASK-064: 議論プロンプトの節順（layout）。実測した帯字数・隣接距離・重複行の削減を
++# ログで比べられるようにし、同じseedで v5 / v4 / v3 / v2 / auto を切り替えてA/B評価できるようにする。
+ from werewolf.prompt_layout import (
+     PROMPT_LAYOUT_POLICY_DEFAULT,
+     PROMPT_LAYOUT_V3,
+     PROMPT_LAYOUT_V4,
++    PROMPT_LAYOUT_V5,
+     normalize_prompt_layout_policy,
+     prompt_layout_policy_label,
+ )
+@@ -302,6 +303,25 @@ class GameLogger:
+             "continuity_fold_saved_chars_total": 0,
+             "prompt_gap_state_to_evidence_sum": 0.0,
+             "prompt_gap_state_to_question_sum": 0.0,
++            # TASK-064: 役職能力の境界台帳の集計（公開ログには中立な合計値だけ載せる）。
++            # 境界節の実測字数、engine_action/public_role_claim/unsupported_role_action/
++            # inference の分類個数、エンジン結果との矛盾、CO補正の再要求で増えた能力表現、
++            # 補正プロンプトの短縮効果（通常プロンプト長との比較用）。
++            "role_boundary_char_total": 0,
++            "role_boundary_sections": 0,
++            "prompt_gap_rbound_to_question_sum": 0.0,
++            "prompt_gap_rbound_to_own_speeches_sum": 0.0,
++            "role_ability_assertions_observed": 0,
++            "unsupported_role_action_count": 0,
++            "claim_vs_engine_conflict_count": 0,
++            "hedged_ability_mentions_observed": 0,
++            "role_action_engine_actions": 0,
++            "retry_added_ability_expressions": 0,
++            "co_correction_reask_prompt_char_total": 0,
++            "co_correction_normal_prompt_char_total": 0,
++            "co_correction_events": 0,
++            "claim_to_ability_delta_sum": 0.0,
++            "claim_to_ability_delta_count": 0,
+         }
+         # TASK-056: 未来参照カテゴリ別の指摘数（公開本文は修正していない観測値）
+         self._timeline_category_counts: dict[str, int] = {
+@@ -325,13 +345,14 @@ class GameLogger:
+         # TASK-059: 公開情報の入力経路別の検査数（発言／CO行／投票／死亡）。検査対象外も
+         # 理由付きで数えることで「なぜ53件だけだったのか」を説明できるようにする。
+         self._timeline_public_path_counts: dict[str, int] = {}
+-        # TASK-058 / TASK-060 / TASK-062: レイアウト別のプロンプト構築数
+-        # （legacy_v1 / v2_attention / v3_grounding / v4_continuity）
++        # TASK-058 / TASK-060 / TASK-062 / TASK-064: レイアウト別のプロンプト構築数
++        # （legacy_v1 / v2_attention / v3_grounding / v4_continuity / v5_role_boundary）
+         self._prompt_layout_counts: dict[str, int] = {
+             PROMPT_LAYOUT_LEGACY: 0,
+             PROMPT_LAYOUT_V2: 0,
+             PROMPT_LAYOUT_V3: 0,
+             PROMPT_LAYOUT_V4: 0,
++            PROMPT_LAYOUT_V5: 0,
+         }
+         # v2の節順が崩れた回数（編集ミスの静的検査。0を維持する）
+         self._prompt_layout_violations = 0
+@@ -769,12 +790,16 @@ class GameLogger:
+                         "evidence_continuity_fold_saved_chars",
+                         "continuity_fold_saved_chars_total",
+                     ),
++                    # TASK-064: モデル別の能力境界節の提示量（字数・節を載せた回数）
++                    ("role_boundary_section_chars", "role_boundary_char_total"),
+                 ):
+                     value = diagnostic_record.get(key)
+                     if isinstance(value, int) and not isinstance(value, bool):
+                         stats[metric] += max(0, int(value))
+                 if int(diagnostic_record.get("continuity_state_chars") or 0) > 0:
+                     stats["continuity_sections"] += 1
++                if int(diagnostic_record.get("role_boundary_section_chars") or 0) > 0:
++                    stats["role_boundary_sections"] += 1
+                 for key, metric in (
+                     (
+                         "prompt_gap_question_to_evidence",
+@@ -791,6 +816,16 @@ class GameLogger:
+                     # TASK-062: 論理状態節の隣接距離（証拠との距離／現在質問との距離）
+                     ("prompt_gap_state_to_evidence", "prompt_gap_state_to_evidence_sum"),
+                     ("prompt_gap_state_to_question", "prompt_gap_state_to_question_sum"),
++                    # TASK-064: 能力境界節の隣接距離（現在質問・自分の発言との距離）。
++                    # v5で凍結した位置から外れていないかをモデル別に見る。
++                    (
++                        "prompt_gap_role_boundary_to_question",
++                        "prompt_gap_rbound_to_question_sum",
++                    ),
++                    (
++                        "prompt_gap_role_boundary_to_own_speeches",
++                        "prompt_gap_rbound_to_own_speeches_sum",
++                    ),
+                 ):
+                     value = diagnostic_record.get(key)
+                     if isinstance(value, (int, float)) and not isinstance(value, bool):
+@@ -801,6 +836,135 @@ class GameLogger:
+                     stage_counts = stats["contract_removal_stage_counts"]
+                     stage_key = f"stage{limited}"
+                     stage_counts[stage_key] = int(stage_counts.get(stage_key, 0)) + 1
++        # TASK-064: 能力境界節の実測と隣接距離を集計する（公開指標は中立な数値だけ）。
++        boundary_chars = diagnostic_record.get("role_boundary_section_chars")
++        if isinstance(boundary_chars, int) and not isinstance(boundary_chars, bool):
++            self._ledger_metrics["role_boundary_char_total"] += max(0, int(boundary_chars))
++            if boundary_chars > 0:
++                self._ledger_metrics["role_boundary_sections"] += 1
++        for key, metric in (
++            (
++                "prompt_gap_role_boundary_to_question",
++                "prompt_gap_rbound_to_question_sum",
++            ),
++            (
++                "prompt_gap_role_boundary_to_own_speeches",
++                "prompt_gap_rbound_to_own_speeches_sum",
++            ),
++        ):
++            value = diagnostic_record.get(key)
++            if isinstance(value, (int, float)) and not isinstance(value, bool):
++                self._ledger_metrics[metric] += max(0.0, float(value))
++        # TASK-064: 公開発言の能力行使表現の観測（エンジンが発行した管理者ビュー専用）。
++        # カテゴリ・支援可否は保有者別の真偽を含むため、台帳の中立合計とイベントログ
++        # だけに残し、プロンプトや公開行には絶対に流さない（TASK-055の線引きを踏襲）。
++        observations = diagnostic_record.get("role_ability_observations")
++        if isinstance(observations, list) and observations:
++            obs_model = diagnostic_record.get("role_action_model")
++            stats = None
++            if isinstance(obs_model, str):
++                stats = self._model_stats.setdefault(obs_model, self._new_model_stats())
++            for observation in observations:
++                if not isinstance(observation, dict):
++                    continue
++                self._ledger_metrics["role_ability_assertions_observed"] += 1
++                if stats is not None:
++                    stats["role_ability_assertions_observed"] = int(
++                        stats.get("role_ability_assertions_observed", 0)
++                    ) + 1
++                category = observation.get("category")
++                if category == "unsupported_role_action":
++                    self._ledger_metrics["unsupported_role_action_count"] += 1
++                    if stats is not None:
++                        stats["unsupported_role_action_count"] = int(
++                            stats.get("unsupported_role_action_count", 0)
++                        ) + 1
++                elif category == "engine_action":
++                    self._ledger_metrics["role_action_engine_actions"] += 1
++                if bool(observation.get("conflict")):
++                    self._ledger_metrics["claim_vs_engine_conflict_count"] += 1
++                    if stats is not None:
++                        stats["claim_vs_engine_conflict_count"] = int(
++                            stats.get("claim_vs_engine_conflict_count", 0)
++                        ) + 1
++            delta = diagnostic_record.get("claim_to_ability_turn_delta")
++            if isinstance(delta, int) and not isinstance(delta, bool):
++                self._ledger_metrics["claim_to_ability_delta_sum"] += float(
++                    max(0, int(delta))
++                )
++                self._ledger_metrics["claim_to_ability_delta_count"] += 1
++                if stats is not None:
++                    stats["claim_to_ability_delta_sum"] = (
++                        float(stats.get("claim_to_ability_delta_sum", 0.0))
++                        + float(max(0, int(delta)))
++                    )
++                    stats["claim_to_ability_delta_count"] = int(
++                        stats.get("claim_to_ability_delta_count", 0)
++                    ) + 1
++        # TASK-064: CO初出→能力表現（またはその逆）のターン距離イベントを集計する。
++        # 数値のみで、どのCOが本物かを示す情報は含まれない。
++        if event_type == "claim_to_ability_distance":
++            distance_delta = diagnostic_record.get("turn_delta")
++            if isinstance(distance_delta, int) and not isinstance(distance_delta, bool):
++                self._ledger_metrics["claim_to_ability_delta_sum"] += float(
++                    max(0, int(distance_delta))
++                )
++                self._ledger_metrics["claim_to_ability_delta_count"] += 1
++                distance_model = diagnostic_record.get("model")
++                if isinstance(distance_model, str):
++                    stats = self._model_stats.setdefault(
++                        distance_model, self._new_model_stats()
++                    )
++                    stats["claim_to_ability_delta_sum"] = (
++                        float(stats.get("claim_to_ability_delta_sum", 0.0))
++                        + float(max(0, int(distance_delta)))
++                    )
++                    stats["claim_to_ability_delta_count"] = int(
++                        stats.get("claim_to_ability_delta_count", 0)
++                    ) + 1
++        # TASK-064: CO補正の再要求が短縮だったかと未検証の能力表現を増やさなかったかを
++        # 行動別・モデル別に積む（観測専用。本文は変更されていない）。
++        if event_type == "co_correction_boundary":
++            reask_chars = diagnostic_record.get("reask_prompt_chars")
++            normal_chars = diagnostic_record.get("normal_prompt_chars")
++            added_expressions = diagnostic_record.get("ability_assertions_added")
++            if isinstance(reask_chars, int) and not isinstance(reask_chars, bool):
++                self._ledger_metrics["co_correction_events"] += 1
++                self._ledger_metrics["co_correction_reask_prompt_char_total"] += max(
++                    0, int(reask_chars)
++                )
++            if isinstance(normal_chars, int) and not isinstance(normal_chars, bool):
++                self._ledger_metrics["co_correction_normal_prompt_char_total"] += max(
++                    0, int(normal_chars)
++                )
++            if isinstance(added_expressions, int) and not isinstance(
++                added_expressions, bool
++            ):
++                self._ledger_metrics["retry_added_ability_expressions"] += max(
++                    0, int(added_expressions)
++                )
++            correction_model = diagnostic_record.get("model")
++            if isinstance(correction_model, str):
++                stats = self._model_stats.setdefault(
++                    correction_model, self._new_model_stats()
++                )
++                stats["co_correction_events"] = int(
++                    stats.get("co_correction_events", 0)
++                ) + 1
++                if isinstance(reask_chars, int) and not isinstance(reask_chars, bool):
++                    stats["co_correction_reask_prompt_char_total"] = int(
++                        stats.get("co_correction_reask_prompt_char_total", 0)
++                    ) + max(0, int(reask_chars))
++                if isinstance(normal_chars, int) and not isinstance(normal_chars, bool):
++                    stats["co_correction_normal_prompt_char_total"] = int(
++                        stats.get("co_correction_normal_prompt_char_total", 0)
++                    ) + max(0, int(normal_chars))
++                if isinstance(
++                    added_expressions, int
++                ) and not isinstance(added_expressions, bool):
++                    stats["retry_added_ability_expressions"] = int(
++                        stats.get("retry_added_ability_expressions", 0)
++                    ) + max(0, int(added_expressions))
+         if event_type == "secret_role_leak_detected":
+             # TASK-054: hardゲート（本当に秘匿情報を出した場合）だけを数える。
+             self._ledger_metrics["secret_leaks_detected"] += 1
+@@ -1159,6 +1323,23 @@ class GameLogger:
+             "continuity_fold_saved_chars_total": 0,
+             "prompt_gap_state_to_evidence_sum": 0.0,
+             "prompt_gap_state_to_question_sum": 0.0,
++            # TASK-064: モデル別の役職能力の境界（境界節字数・隣接距離・観測カウンタ）。
++            # unsupported_role_action_count / claim_vs_engine_conflict_count は観測専用で、
++            # 本文の再生成には使われていない（ログ側で行動別と比較する）。CO補正の短縮効果は
++            # reask/normal の字数合計で持ち、finalize で倍率を出す。
++            "role_boundary_char_total": 0,
++            "role_boundary_sections": 0,
++            "prompt_gap_rbound_to_question_sum": 0.0,
++            "prompt_gap_rbound_to_own_speeches_sum": 0.0,
++            "claim_to_ability_delta_sum": 0.0,
++            "claim_to_ability_delta_count": 0,
++            "unsupported_role_action_count": 0,
++            "claim_vs_engine_conflict_count": 0,
++            "role_ability_assertions_observed": 0,
++            "retry_added_ability_expressions": 0,
++            "co_correction_events": 0,
++            "co_correction_reask_prompt_char_total": 0,
++            "co_correction_normal_prompt_char_total": 0,
+             # TASK-059: 引用時点の内訳と、違反には数えない観察値（婉曲・一般名指し）
+             "citation_status_counts": {},
+             "hedged_pending_citations": 0,
+@@ -1413,6 +1594,45 @@ class GameLogger:
+             stats["avg_gap_state_to_question"] = round(
+                 float(stats["prompt_gap_state_to_question_sum"]) / prompts, 4
+             )
++            # TASK-064: モデル別の能力境界節の実測（1リクエスト平均の字数・隣接距離）と、
++            # 実行記録のない能力行使の観測数・エンジン結果との矛盾・CO補正の短縮効果。
++            # v5で質問直後に置いた境界が実際にどこへ着地したかをA/B比較できる形にする。
++            boundary_sections = int(stats.get("role_boundary_sections", 0))
++            stats["avg_claim_boundary_chars"] = (
++                round(int(stats.get("role_boundary_char_total", 0)) / boundary_sections, 1)
++                if boundary_sections
++                else 0.0
++            )
++            stats["avg_gap_role_boundary_to_question"] = round(
++                float(stats.get("prompt_gap_rbound_to_question_sum", 0.0)) / prompts, 4
++            )
++            stats["avg_gap_role_boundary_to_own_speeches"] = round(
++                float(stats.get("prompt_gap_rbound_to_own_speeches_sum", 0.0)) / prompts,
++                4,
++            )
++            delta_count = int(stats.get("claim_to_ability_delta_count", 0))
++            stats["avg_claim_to_ability_turn_delta"] = (
++                round(
++                    float(stats.get("claim_to_ability_delta_sum", 0.0)) / delta_count,
++                    2,
++                )
++                if delta_count
++                else 0.0
++            )
++            correction_events = int(stats.get("co_correction_events", 0))
++            if correction_events:
++                reask_chars = int(stats.get("co_correction_reask_prompt_char_total", 0))
++                normal_chars = int(
++                    stats.get("co_correction_normal_prompt_char_total", 0)
++                )
++                stats["avg_co_correction_reask_prompt_chars"] = round(
++                    reask_chars / correction_events, 1
++                )
++                # 短縮倍率（1.0未満なら通常プロンプトより短い）。完了条件の
++                # 「再要求が通常プロンプトより明確に短い」をモデル別数値で示す。
++                stats["co_correction_shortening_ratio"] = (
++                    round(reask_chars / normal_chars, 4) if normal_chars else None
++                )
+ 
+         public_players_data = [
+             {
+@@ -1505,6 +1725,10 @@ class GameLogger:
+             # TASK-055: 役職主張の出所台帳。公開面は全CO行を中立ラベルに揃え、エンジン照合の
+             # 真偽は含まない（serialize_public() に真偽キーがないことはテストで検証する）。
+             "role_provenance": state.role_provenance.serialize_public(),
++            # TASK-064: 役職能力の境界台帳（engine_action / public_role_claim /
++            # unsupported_role_action / inference）。公開面はカテゴリ合計と中立ラベルだけで、
++            # どのCOが本物か・実行記録との一致可否は管理者ビュー専用に残す。
++            "role_action_provenance": state.role_action_provenance.serialize_public(),
+             "allow_bluff_role_claim": bool(
+                 getattr(state, "allow_bluff_role_claim", ALLOW_BLUFF_ROLE_CLAIM_DEFAULT)
+             ),
+@@ -1714,6 +1938,80 @@ class GameLogger:
+                     / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                     4,
+                 ),
++                # TASK-064: 役職能力の境界節と観測の合計（公開指標は中立な数値だけ）。
++                # 保有者別の分類内訳は管理者ビュー（serialize_admin）側だけで持つ。
++                # unsupported_role_action は観測専用で本文の再生成には使われていないため、
++                # ここでの増加は「発言が消えた」ことを意味しない。
++                "role_boundary_sections": int(
++                    self._ledger_metrics["role_boundary_sections"]
++                ),
++                "avg_claim_boundary_chars": round(
++                    int(self._ledger_metrics["role_boundary_char_total"])
++                    / max(1, int(self._ledger_metrics["role_boundary_sections"])),
++                    1,
++                ),
++                "avg_gap_role_boundary_to_question": round(
++                    float(self._ledger_metrics["prompt_gap_rbound_to_question_sum"])
++                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
++                    4,
++                ),
++                "avg_gap_role_boundary_to_own_speeches": round(
++                    float(self._ledger_metrics["prompt_gap_rbound_to_own_speeches_sum"])
++                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
++                    4,
++                ),
++                "role_ability_assertions_observed": int(
++                    self._ledger_metrics["role_ability_assertions_observed"]
++                ),
++                "unsupported_role_action_count": int(
++                    self._ledger_metrics["unsupported_role_action_count"]
++                ),
++                "claim_vs_engine_conflict_count": int(
++                    self._ledger_metrics["claim_vs_engine_conflict_count"]
++                ),
++                "retry_added_ability_expressions": int(
++                    self._ledger_metrics["retry_added_ability_expressions"]
++                ),
++                # 婉曲（疑問・仮定・引用・否定）の能力言及は断定的な行使として数えない。
++                # 台帳（RoleActionProvenance）が持った観測値をここへ写す（中立な件数のみ）。
++                "hedged_ability_mentions_observed": int(
++                    getattr(
++                        getattr(state, "role_action_provenance", None),
++                        "hedged_mentions_observed",
++                        0,
++                    )
++                ),
++                "co_correction_events": int(self._ledger_metrics["co_correction_events"]),
++                "avg_co_correction_reask_prompt_chars": round(
++                    int(self._ledger_metrics["co_correction_reask_prompt_char_total"])
++                    / max(1, int(self._ledger_metrics["co_correction_events"])),
++                    1,
++                ),
++                # 補正プロンプトの通常プロンプト比（<1 で短縮。完了条件の数値確認用）
++                "co_correction_shortening_ratio": (
++                    round(
++                        int(self._ledger_metrics["co_correction_reask_prompt_char_total"])
++                        / int(
++                            self._ledger_metrics["co_correction_normal_prompt_char_total"]
++                        ),
++                        4,
++                    )
++                    if int(self._ledger_metrics["co_correction_events"]) > 0
++                    and int(
++                        self._ledger_metrics["co_correction_normal_prompt_char_total"]
++                    )
++                    > 0
++                    else None
++                ),
++                "avg_claim_to_ability_turn_delta": (
++                    round(
++                        float(self._ledger_metrics["claim_to_ability_delta_sum"])
++                        / int(self._ledger_metrics["claim_to_ability_delta_count"]),
++                        2,
++                    )
++                    if int(self._ledger_metrics["claim_to_ability_delta_count"]) > 0
++                    else 0.0
++                ),
+                 # TASK-059: 引用した相手の時点別内訳（同一ターン先行／別ターン既発言／
+                 # 死亡後履歴／未発言）。違反指摘の future_event_reference_categories とは
+                 # 別枠で、婉曲な仮定引用・未発言者名の一般言及はここへ逃がして数える。
+@@ -1943,6 +2241,10 @@ class GameLogger:
+             # TASK-055: 管理者用。エンジンが発行した占い結果（保有者名つき）と各CO行の照合結果を
+             # ここにだけ残す。公開ログ側には真偽キーを含む形では出さない。
+             "role_provenance": state.role_provenance.serialize_admin(),
++            # TASK-064: 管理者用。エンジンが実行した能力行動（占い・襲撃）の実行記録と、
++            # 公開発言で観測した能力行使表現のカテゴリ内訳・本人エンジン結果との矛盾を出す。
++            # この情報を持つのは管理者ログだけで、公開台帳・checkpoint・プロンプトには混入しない。
++            "role_action_provenance": state.role_action_provenance.serialize_admin(),
+             "traces": private_traces_data,
+         }
+         self.append_record(public_summary, private_summary)
+@@ -2467,7 +2769,20 @@ def run_cli_game(args: argparse.Namespace) -> int:
+     def on_engine_event(event: dict[str, object]) -> None:
+         """Persist engine events and display public speeches as they arrive."""
+         nonlocal pending_claims, pending_claim_speaker
+-        logger.append_record(event)
++        # TASK-064: 能力行使の分類観測（実行記録との一致可否・カテゴリ・矛盾）は保有者別の
++        # 真偽を含むため、公開JSONLには出さない（TASK-055で決めた線引きと同じ）。
++        # 管理者レコード（private側）だけに残し、公開側は中立な本文とID表示のままとする。
++        public_event = {
++            key: value
++            for key, value in event.items()
++            if key
++            not in {
++                "role_ability_observations",
++                "claim_to_ability_turn_delta",
++                "claim_to_ability_order",
++            }
++        }
++        logger.append_record(public_event, event)
+         event_type = event.get("type")
+         if event_type in PUBLIC_CLAIM_DISPLAY_TYPES:
+             claimant = str(event.get("claimant", "?"))
+@@ -2817,21 +3132,25 @@ def build_parser() -> argparse.ArgumentParser:
+             "prescribes tone, topics or reasoning order."
+         ),
+     )
+-    # TASK-060 / TASK-062: 議論プロンプトの節順（配置だけ変え、内容と発言の自由は変えない）
++    # TASK-060 / TASK-062 / TASK-064: 議論プロンプトの節順（配置だけ変え、内容と発言の自由は変えない）
+     parser.add_argument(
+         "--prompt-layout",
+         dest="prompt_layout",
+-        choices=["v4", "v3", "v2", "auto"],
++        choices=["v5", "v4", "v3", "v2", "auto"],
+         default=PROMPT_LAYOUT_POLICY_DEFAULT,
+         help=(
+             "Where each information block sits inside the discussion prompt. Only positions and "
+             "duplicate wording change - tone, length, topics, conclusions and reasoning order stay "
+-            "the model's own. v4 (default): the v3 chain plus [CONTINUITY_CHECKPOINT], the "
+-            "engine-issued logical state (confirmed facts, public statements, refuted hypotheses "
+-            "and open questions as short id-bearing lines with authority tags) sitting directly "
+-            "after the speech evidence and immediately before the current question, so the player "
+-            "carries state across days without rereading old bodies. v3: the same chain without "
+-            "that section - your action record, board facts and engine-issued "
++            "the model's own. v5 (default): the v4 chain plus [ROLE_ACTION_BOUNDARY], the short "
++            "engine-issued line pair that separates what the engine actually executed for you "
++            "([DONE], divination/attack nights - results stay in your private section) from what "
++            "you publicly claimed ([CLAIM], unverified), sitting directly after the current "
++            "question and immediately before your own speeches, so bluffing, doubt and stance "
++            "changes stay free while an ability sentence cannot be misread as an engine record; "
++            "no bodies are restated. v4: the same chain without that boundary section (A/B base "
++            "for prompt size and unsupported_role_action rates); it keeps [CONTINUITY_CHECKPOINT] "
++            "after the speech evidence and before the current question. v3: no checkpoint either - "
++            "your action record, board facts and engine-issued "
+             "private info sit early; weak-middle band holds only droppable derived content (theory "
+             "card, topic digest, hypothesis diff, temporary guidance, round header); the tail runs "
+             "claim index -> timeline -> speech evidence -> current question -> your speeches and "
+@@ -2842,8 +3161,10 @@ def build_parser() -> argparse.ArgumentParser:
+             "v2: TASK-058 ordering. auto: follow --prompt-contract (legacy keeps the old byte "
+             "order). Compare one seed with prompt_zone_*_chars, prompt_gap_*, "
+             "prompt_instructions_to_end_chars, prompt_theory_card_chars and "
+-            "duplicate_constraint_total, and the continuity_* keys (avg_continuity_state_chars, "
+-            "evidence_continuity_folded_total, continuity_fold_saved_chars_total)."
++            "duplicate_constraint_total, the continuity_* keys (avg_continuity_state_chars, "
++            "evidence_continuity_folded_total, continuity_fold_saved_chars_total), and the "
++            "TASK-064 keys (avg_claim_boundary_chars, avg_gap_role_boundary_to_question, "
++            "unsupported_role_action_count, co_correction_shortening_ratio)."
+         ),
+     )
+     # TASK-062: 日をまたぐ論理状態の正規化（エンジン発行の状態差分だけを使い、口調・論点には干渉しない）
+diff --git a/src/werewolf/core_compression.py b/src/werewolf/core_compression.py
+index 2ecf8fa..c448616 100644
+--- a/src/werewolf/core_compression.py
++++ b/src/werewolf/core_compression.py
+@@ -96,6 +96,9 @@ CORE_SECTION_LAYERS: dict[str, str] = {
+     # TASK-062: エンジン発行の論理状態チェックポイント。確定事実・反証・未解決の問いを
+     # 載せる「いま使う」欄なので anchor（常に全文保持）。行数上限があるため日跨ぎで増えない。
+     "continuity_checkpoint": LAYER_ANCHOR,
++    # TASK-064: エンジン発行の役職能力の境界。実行と申告の区別という「いま使う」情報で、
++    # 行数が本人COぶんの固定行しかないため anchor（常に全文保持・本文の再掲なし）。
++    "role_action_boundary": LAYER_ANCHOR,
+     "question_block": LAYER_ANCHOR,
+     "leak_boundary": LAYER_ANCHOR,
+     "behavior_contract": LAYER_ANCHOR,
+diff --git a/src/werewolf/day_timeline.py b/src/werewolf/day_timeline.py
+index 9403a53..9f9b3fb 100644
+--- a/src/werewolf/day_timeline.py
++++ b/src/werewolf/day_timeline.py
+@@ -91,6 +91,48 @@ SUBTYPE_GENERAL_MENTION_UNSPOKEN = "general_mention_without_attribution_observed
+ SUBTYPE_HEDGED_CITATION_PENDING = "hedged_citation_of_pending_speech_observed"
+ CAUSE_NO_PUBLIC_SPEECH_AT_POINT = "actor_had_no_public_speech_at_this_point"
+ 
++# TASK-065（実装案3）: 未発言者に関する文の「意図」を分ける。従来は未発言者の名前が
++# 出て断定しているだけで `speech_from_unspoken_player`（未来参照）に数えたため、
++# 「次にプレイヤー6へ投票理由を問いただすことを提案します」という**これから質問する行為**
++# が未来参照として検出された（game_425755ce9a83 Day2 T1 Player 1）。
++# 実質的な未来参照＝その人物が過去に述べたと断定するものだけを集計し、
++# 質問行為とこれからの行動推測は別メトリクスへ移す（本文は変更しない）。
++INTENT_PAST_ATTRIBUTION = "past_attribution_to_unspoken"
++INTENT_FUTURE_QUESTION_TO_UNSPOKEN = "future_question_to_unspoken"
++INTENT_FUTURE_ACTION_SPECULATION = "future_action_speculation"
++INTENT_NONE = "none"
++UNSPOKEN_INTENTS: tuple[str, ...] = (
++    INTENT_PAST_ATTRIBUTION,
++    INTENT_FUTURE_QUESTION_TO_UNSPOKEN,
++    INTENT_FUTURE_ACTION_SPECULATION,
++)
++
++# 方策（A/B比較用）。separated が既定。literal は TASK-059 までの旧算入を再現する。
++TIMELINE_INTENT_POLICY_SEPARATED = "separated"
++TIMELINE_INTENT_POLICY_LITERAL = "literal"
++TIMELINE_INTENT_POLICIES: tuple[str, ...] = (
++    TIMELINE_INTENT_POLICY_SEPARATED,
++    TIMELINE_INTENT_POLICY_LITERAL,
++)
++TIMELINE_INTENT_POLICY_DEFAULT = TIMELINE_INTENT_POLICY_SEPARATED
++
++
++def normalize_timeline_intent_policy(value: object) -> str:
++    """設定値を意図分離の方策へ正規化する（未知値は既定の separated）。"""
++    if isinstance(value, str) and value.strip():
++        candidate = value.strip().lower()
++        if candidate in TIMELINE_INTENT_POLICIES:
++            return candidate
++    return TIMELINE_INTENT_POLICY_DEFAULT
++
++
++def timeline_intent_policy_label(policy: object) -> str:
++    """ログ用ラベル（intent_separated_detection / legacy_flat_detection）。"""
++    if normalize_timeline_intent_policy(policy) == TIMELINE_INTENT_POLICY_LITERAL:
++        return "legacy_flat_detection"
++    return "intent_separated_detection"
++
++
+ # TASK-059（実装案3）: 本文に現れる証拠ID参照 `[speech:N]` / `[ref:sN]` を数え、未解決の
+ # 原因を分類する（ID欠落・旧ログ互換＝時点情報なし履歴・まだ存在しないID＝実際の未来
+ # 参照）。誤検出を増やさないため、この分類は観測だけで future_event_reference は増やさない。
+@@ -316,6 +358,12 @@ class PublicTimeline:
+     mentions_without_attribution_observed: int = 0
+     checks_skipped_empty_body: int = 0
+     reference_cause_counts: dict[str, int] = field(default_factory=dict)
++    # TASK-065: 未発言者に関する意図の内訳（観測専用）。findings（実質的な未来参照）とは
++    # 別枠で、質問行為とこれからの行動推測を数える。本文の書き換えは一切しない。
++    past_attribution_unspoken: int = 0
++    future_question_unspoken: int = 0
++    future_action_speculation_observed: int = 0
++    intent_counts: dict[str, int] = field(default_factory=dict)
+     _seen_keys: set[tuple[object, ...]] = field(
+         default_factory=set, repr=False, compare=False
+     )
+@@ -476,6 +524,17 @@ class PublicTimeline:
+             ),
+             "timeline_checks_skipped_empty_body": int(self.checks_skipped_empty_body),
+             "evidence_reference_cause_counts": dict(self.reference_cause_counts),
++            # TASK-065: 未発言者に関する意図の内訳（実質的未来参照・質問行為・行動推測）。
++            # future_event_reference_findings と違い、質問したことを違反として数えないための欄。
++            "timeline_unspoken_intent_counts": {
++                INTENT_PAST_ATTRIBUTION: self.past_attribution_unspoken,
++                INTENT_FUTURE_QUESTION_TO_UNSPOKEN: self.future_question_unspoken,
++                INTENT_FUTURE_ACTION_SPECULATION: self.future_action_speculation_observed,
++            },
++            "future_question_acts_observed": int(self.future_question_unspoken),
++            "future_action_speculations_observed": int(
++                self.future_action_speculation_observed
++            ),
+         }
+ 
+     def record_observation(self, report: "TimelineReferenceReport") -> None:
+@@ -503,6 +562,16 @@ class PublicTimeline:
+             self.reference_cause_counts[key] = (
+                 int(self.reference_cause_counts.get(key, 0)) + int(count)
+             )
++        # TASK-065: 意図の内訳を積む（実質的未来参照・質問行為・これからの行動推測）。
++        # findings の合計とは別枠で、検出しても本文は直していない。
++        self.past_attribution_unspoken += int(getattr(report, "past_attributions_observed", 0))
++        self.future_question_unspoken += int(getattr(report, "future_question_acts", 0))
++        self.future_action_speculation_observed += int(
++            getattr(report, "future_action_speculations", 0)
++        )
++        for intent, count in dict(getattr(report, "intent_counts", {}) or {}).items():
++            key = str(intent)
++            self.intent_counts[key] = int(self.intent_counts.get(key, 0)) + int(count)
+ 
+     def serialize(self) -> dict[str, object]:
+         """ログ用の逐列表現（時点・ID・要約のみ。本文と非公開情報は含まれない）。"""
+@@ -958,6 +1027,176 @@ def _is_hedged(norm: str) -> bool:
+     return any(term in norm for term in _HEDGE_TERMS)
+ 
+ 
++# --- TASK-065: 未発言者に関する文の意図分類（観測専用・本文は書き換えない） ---------
++
++# 「その人が過去に述べた」という帰属の形（実質的な未来参照として残す数え手）。
++# 引用の形を広く取りすぎると「これから聞く」依頼を巻き込むため、過去の出来事として
++# 耳にした・読んだと述べる形と完了形の帰属に絞る（TASK-056の検出強度は下げない）。
++_PAST_ATTRIBUTION_TERMS: tuple[str, ...] = (
++    "と言った",
++    "が言った",
++    "いい残",
++    "言い残",
++    "述べた",
++    "語った",
++    "答えた",
++    "返した",
++    "名乗った",
++    "公言した",
++    "公表した",
++    "明かした",
++    "暴露した",
++    "指摘した",
++    "主張した",
++    "表明した",
++    "発言を聞い",
++    "発言を耳にし",
++    "発言を見た",
++    "先の発言",
++    "発言内容から",
++    "過去の発言",
++    "先ほどの発言",
++    "前回の発言",
++    "その発言は",
++    "said",
++    "stated",
++    "claimed",
++    "told",
++    "argued",
++    "declared",
++)
++
++# これから聞き出す側（質問行為）。動詞と誘い文句の両方を見て判断する。
++_REQUEST_VERB_TERMS: tuple[str, ...] = (
++    "質問",
++    "問い",
++    "尋ね",
++    "たずね",
++    "聞きたい",
++    "聞いて",
++    "聞く",
++    "聞かせて",
++    "ききたい",
++    "教え",
++    "答えを",
++    "回答",
++    "説明",
++    "共有",
++    "述べて",
++    "報告",
++    "開示",
++    "comment",
++    "ask",
++    "question",
++    "explain",
++    "clarify",
++    "tellme",
++)
++_SOLICITATION_TERMS: tuple[str, ...] = (
++    "ください",
++    "下さい",
++    "ほしい",
++    "欲しい",
++    "もらいたい",
++    "願う",
++    "依頼",
++    "求め",
++    "提案",
++    "検討",
++    "予定",
++    "次に",
++    "これから",
++    "今後",
++    "次回",
++    "まずは",
++    "順番",
++    "待ち",
++    "ask",
++    "wantto",
++    "wouldlike",
++    "please",
++    "next",
++)
++# これから起こるその人物自身の行動への推測（投票・夜行動・COなど）。
++_ACTION_SPECULATION_VERBS: tuple[str, ...] = (
++    "する",
++    "します",
++    "つもり",
++    "はず",
++    "だろう",
++    "ことになる",
++    "予定",
++    "投票",
++    "襲",
++    "攻撃",
++    "占",
++    "名乗",
++    "co",
++    "発言",
++    "protect",
++    "vote",
++    "attack",
++)
++# 名thatの直後に目的語マーカーが来たら「その人への提案」であり本人の行動ではない。
++_OBJECT_PARTICLES: tuple[str, ...] = ("に", "を", "へ", "から", "で", "against", "to")
++
++
++def classify_unspoken_intent(
++    sentence: str,
++    norm: str,
++    snapshot: "TurnSnapshot",
++    mentions: tuple[str, ...],
++) -> tuple[str, tuple[str, ...]]:
++    """未発言者に関する文の意図を分ける（観測専用・判定の緩和強化はここでは行わない）。
++
++    戻り値は (意図, 対象にした未発言者)。未発言者を挙げていなければ INTENT_NONE。
++    順序は「これから聞く」→「過去の発言として扱う」→「これからの行動推測」。
++    疑問文・依頼文を無条件に無害扱いせず、過去の発言を根拠にしているか、
++    未来の回答を求めているかを見て分ける（TASK-065実装案3）。
++    """
++    targets = tuple(
++        name
++        for name in mentions
++        if name != snapshot.actor and snapshot.citation_status(name) == CITATION_NEVER_SPOKEN_YET
++    )
++    if not targets:
++        return INTENT_NONE, ()
++    question = _is_question(sentence)
++    request_verb = any(term in norm for term in _REQUEST_VERB_TERMS)
++    solicitation = any(term in norm for term in _SOLICITATION_TERMS)
++    past_terms = [term for term in _PAST_ATTRIBUTION_TERMS if term in norm]
++    action_gaps = _action_speculation_gaps(norm, targets)
++    if question or (request_verb and solicitation):
++        return INTENT_FUTURE_QUESTION_TO_UNSPOKEN, targets
++    if past_terms:
++        # 未発言者の「過去の発言」を根拠にしている＝実質的な未来参照
++        return INTENT_PAST_ATTRIBUTION, targets
++    if action_gaps:
++        return INTENT_FUTURE_ACTION_SPECULATION, targets
++    return INTENT_NONE, targets
++
++
++def _action_speculation_gaps(norm: str, targets: tuple[str, ...]) -> tuple[str, ...]:
++    """言及名の直後にある行動表現（本人が主語のものだけ）。目的語化している物は除く。"""
++    gaps: list[str] = []
++    for name in targets:
++        key = _normalize_text(name)
++        if not key:
++            continue
++        for match in re.finditer(re.escape(key), norm):
++            tail = norm[match.end() : match.end() + 14]
++            if not tail:
++                continue
++            if tail[0] in _OBJECT_PARTICLES:
++                # 「Player 6に投票すべきだ」型は本人の行動ではなく他者からの提案
++                continue
++            if any(verb in tail for verb in _ACTION_SPECULATION_VERBS):
++                gaps.append(tail[:20])
++    return tuple(gaps)
++
++
++
++
+ @dataclass(frozen=True)
+ class FutureReferenceFinding:
+     """発言時点で未発生だった事象を断定していた箇所（観測のみ・本文は触らない）。"""
+@@ -969,6 +1208,9 @@ class FutureReferenceFinding:
+     # TASK-059: speech_from_unspoken_player の内訳分類（観測専用タグ）。判定は変えない。
+     subtype: str = ""
+     cause: str = ""
++    # TASK-065: 未発言者に関する文の意図（past_attribution_to_unspoken など）。
++    # 質問行為・これからの行動推測は findings へ数えないための分離キー。
++    intent: str = ""
+ 
+     def to_dict(self) -> dict[str, object]:
+         digest = hashlib.sha256(self.sentence.encode("utf-8")).hexdigest()[:16]
+@@ -983,6 +1225,8 @@ class FutureReferenceFinding:
+             payload["subtype"] = self.subtype
+         if self.cause:
+             payload["cause"] = self.cause
++        if self.intent:
++            payload["intent"] = self.intent
+         return payload
+ 
+ 
+@@ -999,9 +1243,16 @@ class TimelineReferenceReport:
+     citation_status_counts: dict = field(default_factory=dict)
+     hedged_pending_citations: int = 0
+     mentions_without_attribution: int = 0
+-    # TASK-059: 本文の `[speech:N]` / `[ref:sN]` 参照を時点照合した内訳（解決済み・
++    # TASK-059: 本文に現れる証拠ID参照 `[speech:N]` / `[ref:sN]` を時点照合した内訳（解決済み・
+     # まだ存在しないID・旧ログ互換で検証不能・IDなしの帰属）
+     reference_token_counts: dict = field(default_factory=dict)
++    # TASK-065: 未発言者に関する文の意図内訳。実質的な未来参照（past_attribution_to_unspoken）
++    # だけを findings へ数え、質問行為とこれからの行動推測は別カウンタへ寄せる。
++    intent_counts: dict = field(default_factory=dict)
++    past_attributions_observed: int = 0
++    future_question_acts: int = 0
++    future_action_speculations: int = 0
++    intent_policy: str = TIMELINE_INTENT_POLICY_DEFAULT
+ 
+     @property
+     def grounding_rate(self) -> float:
+@@ -1036,6 +1287,15 @@ class TimelineReferenceReport:
+             # TASK-059: 証拠ID参照の時点照合結果（原因別の内訳）。実在しないIDを指して
+             # いないかを実機ログで分解するために使う（本文は変えない）。
+             "evidence_reference_counts": dict(self.reference_token_counts),
++            # TASK-065: 未発言者に関する意図の内訳。違反として数えるのは実質的な未来参照
++            # （past_attribution_to_unspoken）だけで、質問行為とこれからの行動推測は
++            # 観測専用へ分ける（「質問したから未来参照」をなくすための分離キー）。
++            "timeline_intent_counts": dict(self.intent_counts),
++            "past_attributions_observed": int(self.past_attributions_observed),
++            "future_question_acts_observed": int(self.future_question_acts),
++            "future_action_speculations_observed": int(self.future_action_speculations),
++            "timeline_intent_policy": self.intent_policy,
++            "timeline_intent_policy_label": timeline_intent_policy_label(self.intent_policy),
+             # 観測専用であることの証跡（自動修正・再生成要求は行わない）
+             "body_modified": False,
+         }
+@@ -1045,14 +1305,30 @@ def inspect_public_body(
+     body: str | None,
+     snapshot: TurnSnapshot,
+     player_names: tuple[str, ...],
++    *,
++    intent_policy: object = TIMELINE_INTENT_POLICY_DEFAULT,
+ ) -> TimelineReferenceReport:
+     """公開予定の本文を発言時点と突き合わせ、未来参照を観測する（書き換えない）。
+ 
+     断定表現だけを対象にし、疑問文・推測・婉曲は数えない。検出しても本文の語彙・
+     口調・結論には一切干渉しない（観測専用）。
++
++    TASK-065: `separated`（既定）では未発言者に関する文の意図を分ける。これから回答を
++    求める質問行為（`future_question_to_unspoken`）は future_event_reference に数えず
++    別メトリクスへ移す。これからの行動推測（`future_action_speculation`）も意図として
++    分けて数えるが、発言引用を伴う断定なら従来どおり検出する（TASK-056/059の強度を
++    下げない）。実質的な未来参照は `past_attribution_to_unspoken`（その人が過去に
++    述べたとする断定）ですくう。`literal` は TASK-059 までと同じ算入（A/B比較用の旧挙動）。
+     """
++    normalized_intent_policy = normalize_timeline_intent_policy(intent_policy)
+     if not isinstance(body, str) or not body.strip():
+-        return TimelineReferenceReport((), 0, 0, len(body or ""))
++        return TimelineReferenceReport(
++            (),
++            0,
++            0,
++            len(body or ""),
++            intent_policy=normalized_intent_policy,
++        )
+     from .discussion_format import split_sentences
+ 
+     sentences = split_sentences(body) or [body]
+@@ -1065,6 +1341,32 @@ def inspect_public_body(
+     mentions_no_attribution = 0
+     reference_counts: dict[str, int] = {}
+     dead_known = dict(snapshot.known_dead)
++    # TASK-065: 意図の内訳をまず全文から拾う（疑問文の質問行為もここなら数えられる）。
++    # 以降の違反判定ループは従来どおりに動かし、観測だけを追加する（本文は触らない）。
++    intent_counts: dict[str, int] = {}
++    past_attributions = 0
++    question_acts = 0
++    action_speculations = 0
++    if normalized_intent_policy == TIMELINE_INTENT_POLICY_SEPARATED:
++        for sentence in sentences:
++            folded_intent = _normalize_text(sentence)
++            if not folded_intent:
++                continue
++            names_intent = mentions_players(sentence, tuple(player_names))
++            if not names_intent:
++                continue
++            intent, targets = classify_unspoken_intent(
++                sentence, folded_intent, snapshot, names_intent
++            )
++            if intent == INTENT_NONE or not targets:
++                continue
++            intent_counts[intent] = intent_counts.get(intent, 0) + 1
++            if intent == INTENT_FUTURE_QUESTION_TO_UNSPOKEN:
++                question_acts += 1
++            elif intent == INTENT_FUTURE_ACTION_SPECULATION:
++                action_speculations += 1
++            else:
++                past_attributions += 1
+     for sentence in sentences:
+         norm = _normalize_text(sentence)
+         if not norm or _is_question(sentence):
+@@ -1139,7 +1441,11 @@ def inspect_public_body(
+                     category = FUTURE_DEATH_BEFORE_DEATH
+                     reason = f"{name} was still alive at this point"
+                     break
+-        # 4) まだ一度も公開発言していない相手の発言・COを引用していないか
++        # 4) まだ一度も公開発言していない相手の「過去の発言」を断定していないか
++        #    （TASK-065: これから回答を求める質問行為だけ違反から外す。これからの行動
++        #     推測は別メトリクスへ分けるが、発言引用を伴う断定であれば従来どおり検出し、
++        #     TASK-056 / TASK-059 の検出強度を落とさない）
++        sentence_intent = INTENT_NONE
+         if (
+             category is None
+             and cites_speech
+@@ -1147,8 +1453,14 @@ def inspect_public_body(
+             and others
+             and all(not snapshot.spoken_before(name) for name in others)
+         ):
+-            category = FUTURE_SPEECH_FROM_UNSPOKEN
+-            reason = "no public speech by them existed at this point"
++            sentence_intent, _ = classify_unspoken_intent(sentence, norm, snapshot, names)
++            asked_future_answer = (
++                normalized_intent_policy == TIMELINE_INTENT_POLICY_SEPARATED
++                and sentence_intent == INTENT_FUTURE_QUESTION_TO_UNSPOKEN
++            )
++            if not asked_future_answer:
++                category = FUTURE_SPEECH_FROM_UNSPOKEN
++                reason = "no public speech by them existed at this point"
+         if category is not None:
+             subtype = ""
+             cause = ""
+@@ -1173,6 +1485,9 @@ def inspect_public_body(
+                     reason=reason,
+                     subtype=subtype,
+                     cause=cause,
++                    # TASK-065: 未発言者に関する断定だった場合だけ意図を添える
++                    # （past_attribution_to_unspoken。質問・推測はここで違反にならない）
++                    intent=sentence_intent if category == FUTURE_SPEECH_FROM_UNSPOKEN else "",
+                 )
+             )
+             # 根拠追跡率の分母は「他者の発言を引用した参照」だけ。投票・死亡・夜行動の
+@@ -1188,6 +1503,13 @@ def inspect_public_body(
+         hedged_pending_citations=int(hedged_pending),
+         mentions_without_attribution=int(mentions_no_attribution),
+         reference_token_counts=dict(reference_counts),
++        # TASK-065: 意図の内訳。findings（future_event_reference）へ数えたのは
++        # past_attribution の断定だけ。質問行為とこれからの行動推測は観測専用で分ける。
++        intent_counts=dict(intent_counts),
++        past_attributions_observed=int(past_attributions),
++        future_question_acts=int(question_acts),
++        future_action_speculations=int(action_speculations),
++        intent_policy=normalized_intent_policy,
+     )
+ 
+ 
+diff --git a/src/werewolf/engine.py b/src/werewolf/engine.py
+index c291fdd..ef317d3 100644
+--- a/src/werewolf/engine.py
++++ b/src/werewolf/engine.py
+@@ -60,10 +60,14 @@ from .role_provenance import (
+     PUBLIC_LINE_LABEL,
+     SOURCE_COMPATIBILITY_TEXT,
+ )
++# TASK-064: 役職能力の実行記録台帳（RoleActionProvenance）。夜の実行を [DONE] として登録し、
++# 公開発言の能力行使表現は観測専用で分類する（本文は変更しない）。
++from .role_action_provenance import KIND_ATTACK, KIND_DIVINATION
+ # TASK-056: Day内イベントの時系列台帳と未来参照の観測（検出は観測専用で本文は書き換えない）
+ from .day_timeline import (
+     DAY_TIMELINE_POLICY_DEFAULT,
+     DAY_TIMELINE_POLICY_OFF,
++    TIMELINE_INTENT_POLICY_DEFAULT,
+     TurnSnapshot,
+     inspect_public_body,
+     normalize_day_timeline_policy,
+@@ -1146,6 +1150,12 @@ class GameEngine:
+                 target if target in candidate_set.candidates else candidate_set.fallback
+             )
+             if self.state.pending_attack is not None:
++                # TASK-064: 襲撃はチーム決定だが、全人狼本人の実行記録として登録する
++                # （「襲った」という発言の裏付けを [DONE] 側で持たせるため）。
++                for wolf in wolves:
++                    self.state.role_action_provenance.record_engine_action(
++                        wolf.name, KIND_ATTACK, self.state.day
++                    )
+                 self._record_action_memory(
+                     player=wolves[0],
+                     action_type="attack",
+@@ -1207,6 +1217,11 @@ class GameEngine:
+         )
+         self.state.seer_results[target] = result
+         self.state.seer_result_history.append((self.state.day, target, result))
++        # TASK-064: エンジンが実際に占いを実行した事実を本人用の実行記録へ積む。
++        # 判定そのものは非公開のまま（台帳には日だけが残る）。
++        self.state.role_action_provenance.record_engine_action(
++            seer.name, KIND_DIVINATION, self.state.day
++        )
+         self.state.fact_ledger.confirmed_facts.append(
+             LedgerFact(
+                 day=self.state.day,
+@@ -1976,6 +1991,9 @@ class GameEngine:
+                 actor_role=actor.role.value if actor is not None else None,
+                 discussion_turn=self.state.discussion_turn,
+             )
++            # TASK-064: COの初出を本人の境界台帳に刻み、先に能力表現が出ていた場合は
++            # その距離だけを中立な数値イベントにする（真偽は一切載せない）。
++            self._record_role_action_claim(speaker, actor)
+             self._emit_public_claim(
+                 "claim_role_corrected"
+                 if correction and prior_role is not None
+@@ -2103,6 +2121,8 @@ class GameEngine:
+             result=claimed_result,
+             discussion_turn=self.state.discussion_turn,
+         )
++        # TASK-064: 結果行の公開でもCO初出記録を確認する（既にあれば no-op）。
++        self._record_role_action_claim(speaker, actor)
+         self._emit_public_claim(
+             "seer_result_corrected"
+             if correction and previous_result is not None
+@@ -2485,6 +2505,9 @@ class GameEngine:
+         inspectable = message.speaker != "system" and policy != DAY_TIMELINE_POLICY_OFF
+         snapshot = self.state.timeline_snapshot(message.speaker) if inspectable else None
+         appended = self.state.append_discussion_message(message)
++        # TASK-064: 発言本文の能力行使表現はコールバックの有無に関わらず観測する
++        # （分類専用で本文は変更しない。公開されるメッセージ自体はそのまま）。
++        role_action_fields = self._role_action_observation_fields(appended)
+         if self.event_callback is None:
+             return
+         event: dict[str, object] = {
+@@ -2504,8 +2527,82 @@ class GameEngine:
+         event.update(
+             self._timeline_reference_fields(appended, snapshot, policy)
+         )
++        # TASK-064: 能力行使表現の管理者ビュー観測を同じイベントに添える（公開本文は不変）
++        event.update(role_action_fields)
+         self.event_callback(event)
+ 
++    def _record_role_action_claim(self, speaker: str, actor: object) -> None:
++        """TASK-064: CO初出を境界台帳に刻み、能力表現が先に出ていた場合距離だけ出す。
++
++        発行するのは中立な数値のみ（どのCOが本物かは一切示さない）。本文・他の台帳へは
++        何も書き込まない。観測専用で、ここから再生成や無害化は行わない。
++        """
++        tracker = getattr(self.state, "role_action_provenance", None)
++        if tracker is None:
++            return
++        delta = tracker.mark_public_claim(
++            speaker, int(self.state.day), int(self.state.discussion_turn or 1)
++        )
++        if delta is not None:
++            self._emit_public_claim(
++                "claim_to_ability_distance",
++                day=int(self.state.day),
++                discussion_turn=int(self.state.discussion_turn or 1),
++                player=speaker,
++                model=getattr(actor, "model", None),
++                turn_delta=int(delta),
++                order="ability_then_claim",
++            )
++
++    def _role_action_observation_fields(self, message: Message) -> dict[str, object]:
++        """TASK-064: 公開発言の中の能力行使表現を観測する（本文は変更しない）。
++
++        分類・本人エンジン結果との一致可否はログの管理者ビュー用フィールドにだけ残す。
++        公開面では TASK-055 と同じ中立ラベル（public_claim_line）で、本文も台帳も
++        同じ扱いのままだ。検出しても発言の再生成・無害化・言い換えは一切行わない。
++        """
++        if message.speaker == "system":
++            return {}
++        tracker = getattr(self.state, "role_action_provenance", None)
++        if tracker is None:
++            return {}
++        actor = next(
++            (player for player in self.state.players if player.name == message.speaker),
++            None,
++        )
++        # 本人分の占い結果だけを照合に使う（他者分は絶対に渡さない）
++        own_results = (
++            dict(self.state.seer_results)
++            if actor is not None and actor.role is Role.SEER
++            else {}
++        )
++        was_marked_ability = message.speaker in tracker.first_ability_turn
++        observations = tracker.observe_public_speech(
++            player=message.speaker,
++            day=int(self.state.day),
++            discussion_turn=int(message.turn or self.state.discussion_turn or 1),
++            text=message.content,
++            own_engine_results=own_results,
++            allow_bluff_role_claim=bool(
++                getattr(self.state, "allow_bluff_role_claim", True)
++            ),
++            known_player_names=tuple(player.name for player in self.state.players),
++        )
++        fields: dict[str, object] = {}
++        if not observations:
++            return fields
++        # ログ用（管理者ビュー）。公開プロンプトには絶対に流さない。
++        fields["role_ability_observations"] = [o.admin_view() for o in observations]
++        fields["role_action_model"] = getattr(actor, "model", None)
++        if not was_marked_ability and not (message.speaker in tracker.first_ability_turn):
++            return fields
++        if not was_marked_ability:
++            delta = tracker.last_claim_to_ability_delta
++            if delta is not None:
++                fields["claim_to_ability_turn_delta"] = int(delta)
++                fields["claim_to_ability_order"] = "claim_then_ability"
++        return fields
++
+     def _timeline_reference_fields(
+         self,
+         message: Message,
+diff --git a/src/werewolf/llm_actions.py b/src/werewolf/llm_actions.py
+index 9cad59c..f232b40 100644
+--- a/src/werewolf/llm_actions.py
++++ b/src/werewolf/llm_actions.py
+@@ -113,6 +113,9 @@ from .core_compression import normalize_core_compression_policy
+ # TASK-060: 議論プロンプトの節順（layout v2 / v3）をstateから解決してbuilderへ渡す。
+ # 内容（発言の口調・論点・結論）には干渉せず、情報の載る位置と重複行だけを変える設定。
+ from .prompt_layout import normalize_prompt_layout_policy
++# TASK-064: 能力行使表現の検出は「CO補正の再要求が未検証の能力表現を増やしたか」を
++# 比べる観測専用（本文も選択肢も変えない）。エンジン実行記録台帳の定数もここで使う。
++from .role_action_provenance import KIND_DIVINATION, detect_ability_expressions
+ from .leak_gate_policy import (
+     DEFAULT_LEAK_GUARD_POLICY,
+     RULE_INTERNAL_CONFIG,
+@@ -2389,6 +2392,50 @@ class OllamaActions(ActionPolicy):
+             metadata = chat_response.to_metadata()
+             response_metadata_history.append(metadata)
+             raw_responses.append(chat_response.content)
++            # TASK-064: CO補正の再要求が未検証の能力表現を新たに生成しなかったかを
++            # 前後の個数比較で観測する（管理者ログ用・観測専用で本文は変更しない）。
++            # 短縮効果も通常プロンプト長と直接並べられる形で残す（実装案5の検証項目）。
++            if is_co_correction and len(raw_responses) >= 2:
++                tracker = getattr(self.state, "role_action_provenance", None)
++                known_names = tuple(player.name for player in self.state.players)
++
++                def _ability_assertions(text: object) -> int:
++                    if not isinstance(text, str):
++                        return 0
++                    return sum(
++                        1
++                        for expression in detect_ability_expressions(
++                            text,
++                            actor_name=actor.name,
++                            known_player_names=known_names,
++                        )
++                        if expression.get("first_person")
++                        and not expression.get("hedged")
++                    )
++
++                before_assertions = _ability_assertions(raw_responses[-2])
++                after_assertions = _ability_assertions(chat_response.content)
++                if tracker is not None:
++                    added_assertions = tracker.note_retry_delta(
++                        before_assertions, after_assertions
++                    )
++                else:
++                    added_assertions = max(0, after_assertions - before_assertions)
++                self._emit(
++                    "co_correction_boundary",
++                    action,
++                    actor,
++                    started_at,
++                    reask_prompt_chars=len(user_prompt),
++                    normal_prompt_chars=len(prompt_ctx.user_prompt),
++                    ability_assertions_before=before_assertions,
++                    ability_assertions_after=after_assertions,
++                    ability_assertions_added=int(added_assertions),
++                    engine_backed=bool(
++                        tracker is not None
++                        and tracker.own_engine_days(actor.name, KIND_DIVINATION)
++                    ),
++                )
+             response_text = self._final_response(chat_response.content).strip()
+             is_pass = self._is_pass(response_text)
+             leak_findings = self._public_response_leak_findings(
+@@ -3789,40 +3836,116 @@ class OllamaActions(ActionPolicy):
+     def _seer_co_correction_prompt(
+         self, actor: Player, spoken_result: tuple[str, str] | None
+     ) -> str:
+-        """Short correction prompt for missing Seer CO."""
++        """TASK-064 の短縮再要求（能力実行記録・主張状態・現在質問・出力形式だけ送る）。
++
++        旧実装（game_bcd7c97e7e48 で問題化した形）は、保有していないプレイヤーの
++        「以前口にした結果」へ "Publish this result" を付けて再送し、未検証のブラフを
++        実結果のように再強化していた。ここでは次だけを行う:
++        - [DONE]: エンジンが本人のために実行した能力行動（実施済みの占い日と本人の占い
++          結果だけ。他者分は絶対に載せない）
++        - [CLAIM]: 本人の公開COをID参照で示す（本文の再掲なし）
++        - 現在質問（本人宛ての未回答質問を200字まで）と出力形式
++        - 継続主張か撤回かの選択はモデルに委ねる（ブラフは自由）。ただし表現が
++          「エンジン実行の事実」と「自分の申告」のどちらに属するかだけを明記する。
++        長い旧プロンプトは再送しない（通常プロンプトより明確に短い）。
++        """
++        tracker = getattr(self.state, "role_action_provenance", None)
++        allow_bluff = bool(getattr(self.state, "allow_bluff_role_claim", True))
++        divination_days = (
++            tracker.own_engine_days(actor.name, KIND_DIVINATION)
++            if tracker is not None
++            else ()
++        )
++        engine_backed = bool(
++            actor.role is Role.SEER and divination_days and self.state.seer_results
++        )
+         lines = [
+-            "[CO Correction] Your statement mentions divination results without a Seer CO. "
+-            "You must explicitly claim Seer CO in the same statement.",
++            "[CO Correction] Your last reply used divination wording without a Seer CO line. "
++            "Fix only the output form now; this message carries no long old prompt.",
+             f"- You: {actor.name}",
+         ]
+         co_target: str | None = None
+         co_result: str | None = None
+-        if actor.role is Role.SEER and self.state.seer_results:
++        if engine_backed:
++            days_text = ", ".join(f"Day {d}" for d in divination_days[-4:])
+             target, result = self._latest_seer_result()
+             co_target, co_result = target, result
+             lines.append(
+-                f"- Your divination result: Target={target}, Result={self._result_label(result)}"
++                f"[DONE] Engine executed divination for you: "
++                f"{len(divination_days)} time(s) ({days_text})."
+             )
+-            lines.append("Publish this result together with a Seer CO.")
+-        elif spoken_result is not None:
+-            co_target, co_result = spoken_result
+             lines.append(
+-                f"- Previously stated result: Target={spoken_result[0]}, "
+-                f"Result={self._result_label(spoken_result[1])}"
++                f"- Your engine-issued result: Target={target}, "
++                f"Result={self._result_label(result)}. Pair it with your CO line."
+             )
+-            lines.append("Publish this result together with a Seer CO.")
+-        lines.extend(
+-            [
+-                f"Output strictly in {actor.response_language} using these 2 lines only without extra text:",
+-                "[CO] Seer",
+-                # TASK-043: 案内文に「Player X」のようなプレースホルダを書かない。
+-                # 弱いモデル（game_e2991441d6f0 Player 3）はそれを模倣して実在しない
+-                # 対象の判定を公開したため、実際の対象名を出す。
+-                f"[RESULT] Target={co_target or '<the player you actually divined>'} "
+-                f"Result={self._result_label(co_result) if co_result is not None else 'Werewolf or Human'}",
+-                "Reason and vote proposal are optional; if adding them, put [BODY] on the 3rd line.",
+-            ]
+-        )
++        else:
++            lines.append(
++                "[DONE] The engine has never executed a divination action for you. "
++                "The divination wording you used is not an engine record."
++            )
++        own_claims = [
++            (index, claim)
++            for index, claim in enumerate(self.state.public_role_claims, 1)
++            if claim.claimant == actor.name
++        ]
++        if own_claims:
++            refs = ", ".join(
++                f"[claim:{index}] Day {claim.day} "
++                f"{ROLE_NAMES_EN.get(Role(claim.claimed_role), claim.claimed_role)}"
++                for index, claim in own_claims[-3:]
++            )
++            lines.append(f"[CLAIM] You already published: {refs} (unverified).")
++        else:
++            lines.append(
++                "[CLAIM] You have published no role claim yet."
++            )
++        conversation = tuple(self.state.conversation_log)
++        current_day_history = PromptBuilder.current_day_messages(conversation)
++        for message in reversed(current_day_history[-8:]):
++            if message.speaker == actor.name:
++                continue
++            content = message.content if isinstance(message.content, str) else ""
++            if any(
++                cue in content
++                for cue in ("?", "？", "なぜ", "理由は", "質問", "確認", "教えて", "聞かせて")
++            ) and PromptBuilder._is_directed_to_player(
++                actor, message, current_day_history
++            ):
++                lines.append(
++                    f"- Current question to answer: {message.speaker}: {content[:200]}"
++                )
++                break
++        keep_claim_option = bool(engine_backed or (allow_bluff and spoken_result))
++        if keep_claim_option:
++            target = co_target or (spoken_result[0] if spoken_result else None)
++            result = co_result or (spoken_result[1] if spoken_result else None)
++            source_label = (
++                "your engine-issued result"
++                if engine_backed
++                else "the reading you stated publicly (unverified - it will be logged "
++                "as a claim, not as an engine fact)"
++            )
++            lines.extend(
++                [
++                    f"Option A - publish the Seer CO together with {source_label}:",
++                    "[CO] Seer",
++                    f"[RESULT] Target={target} Result={self._result_label(result)}",
++                ]
++            )
++        if allow_bluff:
++            lines.append(
++                "Option B - publish the Seer CO without any result line "
++                "([CO] Seer then optionally [BODY]), or answer the current question "
++                "without ability wording. Which form you choose is yours; tone, topics "
++                "and reasoning order stay free."
++            )
++        else:
++            lines.append(
++                "Option B - answer the current question without claiming a role: this "
++                "game setting disallows publishing a role you do not hold, so keep the "
++                "answer plain (no [CO] / no divination verdict)."
++            )
++        lines.append(f"出力は厳密に{actor.response_language}で行ってください。")
+         return "\n".join(lines)
+ 
+     @staticmethod
+@@ -6063,6 +6186,29 @@ class OllamaActions(ActionPolicy):
+             result=result,
+             discussion_turn=self.state.discussion_turn,
+         )
++        # TASK-064: CO初出を能力境界台帳にも刻む。先に能力表現が出ていた場合は
++        # 距離だけを中立な数値イベントにする（どのCOが本物かを示す情報は載せない）。
++        boundary_tracker = getattr(self.state, "role_action_provenance", None)
++        claim_to_ability_delta = (
++            boundary_tracker.mark_public_claim(
++                actor.name,
++                int(self.state.day),
++                int(self.state.discussion_turn or 1),
++            )
++            if boundary_tracker is not None
++            else None
++        )
++        if claim_to_ability_delta is not None:
++            self._emit(
++                "claim_to_ability_distance",
++                action,
++                actor,
++                started_at,
++                day=int(self.state.day),
++                discussion_turn=int(self.state.discussion_turn or 1),
++                turn_delta=int(claim_to_ability_delta),
++                order="ability_then_claim",
++            )
+         self._emit(
+             "claim_role_published",
+             action,
+diff --git a/src/werewolf/models.py b/src/werewolf/models.py
+index cad1ce7..abd8675 100644
+--- a/src/werewolf/models.py
++++ b/src/werewolf/models.py
+@@ -25,15 +25,20 @@ from .role_provenance import (
+     SOURCE_COMPATIBILITY_TEXT,
+     RoleProvenanceLedger,
+ )
++# TASK-064: 役職騙りと能力行使の境界台帳（engine_action / public_role_claim /
++# unsupported_role_action / inference）。観測専用で本文は変更しない。modelsをimportしない。
++from .role_action_provenance import RoleActionProvenance
+ # TASK-056: Day内イベントの時系列台帳（day / discussion_turn / speech_id / sequence を残す。
+ # このモジュールは models をimportしないため、循環参照にはならない）
+ from .day_timeline import (
+     DAY_TIMELINE_POLICY_DEFAULT,
+     PublicTimeline,
++    TIMELINE_INTENT_POLICY_DEFAULT,
+     TimelineEvent,
+     TurnSnapshot,
+     build_turn_snapshot,
+     normalize_day_timeline_policy,
++    normalize_timeline_intent_policy,
+ )
+ # TASK-057: プロンプト契約のポリシー（simplified / legacy）。このモジュールは models を
+ # import しないため循環参照にならない。節の台帳・証拠ID参照・段階除去を prompts 側で使う。
+@@ -61,6 +66,21 @@ from .continuity_state import (
+     ContinuityState,
+     normalize_continuity_policy,
+ )
++# TASK-065: 実効コンテキスト整合（configured / server_observed / loaded / requested）、
++# 未発言者への意図分離、プレイヤー名表記ゆれの内部解決、出力安定化のスコープ。
++# いずれも models を import しない純粋なモジュールで、公開本文は書き換えない。
++from .context_integrity import (
++    CONTEXT_INTEGRITY_POLICY_DEFAULT,
++    normalize_context_integrity_policy,
++)
++from .name_resolution import (
++    NAME_RESOLUTION_POLICY_DEFAULT,
++    normalize_name_resolution_policy,
++)
++from .output_stability import (
++    OUTPUT_STABILIZATION_SCOPE_DEFAULT,
++    normalize_output_stabilization_scope,
++)
+ 
+ 
+ class Role(str, Enum):
+@@ -523,6 +543,12 @@ class GameState:
+     # TASK-055: エンジン発行情報（RoleEvidence）と公開申告（PublicInterpretation）の台帳。
+     # 照合結果は管理者ログ専用で、公開面では全CO行を同じ中立ラベルに揃える。
+     role_provenance: RoleProvenanceLedger = field(default_factory=RoleProvenanceLedger)
++    # TASK-064: 役職能力の実行記録と公開主張の境界台帳（RoleActionProvenance）。
++    # 実行済み行動（エンジン）／本人の公開CO／実行記録のない能力行使表現／他者の推測を
++    # 分けて持つ。検出は観測専用で、本文の再生成・無害化には使わない。
++    role_action_provenance: RoleActionProvenance = field(
++        default_factory=RoleActionProvenance
++    )
+     # TASK-056: 公開イベントの時系列台帳（時点・ID・短い要約のみ。発言本文は保持しない）。
+     # 発言・投票・処刑・襲撃死を登順で並べ、「この時点で既知」と「まだ発生していない」
+     # の境界をプロンプトとログの両方で追跡できるようにする。
+@@ -551,6 +577,21 @@ class GameState:
+     continuity_policy: str = CONTINUITY_POLICY_DEFAULT
+     # プレイヤー別の論理状態と、エンジン発行チェックポイントの台帳
+     continuity_state: ContinuityState = field(default_factory=ContinuityState)
++    # TASK-065: 実効コンテキスト整合チェック（off / warn / cap）。既定 warn は送信値を変えず、
++    # cap のときだけサーバー観測値へ安全縮退する。議論本文へは一切書き込まない。
++    context_integrity_policy: str = CONTEXT_INTEGRITY_POLICY_DEFAULT
++    # ゲーム開始前のモデル別ロード確認結果（configured / server_observed / loaded / requested）。
++    # 数値とカテゴリのみで、役職・占い結果などの秘密情報は含まれない。
++    context_integrity_checks: dict[str, dict[str, object]] = field(default_factory=dict)
++    # TASK-065: 未発言者に関する文の意図分離（separated / literal）。既定 separated は
++    # これから質問する行為を未来参照から外し、実質的な断定だけを残す。offではない。
++    timeline_intent_policy: str = TIMELINE_INTENT_POLICY_DEFAULT
++    # TASK-065: プレイヤー名表記ゆれの内部解決（normalized / literal）。既定は
++    # `Player\u202f6`・全角・カタカナ表記を実在名へ解決するが、公開発言の表記は変えない。
++    player_name_resolution_policy: str = NAME_RESOLUTION_POLICY_DEFAULT
++    # TASK-065: thinking・timeout・生成上限の処置スコープ（action / model）。既定 action は
++    # モデル全体へ恒久適用せず、モデル×行動×直近失敗履歴に限定する。
++    output_stabilization_scope: str = OUTPUT_STABILIZATION_SCOPE_DEFAULT
+ 
+     def __post_init__(self) -> None:
+         if self.day < 0:
+@@ -572,6 +613,21 @@ class GameState:
+         # TASK-062: 論理状態の正規化ポリシーも正規化し、台帳と同じ値に揃える
+         self.continuity_policy = normalize_continuity_policy(self.continuity_policy)
+         self.continuity_state.policy = self.continuity_policy
++        # TASK-065: 4つの運用ポリシーを正規化する（未知の設定値はそれぞれ既定へ寄せる）。
++        # どれを選んでも発言本文・口調・論点には干渉せず、整合チェックと観測の切れ目だけを
++        # 整える設定である。
++        self.context_integrity_policy = normalize_context_integrity_policy(
++            self.context_integrity_policy
++        )
++        self.timeline_intent_policy = normalize_timeline_intent_policy(
++            self.timeline_intent_policy
++        )
++        self.player_name_resolution_policy = normalize_name_resolution_policy(
++            self.player_name_resolution_policy
++        )
++        self.output_stabilization_scope = normalize_output_stabilization_scope(
++            self.output_stabilization_scope
++        )
+         if not 0 <= self.discussion_turn <= 3:
+             raise ValueError("Discussion turn must be between zero and three.")
+         names = [player.name for player in self.players]
+diff --git a/src/werewolf/prompt_contract.py b/src/werewolf/prompt_contract.py
+index f2e1392..6f64e4f 100644
+--- a/src/werewolf/prompt_contract.py
++++ b/src/werewolf/prompt_contract.py
+@@ -215,6 +215,20 @@ PROMPT_SECTIONS: tuple[PromptSectionMeta, ...] = (
+         source=AUTHORITY_ENGINE,
+         authority=AUTHORITY_ENGINE,
+     ),
++    # TASK-064: 役職能力の境界節。エンジンが実際に実行した行動と、本人が公開した主張を
++    # 短い固定行で分ける（[DONE]=エンジン実行、[CLAIM]=本人申告）。エンジン結果・公開
++    # 主張・推測の本文は重複掲載せずID参照のみ。口調・論点・結論には干渉しない。
++    PromptSectionMeta(
++        name="role_action_boundary",
++        markers=("[ROLE_ACTION_BOUNDARY",),
++        tier=TIER_CORE,
++        purpose=(
++            "what abilities the engine actually executed for this actor vs. what they "
++            "publicly claimed (short symbol lines; no result bodies, ids refer to their ledgers)"
++        ),
++        source=AUTHORITY_ENGINE,
++        authority=AUTHORITY_ENGINE,
++    ),
+     PromptSectionMeta(
+         name="integrity_alerts",
+         markers=("[INTEGRITY_ALERTS]",),
+diff --git a/src/werewolf/prompt_layout.py b/src/werewolf/prompt_layout.py
+index 76f7f2b..8924271 100644
+--- a/src/werewolf/prompt_layout.py
++++ b/src/werewolf/prompt_layout.py
+@@ -52,19 +52,23 @@ from .prompt_contract import find_sections
+ PROMPT_LAYOUT_POLICY_AUTO = "auto"
+ PROMPT_LAYOUT_POLICY_V2 = "v2"
+ PROMPT_LAYOUT_POLICY_V3 = "v3"
+-# TASK-062: v4 は `[CONTINUITY_CHECKPOINT]`（日をまたぐ論理状態）を含む配置で既定になる。
++# TASK-062: v4 は `[CONTINUITY_CHECKPOINT]`（日をまたぐ論理状態）を含む配置。
+ PROMPT_LAYOUT_POLICY_V4 = "v4"
++# TASK-064: v5 は v4 の連鎖へ `[ROLE_ACTION_BOUNDARY]`（役職能力の境界節）を挟む既定配置。
++PROMPT_LAYOUT_POLICY_V5 = "v5"
+ PROMPT_LAYOUT_POLICIES: tuple[str, ...] = (
++    PROMPT_LAYOUT_POLICY_V5,
+     PROMPT_LAYOUT_POLICY_V4,
+     PROMPT_LAYOUT_POLICY_V3,
+     PROMPT_LAYOUT_POLICY_V2,
+     PROMPT_LAYOUT_POLICY_AUTO,
+ )
+-PROMPT_LAYOUT_POLICY_DEFAULT = PROMPT_LAYOUT_POLICY_V4
++PROMPT_LAYOUT_POLICY_DEFAULT = PROMPT_LAYOUT_POLICY_V5
+ 
+ # レイアウトラベル（ログに載る値）。v2/legacy は core_compression の既存ラベルを再利用する。
+ PROMPT_LAYOUT_V3 = "v3_grounding"
+ PROMPT_LAYOUT_V4 = "v4_continuity"
++PROMPT_LAYOUT_V5 = "v5_role_boundary"
+ 
+ 
+ def normalize_prompt_layout_policy(value: object) -> str:
+@@ -74,11 +78,13 @@ def normalize_prompt_layout_policy(value: object) -> str:
+     bool は True=v3 / False=v2 として扱う（A/B切り替えの簡易指定）。
+     """
+     if isinstance(value, bool):
+-        return PROMPT_LAYOUT_POLICY_V4 if value else PROMPT_LAYOUT_POLICY_V2
++        return PROMPT_LAYOUT_POLICY_V5 if value else PROMPT_LAYOUT_POLICY_V2
+     if isinstance(value, str):
+         candidate = value.strip().lower()
+         if candidate in PROMPT_LAYOUT_POLICIES:
+             return candidate
++        if candidate in {PROMPT_LAYOUT_V5, "boundary", "role_boundary", "task064"}:
++            return PROMPT_LAYOUT_POLICY_V5
+         if candidate in {PROMPT_LAYOUT_V4, "continuity", "task062", "on", "true", "best"}:
+             return PROMPT_LAYOUT_POLICY_V4
+         if candidate in {PROMPT_LAYOUT_V3, "grounding", "task060"}:
+@@ -112,7 +118,9 @@ def resolve_prompt_layout(policy: object, contract_policy: object) -> str:
+         return PROMPT_LAYOUT_V2
+     if resolved == PROMPT_LAYOUT_POLICY_V3:
+         return PROMPT_LAYOUT_V3
+-    return PROMPT_LAYOUT_V4
++    if resolved == PROMPT_LAYOUT_POLICY_V4:
++        return PROMPT_LAYOUT_V4
++    return PROMPT_LAYOUT_V5
+ 
+ 
+ def prompt_layout_policy_label(policy: object) -> str:
+@@ -179,6 +187,10 @@ ROLE_TEMPORARY_GUIDANCE = "temporary_guidance"  # 期限付きの暫定案内
+ # TASK-062: エンジンが発行する「日をまたぐ論理状態」（確定事実・反証・未解決の問い）。
+ # いま有効な状態なので中部に沈ませたくないが、読み枠を先頭で決める誘導節でもない。
+ ROLE_CONTINUITY = "continuity_state"
++# TASK-064: エンジンが発行する「役職能力の境界」（実際に実行した行動 vs 本人の公開主張）。
++# 現在質問の読み直後・自分の発言の直前に置いて実行と主張を取り違えないための状態欄。
++# 口調・論点・結論には干渉しない。
++ROLE_ABILITY_BOUNDARY = "ability_boundary"
+ 
+ SECTION_ROLES: dict[str, str] = {
+     "system_rules": ROLE_RULES,
+@@ -209,6 +221,8 @@ SECTION_ROLES: dict[str, str] = {
+     "continuity_memo": ROLE_DERIVED,
+     # TASK-062: 正規化された論理状態（エンジン発行）。自分の記録と同じくらい「いま」使う
+     "continuity_checkpoint": ROLE_CONTINUITY,
++    # TASK-064: 役職能力の境界（エンジン発行）。実行と主張の取り違えを防ぐ「いま」使う状態
++    "role_action_boundary": ROLE_ABILITY_BOUNDARY,
+     "integrity_alerts": ROLE_DERIVED,
+     "round_transcript": ROLE_DERIVED,
+     "day1_first_turn_guidance": ROLE_TEMPORARY_GUIDANCE,
+@@ -234,6 +248,8 @@ ROLE_WEIGHTS: dict[str, float] = {
+     ROLE_TEMPORARY_GUIDANCE: 0.55,
+     # TASK-062: 状態そのものなので、議論の案内や派生要約より高く置く（中部に沈ませない）
+     ROLE_CONTINUITY: 1.20,
++    # TASK-064: 実行記録と本人の主張の境界。質問直前で読むほど取り違えが減る状態
++    ROLE_ABILITY_BOUNDARY: 1.20,
+ }
+ 
+ # 「いま使う」役割の節が中部帯に沈むことを減点する役割集合
+@@ -247,6 +263,8 @@ MUST_USE_ROLES: frozenset[str] = frozenset(
+         ROLE_TEMPORAL,
+         # TASK-062: 日をまたぐ論理状態も「いま使う」情報（中部に沈めると記憶減衰が出る）
+         ROLE_CONTINUITY,
++        # TASK-064: 能力の境界も「いま使う」情報（質問に答える直前で読み states を区別する）
++        ROLE_ABILITY_BOUNDARY,
+     }
+ )
+ 
+@@ -339,6 +357,28 @@ ADJACENCY_TARGETS: tuple[AdjacencyTarget, ...] = (
+         0.95,
+         "現在質問に答える直前に論理状態があると、自分の立場を更新したまま答えられる",
+     ),
++    # TASK-064: 能力の境界は現在質問と隣接帯に置き、そのまま自分の発言へ接続する。
++    # 実際にやった行動と自分が言った主張を、質問応答の接続点で区別するため。
++    AdjacencyTarget(
++        "role_action_boundary",
++        "question_block",
++        1.00,
++        "境界節を現在質問の隣に読むと、実行記録と本人申告の取り違えが減る（前でも後ろでも隣なら可）",
++    ),
++    AdjacencyTarget(
++        "continuity_checkpoint",
++        "role_action_boundary",
++        0.60,
++        "エンジン発行の2節（論理状態→能力の境界）を連続で読むと権威の層が混ざらない",
++    ),
++    # TASK-064: 境界は「現在質問」と「自分の発言」の間に挟む。質問を読んで答える直前に
++    # 実行記録と本人申告を読み、そのまま自分の過去の発言（立場のアンカー）へ接続する。
++    AdjacencyTarget(
++        "role_action_boundary",
++        "own_speeches",
++        0.55,
++        "実行と申告の直後に自分の発言を読むと、立場の一貫性が保たれる（TASK-039系）",
++    ),
+ )
+ 
+ 
+@@ -370,9 +410,13 @@ NO_PRIMACY_SECTIONS: tuple[str, ...] = (
+     "continuity_memo",
+     # TASK-062: 正規化状態も「読み枠を先に決める」位置には置かない（末尾帯で使う）
+     "continuity_checkpoint",
++    # TASK-064: 能力の境界も先頭帯で枠を決めない（ID索引を参照するため末尾帯で読む）
++    "role_action_boundary",
+ )
+ # TASK-062: 論理状態は主張索引（CLAIM_LEDGER）のIDを参照するので、索引より前に来ない
+ CONTINUITY_STATE_SECTION = "continuity_checkpoint"
++# TASK-064: 能力の境界も本人の公開CO索引（[claim:N]）を参照する。索引より前に出さない
++ROLE_BOUNDARY_SECTION = "role_action_boundary"
+ 
+ 
+ def validate_declared_order(order: Sequence[str]) -> list[dict[str, object]]:
+@@ -424,6 +468,17 @@ def validate_declared_order(order: Sequence[str]) -> list[dict[str, object]]:
+                     "after": "claim_ledger",
+                 }
+             )
++    # TASK-064: 能力の境界も本人の公開CO索引（[claim:N]）を参照する。索引より前に出すと
++    # 存在しないIDを辿らせることになり、追跡性が壊れる（state節と同じ制約）。
++    if ROLE_BOUNDARY_SECTION in names and "claim_ledger" in names:
++        if names.index(ROLE_BOUNDARY_SECTION) < names.index("claim_ledger"):
++            problems.append(
++                {
++                    "kind": "boundary_before_index",
++                    "name": ROLE_BOUNDARY_SECTION,
++                    "after": "claim_ledger",
++                }
++            )
+     return problems
+ 
+ 
+@@ -702,6 +757,8 @@ PROMPT_SEARCH_BLOCKS: tuple[tuple[str, ...], ...] = (
+     ("day_timeline",),
+     # TASK-062: エンジン発行の論理状態（チェックポイント）。主張索引のIDを参照する位置に置く
+     ("continuity_checkpoint",),
++    # TASK-064: エンジン発行の役職能力の境界（実行 vs 申告）。同じく索引IDを参照する
++    ("role_action_boundary",),
+     ("inference_line", "hypothesis_ledger", "previous_topics"),
+     ("continuity_memo", "integrity_alerts"),
+     ("day1_first_turn_guidance", "first_night_guidance"),
+@@ -738,6 +795,7 @@ BLOCK_ALIASES: dict[str, tuple[str, ...]] = {
+     "claims": ("claim_ledger",),
+     "timeline": ("day_timeline",),
+     "state": ("continuity_checkpoint",),
++    "rbound": ("role_action_boundary",),
+     "derived": ("inference_line", "hypothesis_ledger", "previous_topics"),
+     "memo": ("continuity_memo", "integrity_alerts"),
+     "temp": ("day1_first_turn_guidance", "first_night_guidance"),
+@@ -784,11 +842,28 @@ SEED_KEYS: tuple[tuple[str, ...], ...] = (
+      "claims", "timeline", "evid", "task", "state", "selfpair", "rguid", "guid"),
+ )
+ 
++# TASK-064: v5 の探索は `rbound`（エンジン発行の役職能力の境界）を含む候補から始める。
++# SEED_KEYS（v4まで）はそのまま残し、v5専用のシード集合として凍結再現に使う。
++SEED_KEYS_V5: tuple[tuple[str, ...], ...] = (
++    # seed G: v4連鎖（索引→時点→状態→証拠）で境界を証拠と質問の間に挟む
++    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
++     "claims", "timeline", "state", "evid", "rbound", "task", "selfpair", "rguid", "guid"),
++    # seed H: 境界を状態より前（証拠の隣）に置く
++    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
++     "claims", "timeline", "state", "rbound", "evid", "task", "selfpair", "rguid", "guid"),
++    # seed I: 境界を主張索引の直後（ID参照を最短距離で辿る案）に置く
++    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
++     "claims", "rbound", "timeline", "state", "evid", "task", "selfpair", "rguid", "guid"),
++    # seed K: 境界を質問ブロックの後・自分の記録の直前へ（状態節はv4連鎖のまま）
++    ("action", "facts", "private", "theory", "derived", "memo", "temp", "round",
++     "claims", "timeline", "state", "evid", "task", "rbound", "selfpair", "rguid", "guid"),
++)
++
+ 
+-def candidate_orders() -> list[tuple[str, ...]]:
++def candidate_orders(seeds: Sequence[tuple[str, ...]] | None = None) -> list[tuple[str, ...]]:
+     """候補順の初期集合（先頭2つ＋movable＋終端4つの平坦列）。"""
+     orders: list[tuple[str, ...]] = []
+-    for keys in SEED_KEYS:
++    for keys in SEED_KEYS if seeds is None else seeds:
+         blocks = (PROMPT_SEARCH_HEAD, *blocks_from_keys(keys), PROMPT_SEARCH_TAIL)
+         orders.append(flatten_blocks(blocks))
+     return orders
+@@ -848,10 +923,12 @@ def search_prompt_orders(
+     *,
+     top_k: int = 6,
+     max_passes: int = 6,
++    seeds: Sequence[tuple[str, ...]] | None = None,
+ ) -> list[dict[str, object]]:
+     """代表字数で候補順を貪欲改善し、上位をスコア付きで返す（決定的・LL不使用）。"""
+     found: dict[tuple[tuple[str, ...], ...], OrderScore] = {}
+-    for keys in SEED_KEYS:
++    chosen_seeds = SEED_KEYS if seeds is None else seeds
++    for keys in chosen_seeds:
+         blocks = (PROMPT_SEARCH_HEAD, *blocks_from_keys(keys), PROMPT_SEARCH_TAIL)
+         refined, scored = _improved(blocks, section_chars, max_passes=max_passes)
+         previous = found.get(refined)
+@@ -861,6 +938,17 @@ def search_prompt_orders(
+     return [result.as_dict() for result in ranked[: max(1, int(top_k))]]
+ 
+ 
++def search_prompt_orders_v5(
++    section_chars: Mapping[str, int] | None = None,
++    *,
++    top_k: int = 6,
++    max_passes: int = 6,
++) -> list[dict[str, object]]:
++    """TASK-064: `rbound`（役職能力の境界）を含む候補から節順を探索する（決定的）。"""
++    chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
++    return search_prompt_orders(chars, top_k=top_k, max_passes=max_passes, seeds=SEED_KEYS_V5)
++
++
+ # ---------------------------------------------------------------------------
+ # 採用する節順（layout v3）
+ # ---------------------------------------------------------------------------
+@@ -930,6 +1018,48 @@ V4_CHANGED_FROM_V3: tuple[str, ...] = (
+     "誘導系（理論カード・派生情報・期限付き案内）は中部帯のまま、状態節だけは終端帯で読む",
+ )
+ 
++# TASK-064: layout v5（既定）。`_analysis/task064_order_probe.py` が代表字数で探索した結果を
++# 凍結したもの（スコア43.58／違反0、全シード収束）。v4 と同じ連鎖を保ったまま、エンジン発行の
++# 役職能力の境界を「現在質問ブロックの直後・自分の発言の直前」へ置く。質問を読んだ直後に
++# [DONE]/[CLAIM] で実行と申告を区別し、そのまま自分の発言（立場のアンカー）へ接続する。
++# 代表字数200字での貪欲探索が1位にした配置そのもので、RBOUND→質問 0.0099・RBOUND→自分の発言
++# 0.0（STATE→RBOUND は 0.0262）。機械的に議論案内の前へ足すだけの配置（35.28）より明確に良い。
++# 読み方: ルールと応答言語 → 自分の行動記録 → 盤面の確定事実 → 本人限定情報
++#        → （中部: 理論カード・未検証の派生情報・期限付き案内・ラウンド見出し）
++#        → 公開主張の索引 → 時点 → 発言証拠 → [論理状態] → 現在質問
++#        → [能力の境界] → 自分の発言と推理メモ → 推理メモの指針 → 議論の案内（中立）
++#        → 秘匿境界 → 強い契約 → 出力形式 → 最終チェックリスト
++PROMPT_LAYOUT_V5_ORDER: tuple[str, ...] = flatten_blocks(
++    (
++        PROMPT_SEARCH_HEAD,
++        ("self_action_memory",),
++        ("fact_ledger",),
++        ("private_seer_result", "actor_private_memo", "info_boundaries"),
++        ("werewolf_theory_card",),
++        ("inference_line", "hypothesis_ledger", "previous_topics"),
++        ("continuity_memo", "integrity_alerts"),
++        ("day1_first_turn_guidance", "first_night_guidance"),
++        ("round_transcript",),
++        ("claim_ledger",),
++        ("day_timeline",),
++        ("conversation_evidence",),
++        ("continuity_checkpoint",),
++        ("current_task", "question_block", "direct_answer"),
++        ("role_action_boundary",),
++        ("own_speeches", "reasoning_memo_own"),
++        ("reasoning_guidance",),
++        ("discussion_guidelines",),
++        PROMPT_SEARCH_TAIL,
++    )
++)
++
++# v4 から v5 へ変わった点（節の新設と位置だけ。文言・口調・議論の自由は変えない）
++V5_CHANGED_FROM_V4: tuple[str, ...] = (
++    "role_action_boundary: 現在質問ブロックの直後・自分の発言の直前へ（質問との距離0.0099、自分の発言との距離0）",
++    "エンジン発行の状態節（continuity_checkpoint）は発言証拠の直後に残し、境界節は質問応答の接続点で読む",
++    "誘導系（理論カード・派生情報・期限付き案内）は中部帯のまま、境界節は終端帯のアンカー列に組み込む",
++)
++
+ # v2 の宣言順から v3 へ変わった点（ログで説明できるようにしておく）
+ V3_CHANGED_FROM_V2: tuple[str, ...] = (
+     "werewolf_theory_card: FACT_LEDGER の内側（先頭帯）から中部帯へ降格し、optional 化",
+@@ -959,6 +1089,10 @@ REPRESENTATIVE_SECTION_CHARS: dict[str, int] = {
+     # TASK-062: `[CONTINUITY_CHECKPOINT]` の代表字数。見出し+権威説明が約620字、
+     # 差分・反証・未解決の問いの行で最大約900字（Day 2以降の差分提示の実測平均を想定）。
+     "continuity_checkpoint": 900,
++    # TASK-064: `[ROLE_ACTION_BOUNDARY]` の代表字数。実測（_analysis/task064_boundary_cost2.py）で
++    # 実行記録・本人COなしの通常盤面が180字、占い実行＋本人CO2件で235字。結果本文は再掲しない
++    # ため日跨ぎでも増えない（1リクエスト平均は200字弱）。
++    "role_action_boundary": 200,
+     "day1_first_turn_guidance": 1450,
+     "round_transcript": 120,
+     "reasoning_guidance": 620,
+@@ -982,9 +1116,9 @@ def adopted_layout_score(
+     section_chars: Mapping[str, int] | None = None,
+     order: Sequence[str] | None = None,
+ ) -> OrderScore:
+-    """採用中の節順（TASK-062以降は v4）をコストモデルで評価する（既定は代表字数）。"""
++    """採用中の節順（TASK-064以降は v5）をコストモデルで評価する（既定は代表字数）。"""
+     chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
+-    chosen = PROMPT_LAYOUT_V4_ORDER if order is None else tuple(order)
++    chosen = PROMPT_LAYOUT_V5_ORDER if order is None else tuple(order)
+     return score_order(chosen, chars)
+ 
+ 
+@@ -996,6 +1130,23 @@ def v3_layout_score(
+     return score_order(PROMPT_LAYOUT_V3_ORDER, chars)
+ 
+ 
++def v4_layout_score(
++    section_chars: Mapping[str, int] | None = None,
++) -> OrderScore:
++    """A/B比較の基準側（TASK-062の v4 節順）を評価する（境界節なし）。"""
++    chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
++    base = {k: v for k, v in dict(chars).items() if k != ROLE_BOUNDARY_SECTION}
++    return score_order(PROMPT_LAYOUT_V4_ORDER, base)
++
++
++def v5_layout_score(
++    section_chars: Mapping[str, int] | None = None,
++) -> OrderScore:
++    """現行既定（TASK-064の v5 節順）を評価する。"""
++    chars = REPRESENTATIVE_SECTION_CHARS if section_chars is None else section_chars
++    return score_order(PROMPT_LAYOUT_V5_ORDER, chars)
++
++
+ __all__ = [
+     "ADJACENCY_TARGETS",
+     "ADJACENCY_PENALTY_PER_FRACTION",
+@@ -1024,17 +1175,22 @@ __all__ = [
+     "PROMPT_LAYOUT_POLICY_V2",
+     "PROMPT_LAYOUT_POLICY_V3",
+     "PROMPT_LAYOUT_POLICY_V4",
++    "PROMPT_LAYOUT_POLICY_V5",
+     "PROMPT_LAYOUT_V2",
+     "PROMPT_LAYOUT_V2_ORDER",
+     "PROMPT_LAYOUT_V3",
+     "PROMPT_LAYOUT_V3_ORDER",
+     "PROMPT_LAYOUT_V4",
+     "PROMPT_LAYOUT_V4_ORDER",
++    "PROMPT_LAYOUT_V5",
++    "PROMPT_LAYOUT_V5_ORDER",
+     "PROMPT_SEARCH_BLOCKS",
+     "PROMPT_SEARCH_HEAD",
+     "PROMPT_SEARCH_TAIL",
+     "REPRESENTATIVE_SECTION_CHARS",
+     "ROLE_ADVISORY",
++    "ROLE_ABILITY_BOUNDARY",
++    "ROLE_BOUNDARY_SECTION",
+     "ROLE_DERIVED",
+     "ROLE_EVIDENCE",
+     "ROLE_ENGINE_FACT",
+@@ -1054,13 +1210,17 @@ __all__ = [
+     "SCORE_SCALE",
+     "SECTION_ROLES",
+     "SEED_KEYS",
++    "SEED_KEYS_V5",
+     "TAIL_TIGHT_SECTIONS",
+     "V3_CHANGED_FROM_V2",
+     "V4_CHANGED_FROM_V3",
++    "V5_CHANGED_FROM_V4",
+     "WEAK_MIDDLE_MUST_USE_WEIGHT",
+     "adjacency_gap",
+     "adopted_layout_score",
+     "v3_layout_score",
++    "v4_layout_score",
++    "v5_layout_score",
+     "attention_prior",
+     "attention_prior_span",
+     "attention_zone_for_center",
+diff --git a/src/werewolf/prompts.py b/src/werewolf/prompts.py
+index 75b1456..101cd18 100644
+--- a/src/werewolf/prompts.py
++++ b/src/werewolf/prompts.py
+@@ -65,6 +65,9 @@ from .core_compression import (
+ # 寄せ、同じ制約の言い換え（一人称・言語・記録外・死者扱い）を1箇所に寄せる。
+ # TASK-062: 既定は v4。エンジン発行の論理状態（[CONTINUITY_CHECKPOINT]）を発言証拠の直後・
+ # 現在質問の直前へ置き、チェックポイントが正規化した日の平常発言本文をID行へ畳む。
++# TASK-064: 既定は v5。v4 の連鎖に `[ROLE_ACTION_BOUNDARY]`（エンジン実行と本人申告の境界、
++# [DONE]/[CLAIM] の短固定行）を現在質問の直後・自分の発言の直前へ挟む（代表字数での探索で
++# 最良と出た位置。口調・論点・結論には干渉せず、本文の重複掲載もしない）。
+ from .prompt_layout import (
+     CONTINUITY_STATE_SECTION,
+     PROMPT_LAYOUT_POLICY_DEFAULT,
+@@ -72,6 +75,9 @@ from .prompt_layout import (
+     PROMPT_LAYOUT_V3_ORDER,
+     PROMPT_LAYOUT_V4,
+     PROMPT_LAYOUT_V4_ORDER,
++    PROMPT_LAYOUT_V5,
++    PROMPT_LAYOUT_V5_ORDER,
++    ROLE_BOUNDARY_SECTION,
+     adjacency_gap,
+     measure_zones,
+     normalize_prompt_layout_policy,
+@@ -79,6 +85,9 @@ from .prompt_layout import (
+     resolve_prompt_layout,
+     weak_middle_must_use_chars,
+ )
++# TASK-064: 役職能力の境界節が参照する定数（エンジン実行の能力種類）。台帳そのものは
++# GameState.role_action_provenance が持ち、ここでは能力種類の名前だけを使う。
++from .role_action_provenance import KIND_ATTACK, KIND_DIVINATION
+ 
+ 
+ 
+@@ -1763,6 +1772,72 @@ class PromptBuilder:
+             return "", diagnostics
+         return block, diagnostics
+ 
++    @staticmethod
++    def _role_action_boundary_section(
++        actor: Player, state: GameState | None
++    ) -> tuple[str, dict[str, object]]:
++        """エンジン発行の `[ROLE_ACTION_BOUNDARY]` 節を作る（TASK-064）。
++
++        「エンジンが実際にその人のために実行した能力行動」（[DONE]=事実）と
++        「本人が公に語った役職・結果」（[CLAIM]=未検証の申告）を見出し1行＋状態1行で分ける。
++        エンジン結果・公開主張・推測の本文はここには再掲しない（結果は私人欄、CO本文は
++        CLAIM_LEDGER が既に持つ）。口調・論点・推理順・結論はモデルのもので、この節から
++        新しい命令文は増やさない。発言の自由（ブラフ・疑問形・仮定形・引用・立場変更）は
++        [BEHAVIOR_CONTRACT] が1回だけ書く既存の自由行が担うため、ここでは繰り返さない
++        （TASK-060の重複排除方針と同じ）。境界が見せるのは「事実性」の区別だけ。
++        """
++        if state is None:
++            return "", {}
++        tracker = getattr(state, "role_action_provenance", None)
++        if tracker is None:
++            return "", {}
++        divination_days = tracker.own_engine_days(actor.name, KIND_DIVINATION)
++        attack_days = tracker.own_engine_days(actor.name, KIND_ATTACK)
++        own_claims = [
++            (index, claim)
++            for index, claim in enumerate(state.public_role_claims, 1)
++            if claim.claimant == actor.name
++        ]
++        # コンテキスト節約: 実行記録・本人の公開COを1行に畳み、結果本文は再掲しない
++        # （結果は私人欄、CO本文は CLAIM_LEDGER が既に持つ）。ここで最大2件まで。
++        done_bits: list[str] = []
++        if divination_days:
++            recent = ", ".join(f"D{d}" for d in divination_days[-3:])
++            done_bits.append(f"{len(divination_days)} ({recent})")
++        else:
++            done_bits.append("none")
++        if attack_days:
++            done_bits.append(f"attack nights: {len(attack_days)}")
++        done_text = "; ".join(done_bits)
++        if own_claims:
++            claim_bits = []
++            for index, claim in own_claims[-2:]:
++                try:
++                    role_key = Role(claim.claimed_role)
++                except ValueError:
++                    role_key = None
++                role_name = str(
++                    ROLE_NAMES_EN.get(role_key, claim.claimed_role)
++                    if role_key is not None
++                    else claim.claimed_role
++                )
++                claim_bits.append(f"[claim:{index}] {role_name} D{claim.day}")
++            claim_text = ", ".join(claim_bits) + " (unverified)"
++        else:
++            claim_text = "none"
++        header = (
++            "[ROLE_ACTION_BOUNDARY]\n"
++            "[DONE]=the engine ran this ability for you (fact); "
++            "[CLAIM]=you said it publicly (not an engine record).\n"
++        )
++        block = f"{header}- [DONE] divination: {done_text} | [CLAIM] published: {claim_text}\n\n"
++        diagnostics = {
++            "role_boundary_section_chars": len(block),
++            "role_boundary_done_rows": 1 + (1 if attack_days else 0),
++            "role_boundary_claim_rows": len(own_claims[-2:]) if own_claims else 0,
++        }
++        return block, diagnostics
++
+     @staticmethod
+     def _discussion_claim_ledger(state: GameState | None) -> str:
+         if state is None:
+@@ -2418,7 +2493,10 @@ class PromptBuilder:
+         use_v3 = simplified and layout_label == PROMPT_LAYOUT_V3
+         # TASK-062: v4 は v3 と同じ節連鎖の作り回しを使い、状態節だけを追加で組む
+         use_v4 = simplified and layout_label == PROMPT_LAYOUT_V4
+-        use_chain = use_v3 or use_v4
++        # TASK-064: v5 は v4 連鎖のまま、エンジン発行の能力境界節を質問と自分の発言の
++        # 間へ挟む（既製の節断片に1節足すだけ。口調・論点には干渉しない）
++        use_v5 = simplified and layout_label == PROMPT_LAYOUT_V5
++        use_chain = use_v3 or use_v4 or use_v5
+         # チェックポイントが正規化した日（当日より前）は、平常発言の本文をID行へ畳める。
+         # 状態自体は [CONTINUITY_CHECKPOINT] 側で継続しているので情報量は落ちない。
+         continuity_fold_days: frozenset[int] = frozenset()
+@@ -2640,13 +2718,20 @@ class PromptBuilder:
+             if include_topic_summary
+             else ("", {})
+         )
+-        # TASK-062: エンジン発行の論理状態チェックポイント（v4のみで出す）。変わった項目だけの
++        # TASK-062: エンジン発行の論理状態チェックポイント（v4/v5で出す）。変わった項目だけの
+         # 短い差分なので、日をまたいでも core が増え続けない。口調・論点・結論には干渉しない。
+         continuity_block, continuity_diagnostics = (
+-            cls._continuity_section(state, actor, day) if use_v4 else ("", {})
++            cls._continuity_section(state, actor, day) if (use_v4 or use_v5) else ("", {})
+         )
+         context_diagnostics.update(continuity_diagnostics)
+         context_diagnostics["continuity_fold_days"] = sorted(continuity_fold_days)
++        # TASK-064: エンジン発行の役職能力の境界節（v5のみ）。実際に実行した能力行動と
++        # 本人が公開した主張を [DONE]/[CLAIM] の短固定行で分ける。エンジン結果・公開主張・
++        # 推測の本文は再掲せずIDだけ。ブラフ・疑い・立場変更は自由のまま（命令文なし）。
++        role_boundary_block, role_boundary_diagnostics = (
++            cls._role_action_boundary_section(actor, state) if use_v5 else ("", {})
++        )
++        context_diagnostics.update(role_boundary_diagnostics)
+         # TASK-060: 推理メモ関連は3断片（派生 / エンジン発行情報 / 自分のメモ）へ分ける。
+         # v1/v2 は従来と同一の字节順で使うため、ここで結合し直す（TASK-058のA/B基準を壊さない）。
+         (
+@@ -3048,7 +3133,10 @@ class PromptBuilder:
+                 "conversation_evidence": _v3_evidence_piece(conversation_evidence),
+                 # TASK-062: エンジン発行の論理状態（発言証拠の直後・現在質問の直前に配置）。
+                 # 内容そのものは ContinuityState が作り、ここでは連結だけ行う。
+-                "continuity_checkpoint": continuity_block if use_v4 else "",
++                "continuity_checkpoint": continuity_block if (use_v4 or use_v5) else "",
++                # TASK-064: 役職能力の境界節（v5のみ・現在質問の直後・自分の発言の直前）。
++                # 中身はエンジン台帳が既に持っており、ここは短い行の連結だけ行う。
++                "role_action_boundary": role_boundary_block if use_v5 else "",
+                 "current_task": _v3_current_task_piece(
+                     hint_mode,
+                     directly_addressed,
+@@ -3076,7 +3164,11 @@ class PromptBuilder:
+             }
+             placed: list[str] = []
+             seen_parts: set[str] = set()
+-            chain_order = PROMPT_LAYOUT_V4_ORDER if use_v4 else PROMPT_LAYOUT_V3_ORDER
++            chain_order = (
++                PROMPT_LAYOUT_V5_ORDER
++                if use_v5
++                else (PROMPT_LAYOUT_V4_ORDER if use_v4 else PROMPT_LAYOUT_V3_ORDER)
++            )
+             for section_name in chain_order:
+                 text = v3_parts.get(section_name, "")
+                 if text:
+@@ -3130,12 +3222,16 @@ class PromptBuilder:
+             prompt_layout_policy
+         )
+         layout_order = (
+-            PROMPT_LAYOUT_V4_ORDER
+-            if use_v4
++            PROMPT_LAYOUT_V5_ORDER
++            if use_v5
+             else (
+-                PROMPT_LAYOUT_V3_ORDER
+-                if use_v3
+-                else (PROMPT_LAYOUT_V2_ORDER if simplified else ())
++                PROMPT_LAYOUT_V4_ORDER
++                if use_v4
++                else (
++                    PROMPT_LAYOUT_V3_ORDER
++                    if use_v3
++                    else (PROMPT_LAYOUT_V2_ORDER if simplified else ())
++                )
+             )
+         )
+         context_diagnostics["prompt_layout_violations"] = (
+@@ -3168,6 +3264,14 @@ class PromptBuilder:
+         context_diagnostics["prompt_gap_state_to_question"] = adjacency_gap(
+             user_prompt, CONTINUITY_STATE_SECTION, "question_block"
+         )
++        # TASK-064: 能力境界節の隣接距離（現在質問との距離／自分の発言との距離）。
++        # v5ではどちらも最小距離（探査で凍結した位置）から外れていないかをA/Bで測る。
++        context_diagnostics["prompt_gap_role_boundary_to_question"] = adjacency_gap(
++            user_prompt, ROLE_BOUNDARY_SECTION, "question_block"
++        )
++        context_diagnostics["prompt_gap_role_boundary_to_own_speeches"] = adjacency_gap(
++            user_prompt, ROLE_BOUNDARY_SECTION, "own_speeches"
++        )
+         context_diagnostics["continuity_section_chars"] = (
+             len(continuity_block) if continuity_block else 0
+         )
+diff --git a/tests/test_task060_prompt_layout.py b/tests/test_task060_prompt_layout.py
+index 41195ec..2ae9e50 100644
+--- a/tests/test_task060_prompt_layout.py
++++ b/tests/test_task060_prompt_layout.py
+@@ -5,7 +5,8 @@
+ だからといって口調・論点・結論や推理の順番を決める指示は足さない（発言の自由は契約の
+ Free行どおりモデル側に残す）。本テストは以下を固定する（実機LLMは使わない）。
+ 
+-1. ポリシー: 既定 v3。`prompt_contract_policy=legacy` では旧字节順が勝つ（A/B基準を壊さない）。
++1. ポリシー: 既定は v5（TASK-064の能力境界節込み）。`prompt_contract_policy=legacy` では旧字节順
++   が勝つ（A/B基準を壊さない）。v4（TASK-062の論理状態）と v3（TASK-060）も明示指定で参照できる。
+ 2. 凍結した節順（PROMPT_LAYOUT_V3_ORDER）はハード制約を満たし、コストモデルの貪欲探索が
+    同じ順を最良として再現する（決定的・LL不使用）。
+ 3. v3 では理論カードが独立節（optional／中部帯）になり、段階除去で落とせる。
+@@ -48,11 +49,15 @@ from werewolf.prompt_layout import (
+     PROMPT_LAYOUT_POLICY_V2,
+     PROMPT_LAYOUT_POLICY_V3,
+     PROMPT_LAYOUT_POLICY_V4,
++    PROMPT_LAYOUT_POLICY_V5,
+     PROMPT_LAYOUT_V3,
+     PROMPT_LAYOUT_V3_ORDER,
+     PROMPT_LAYOUT_V4,
+     PROMPT_LAYOUT_V4_ORDER,
++    PROMPT_LAYOUT_V5,
++    PROMPT_LAYOUT_V5_ORDER,
+     REPRESENTATIVE_SECTION_CHARS,
++    ROLE_BOUNDARY_SECTION,
+     adopted_layout_score,
+     adjacency_gap,
+     attention_prior,
+@@ -64,7 +69,9 @@ from werewolf.prompt_layout import (
+     resolve_prompt_layout,
+     score_order,
+     search_prompt_orders,
++    search_prompt_orders_v5,
+     v3_layout_score,
++    v4_layout_score,
+     validate_declared_order,
+     weak_middle_must_use_chars,
+ )
+@@ -141,22 +148,25 @@ def _ctx(state: GameState, actor_name: str, layout: str, contract: str = "simpli
+ # ---------------------------------------------------------------------------
+ # 1. ポリシー解決（既定 v3 / legacy契約では旧字节順が勝つ）
+ # ---------------------------------------------------------------------------
+-def test_layout_policy_defaults_to_v4_and_normalizes_aliases() -> None:
+-    # TASK-062: 既定は v4（論理状態節を発言証拠の直後・現在質問の直前へ置く配置）。
+-    # v3 は A/B比較の基準側として明示指定で残る。
+-    assert PROMPT_LAYOUT_POLICY_DEFAULT == PROMPT_LAYOUT_POLICY_V4
+-    assert normalize_prompt_layout_policy(None) == "v4"
++def test_layout_policy_defaults_to_v5_and_normalizes_aliases() -> None:
++    # TASK-064: 既定は v5（能力境界節を現在質問の直後・自分の発言の直前へ置く配置）。
++    # v4（論理状態のみ）と v3 は A/B比較の基準側として明示指定で残る。
++    assert PROMPT_LAYOUT_POLICY_DEFAULT == PROMPT_LAYOUT_POLICY_V5
++    assert normalize_prompt_layout_policy(None) == "v5"
+     assert normalize_prompt_layout_policy("V2 ") == "v2"
+     assert normalize_prompt_layout_policy("v3") == PROMPT_LAYOUT_POLICY_V3
+     assert normalize_prompt_layout_policy("continuity") == "v4"
++    assert normalize_prompt_layout_policy("boundary") == "v5"
++    assert normalize_prompt_layout_policy(PROMPT_LAYOUT_V5) == "v5"
+     assert normalize_prompt_layout_policy("auto") == PROMPT_LAYOUT_POLICY_AUTO
+-    assert normalize_prompt_layout_policy(True) is PROMPT_LAYOUT_POLICY_V4
++    assert normalize_prompt_layout_policy(True) is PROMPT_LAYOUT_POLICY_V5
+     assert normalize_prompt_layout_policy(False) is PROMPT_LAYOUT_POLICY_V2
+     # 旧ラベル（legacy/off）は「契約に追随」を意味する auto として扱う
+     assert normalize_prompt_layout_policy(PROMPT_LAYOUT_LEGACY) == PROMPT_LAYOUT_POLICY_AUTO
+-    assert normalize_prompt_layout_policy("未知値") == "v4"
++    assert normalize_prompt_layout_policy("未知値") == "v5"
+     assert prompt_layout_policy_label("v2_attention") == "v2"
+     # レイアウトラベル（ログに出る値）も設定値へ写る
++    assert prompt_layout_policy_label(PROMPT_LAYOUT_V5) == "v5"
+     assert prompt_layout_policy_label(PROMPT_LAYOUT_V4) == "v4"
+     assert prompt_layout_policy_label(PROMPT_LAYOUT_V3) == "v3"
+ 
+@@ -166,9 +176,11 @@ def test_legacy_contract_keeps_the_pre_task060_byte_order() -> None:
+     assert resolve_prompt_layout("v3", "legacy") == PROMPT_LAYOUT_LEGACY
+     assert resolve_prompt_layout("v2", "legacy") == PROMPT_LAYOUT_LEGACY
+     assert resolve_prompt_layout("v4", "legacy") == PROMPT_LAYOUT_LEGACY
++    assert resolve_prompt_layout("v5", "legacy") == PROMPT_LAYOUT_LEGACY
+     assert resolve_prompt_layout(None, "legacy_v1") == PROMPT_LAYOUT_LEGACY
+-    # simplified では auto / v4 が v4、明示した v3 / v2 はそれぞれの配置のまま
+-    assert resolve_prompt_layout("auto", "simplified") == PROMPT_LAYOUT_V4
++    # simplified では auto / v5 が v5、明示した v4 / v3 / v2 はそれぞれの配置のまま
++    assert resolve_prompt_layout("auto", "simplified") == PROMPT_LAYOUT_V5
++    assert resolve_prompt_layout("v5", "simplified") == PROMPT_LAYOUT_V5
+     assert resolve_prompt_layout("v4", "simplified") == PROMPT_LAYOUT_V4
+     assert resolve_prompt_layout("v3", "simplified") == PROMPT_LAYOUT_V3
+     assert resolve_prompt_layout("v2", "simplified") == PROMPT_LAYOUT_V2
+@@ -180,9 +192,12 @@ def test_game_state_normalizes_layout_policy() -> None:
+     state.prompt_layout_policy = "v2_attention"
+     GameState.__post_init__(state)
+     assert state.prompt_layout_policy == "v2"
+-    state.prompt_layout_policy = "bogus"
++    state.prompt_layout_policy = "v4_continuity"
+     GameState.__post_init__(state)
+     assert state.prompt_layout_policy == "v4"
++    state.prompt_layout_policy = "bogus"
++    GameState.__post_init__(state)
++    assert state.prompt_layout_policy == "v5"
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -224,17 +239,17 @@ def test_score_order_penalizes_moving_the_question_away_from_evidence() -> None:
+ # ---------------------------------------------------------------------------
+ # 3. 凍結した v3 節順（ハード制約と探索再現）
+ # ---------------------------------------------------------------------------
+-def test_frozen_v4_order_is_legal_and_reproduced_by_the_search() -> None:
+-    """凍結した v4 節順がハード制約を満たし、貪欲探索が同じ順を最良として再現する。"""
+-    assert validate_declared_order(PROMPT_LAYOUT_V4_ORDER) == []
+-    assert len(set(PROMPT_LAYOUT_V4_ORDER)) == len(PROMPT_LAYOUT_V4_ORDER)
++def test_frozen_v5_order_is_legal_and_reproduced_by_the_search() -> None:
++    """凍結した v5 節順がハード制約を満たし、境界込みの探索が同じ順を最良として再現する。"""
++    assert validate_declared_order(PROMPT_LAYOUT_V5_ORDER) == []
++    assert len(set(PROMPT_LAYOUT_V5_ORDER)) == len(PROMPT_LAYOUT_V5_ORDER)
+     chars = dict(REPRESENTATIVE_SECTION_CHARS)
+     frozen = adopted_layout_score()
+     assert frozen.violations == ()
+-    assert frozen.order == PROMPT_LAYOUT_V4_ORDER
++    assert frozen.order == PROMPT_LAYOUT_V5_ORDER
+     # 代表字数での貪欲探索（単一ブロック移動＋2ブロック入替）が凍結順をそのまま出す
+-    best = search_prompt_orders(chars, top_k=1)[0]
+-    assert tuple(best["layout_order"]) == PROMPT_LAYOUT_V4_ORDER
++    best = search_prompt_orders_v5(chars, top_k=1)[0]
++    assert tuple(best["layout_order"]) == PROMPT_LAYOUT_V5_ORDER
+     assert best["hard_violations"] == []
+     # v2 の宣言順はハード制約で弾かれる（案内が形式の後／自分の記録が分断）
+     v2_like = score_order(PROMPT_LAYOUT_V2_ORDER, chars)
+@@ -243,21 +258,30 @@ def test_frozen_v4_order_is_legal_and_reproduced_by_the_search() -> None:
+         "guidelines_after_format",
+     }
+     assert frozen.score > v2_like.score
+-    # 同じ節を末尾側（議論案内の直前）へ足すだけの配置より、v4 は上（順番が挙動を決める）
+-    appended = list(PROMPT_LAYOUT_V3_ORDER)
+-    appended.insert(appended.index("discussion_guidelines"), CONTINUITY_STATE_SECTION)
++    # 境界節を末尾側（議論案内の直前）へ足すだけの配置より、v5 は上（順番が挙動を決める）
++    appended = list(PROMPT_LAYOUT_V4_ORDER)
++    appended.insert(appended.index("discussion_guidelines"), ROLE_BOUNDARY_SECTION)
+     assert score_order(tuple(appended), chars).score < frozen.score
+ 
+ 
+-def test_v3_baseline_stays_legal_and_is_kept_for_ab_reference() -> None:
+-    """A/B基準（TASK-060の v3）は節順そのままで無傷のまま参照できる。"""
+-    assert validate_declared_order(PROMPT_LAYOUT_V3_ORDER) == []
+-    assert len(set(PROMPT_LAYOUT_V3_ORDER)) == len(PROMPT_LAYOUT_V3_ORDER)
+-    baseline = v3_layout_score()
+-    assert baseline.order == PROMPT_LAYOUT_V3_ORDER
++def test_v4_baseline_stays_legal_and_is_kept_for_ab_reference() -> None:
++    """A/B基準（TASK-062の v4）は節順そのままで無傷のまま参照できる（境界節なし）。"""
++    assert validate_declared_order(PROMPT_LAYOUT_V4_ORDER) == []
++    assert len(set(PROMPT_LAYOUT_V4_ORDER)) == len(PROMPT_LAYOUT_V4_ORDER)
++    baseline = v4_layout_score()
++    assert baseline.order == PROMPT_LAYOUT_V4_ORDER
+     assert baseline.violations == ()
+-    assert CONTINUITY_STATE_SECTION not in PROMPT_LAYOUT_V3_ORDER
++    assert ROLE_BOUNDARY_SECTION not in PROMPT_LAYOUT_V4_ORDER
+     assert CONTINUITY_STATE_SECTION in PROMPT_LAYOUT_V4_ORDER
++    # v3（状態節も境界節なし）も参照可能
++    v3_chars = {
++        key: value
++        for key, value in dict(REPRESENTATIVE_SECTION_CHARS).items()
++        if key not in {CONTINUITY_STATE_SECTION, ROLE_BOUNDARY_SECTION}
++    }
++    v3_baseline = v3_layout_score(v3_chars)
++    assert v3_baseline.order == PROMPT_LAYOUT_V3_ORDER
++    assert v3_baseline.violations == ()
+ 
+ 
+ def test_state_section_must_follow_its_id_index() -> None:

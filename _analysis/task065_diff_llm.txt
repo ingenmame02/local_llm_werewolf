@@ -1,0 +1,217 @@
+diff --git a/src/werewolf/llm_actions.py b/src/werewolf/llm_actions.py
+index 9cad59c..f232b40 100644
+--- a/src/werewolf/llm_actions.py
++++ b/src/werewolf/llm_actions.py
+@@ -113,6 +113,9 @@ from .core_compression import normalize_core_compression_policy
+ # TASK-060: 隴ｰ隲悶・繝ｭ繝ｳ繝励ヨ縺ｮ遽鬆・ｼ・ayout v2 / v3・峨ｒstate縺九ｉ隗｣豎ｺ縺励※builder縺ｸ貂｡縺吶・ # 蜀・ｮｹ・育匱險縺ｮ蜿｣隱ｿ繝ｻ隲也せ繝ｻ邨占ｫ厄ｼ峨↓縺ｯ蟷ｲ貂峨○縺壹∵ュ蝣ｱ縺ｮ霈峨ｋ菴咲ｽｮ縺ｨ驥崎､・｡後□縺代ｒ螟峨∴繧玖ｨｭ螳壹・ from .prompt_layout import normalize_prompt_layout_policy
++# TASK-064: 閭ｽ蜉幄｡御ｽｿ陦ｨ迴ｾ縺ｮ讀懷・縺ｯ縲靴O陬懈ｭ｣縺ｮ蜀崎ｦ∵ｱゅ′譛ｪ讀懆ｨｼ縺ｮ閭ｽ蜉幄｡ｨ迴ｾ繧貞｢励ｄ縺励◆縺九阪ｒ
++# 豈斐∋繧玖ｦｳ貂ｬ蟆ら畑・域悽譁・ｂ驕ｸ謚櫁い繧ょ､峨∴縺ｪ縺・ｼ峨ゅお繝ｳ繧ｸ繝ｳ螳溯｡瑚ｨ倬鹸蜿ｰ蟶ｳ縺ｮ螳壽焚繧ゅ％縺薙〒菴ｿ縺・・+from .role_action_provenance import KIND_DIVINATION, detect_ability_expressions
+ from .leak_gate_policy import (
+     DEFAULT_LEAK_GUARD_POLICY,
+     RULE_INTERNAL_CONFIG,
+@@ -2389,6 +2392,50 @@ class OllamaActions(ActionPolicy):
+             metadata = chat_response.to_metadata()
+             response_metadata_history.append(metadata)
+             raw_responses.append(chat_response.content)
++            # TASK-064: CO陬懈ｭ｣縺ｮ蜀崎ｦ∵ｱゅ′譛ｪ讀懆ｨｼ縺ｮ閭ｽ蜉幄｡ｨ迴ｾ繧呈眠縺溘↓逕滓・縺励↑縺九▲縺溘°繧・+            # 蜑榊ｾ後・蛟区焚豈碑ｼ・〒隕ｳ貂ｬ縺吶ｋ・育ｮ｡逅・・Ο繧ｰ逕ｨ繝ｻ隕ｳ貂ｬ蟆ら畑縺ｧ譛ｬ譁・・螟画峩縺励↑縺・ｼ峨・+            # 遏ｭ邵ｮ蜉ｹ譫懊ｂ騾壼ｸｸ繝励Ο繝ｳ繝励ヨ髟ｷ縺ｨ逶ｴ謗･荳ｦ縺ｹ繧峨ｌ繧句ｽ｢縺ｧ谿九☆・亥ｮ溯｣・｡・縺ｮ讀懆ｨｼ鬆・岼・峨・+            if is_co_correction and len(raw_responses) >= 2:
++                tracker = getattr(self.state, "role_action_provenance", None)
++                known_names = tuple(player.name for player in self.state.players)
++
++                def _ability_assertions(text: object) -> int:
++                    if not isinstance(text, str):
++                        return 0
++                    return sum(
++                        1
++                        for expression in detect_ability_expressions(
++                            text,
++                            actor_name=actor.name,
++                            known_player_names=known_names,
++                        )
++                        if expression.get("first_person")
++                        and not expression.get("hedged")
++                    )
++
++                before_assertions = _ability_assertions(raw_responses[-2])
++                after_assertions = _ability_assertions(chat_response.content)
++                if tracker is not None:
++                    added_assertions = tracker.note_retry_delta(
++                        before_assertions, after_assertions
++                    )
++                else:
++                    added_assertions = max(0, after_assertions - before_assertions)
++                self._emit(
++                    "co_correction_boundary",
++                    action,
++                    actor,
++                    started_at,
++                    reask_prompt_chars=len(user_prompt),
++                    normal_prompt_chars=len(prompt_ctx.user_prompt),
++                    ability_assertions_before=before_assertions,
++                    ability_assertions_after=after_assertions,
++                    ability_assertions_added=int(added_assertions),
++                    engine_backed=bool(
++                        tracker is not None
++                        and tracker.own_engine_days(actor.name, KIND_DIVINATION)
++                    ),
++                )
+             response_text = self._final_response(chat_response.content).strip()
+             is_pass = self._is_pass(response_text)
+             leak_findings = self._public_response_leak_findings(
+@@ -3789,40 +3836,116 @@ class OllamaActions(ActionPolicy):
+     def _seer_co_correction_prompt(
+         self, actor: Player, spoken_result: tuple[str, str] | None
+     ) -> str:
+-        """Short correction prompt for missing Seer CO."""
++        """TASK-064 縺ｮ遏ｭ邵ｮ蜀崎ｦ∵ｱゑｼ郁・蜉帛ｮ溯｡瑚ｨ倬鹸繝ｻ荳ｻ蠑ｵ迥ｶ諷九・迴ｾ蝨ｨ雉ｪ蝠上・蜃ｺ蜉帛ｽ｢蠑上□縺鷹√ｋ・峨・+
++        譌ｧ螳溯｣・ｼ・ame_bcd7c97e7e48 縺ｧ蝠城｡悟喧縺励◆蠖｢・峨・縲∽ｿ晄怏縺励※縺・↑縺・・繝ｬ繧､繝､繝ｼ縺ｮ
++        縲御ｻ･蜑榊哨縺ｫ縺励◆邨先棡縲阪∈ "Publish this result" 繧剃ｻ倥￠縺ｦ蜀埼√＠縲∵悴讀懆ｨｼ縺ｮ繝悶Λ繝輔ｒ
++        螳溽ｵ先棡縺ｮ繧医≧縺ｫ蜀榊ｼｷ蛹悶＠縺ｦ縺・◆縲ゅ％縺薙〒縺ｯ谺｡縺縺代ｒ陦後≧:
++        - [DONE]: 繧ｨ繝ｳ繧ｸ繝ｳ縺梧悽莠ｺ縺ｮ縺溘ａ縺ｫ螳溯｡後＠縺溯・蜉幄｡悟虚・亥ｮ滓命貂医∩縺ｮ蜊縺・律縺ｨ譛ｬ莠ｺ縺ｮ蜊縺・+          邨先棡縺縺代ゆｻ冶・・縺ｯ邨ｶ蟇ｾ縺ｫ霈峨○縺ｪ縺・ｼ・+        - [CLAIM]: 譛ｬ莠ｺ縺ｮ蜈ｬ髢気O繧棚D蜿ら・縺ｧ遉ｺ縺呻ｼ域悽譁・・蜀肴軸縺ｪ縺暦ｼ・+        - 迴ｾ蝨ｨ雉ｪ蝠擾ｼ域悽莠ｺ螳帙※縺ｮ譛ｪ蝗樒ｭ碑ｳｪ蝠上ｒ200蟄励∪縺ｧ・峨→蜃ｺ蜉帛ｽ｢蠑・+        - 邯咏ｶ壻ｸｻ蠑ｵ縺区彫蝗槭°縺ｮ驕ｸ謚槭・繝｢繝・Ν縺ｫ蟋斐・繧具ｼ医ヶ繝ｩ繝輔・閾ｪ逕ｱ・峨ゅ◆縺縺苓｡ｨ迴ｾ縺・+          縲後お繝ｳ繧ｸ繝ｳ螳溯｡後・莠句ｮ溘阪→縲瑚・蛻・・逕ｳ蜻翫阪・縺ｩ縺｡繧峨↓螻槭☆繧九°縺縺代ｒ譏手ｨ倥☆繧九・+        髟ｷ縺・立繝励Ο繝ｳ繝励ヨ縺ｯ蜀埼√＠縺ｪ縺・ｼ磯壼ｸｸ繝励Ο繝ｳ繝励ヨ繧医ｊ譏守｢ｺ縺ｫ遏ｭ縺・ｼ峨・+        """
++        tracker = getattr(self.state, "role_action_provenance", None)
++        allow_bluff = bool(getattr(self.state, "allow_bluff_role_claim", True))
++        divination_days = (
++            tracker.own_engine_days(actor.name, KIND_DIVINATION)
++            if tracker is not None
++            else ()
++        )
++        engine_backed = bool(
++            actor.role is Role.SEER and divination_days and self.state.seer_results
++        )
+         lines = [
+-            "[CO Correction] Your statement mentions divination results without a Seer CO. "
+-            "You must explicitly claim Seer CO in the same statement.",
++            "[CO Correction] Your last reply used divination wording without a Seer CO line. "
++            "Fix only the output form now; this message carries no long old prompt.",
+             f"- You: {actor.name}",
+         ]
+         co_target: str | None = None
+         co_result: str | None = None
+-        if actor.role is Role.SEER and self.state.seer_results:
++        if engine_backed:
++            days_text = ", ".join(f"Day {d}" for d in divination_days[-4:])
+             target, result = self._latest_seer_result()
+             co_target, co_result = target, result
+             lines.append(
+-                f"- Your divination result: Target={target}, Result={self._result_label(result)}"
++                f"[DONE] Engine executed divination for you: "
++                f"{len(divination_days)} time(s) ({days_text})."
+             )
+-            lines.append("Publish this result together with a Seer CO.")
+-        elif spoken_result is not None:
+-            co_target, co_result = spoken_result
+             lines.append(
+-                f"- Previously stated result: Target={spoken_result[0]}, "
+-                f"Result={self._result_label(spoken_result[1])}"
++                f"- Your engine-issued result: Target={target}, "
++                f"Result={self._result_label(result)}. Pair it with your CO line."
+             )
+-            lines.append("Publish this result together with a Seer CO.")
+-        lines.extend(
+-            [
+-                f"Output strictly in {actor.response_language} using these 2 lines only without extra text:",
+-                "[CO] Seer",
+-                # TASK-043: 譯亥・譁・↓縲訓layer X縲阪・繧医≧縺ｪ繝励Ξ繝ｼ繧ｹ繝帙Ν繝繧呈嶌縺九↑縺・・-                # 蠑ｱ縺・Δ繝・Ν・・ame_e2991441d6f0 Player 3・峨・縺昴ｌ繧呈ｨ｡蛟｣縺励※螳溷惠縺励↑縺・-                # 蟇ｾ雎｡縺ｮ蛻､螳壹ｒ蜈ｬ髢九＠縺溘◆繧√∝ｮ滄圀縺ｮ蟇ｾ雎｡蜷阪ｒ蜃ｺ縺吶・-                f"[RESULT] Target={co_target or '<the player you actually divined>'} "
+-                f"Result={self._result_label(co_result) if co_result is not None else 'Werewolf or Human'}",
+-                "Reason and vote proposal are optional; if adding them, put [BODY] on the 3rd line.",
+-            ]
+-        )
++        else:
++            lines.append(
++                "[DONE] The engine has never executed a divination action for you. "
++                "The divination wording you used is not an engine record."
++            )
++        own_claims = [
++            (index, claim)
++            for index, claim in enumerate(self.state.public_role_claims, 1)
++            if claim.claimant == actor.name
++        ]
++        if own_claims:
++            refs = ", ".join(
++                f"[claim:{index}] Day {claim.day} "
++                f"{ROLE_NAMES_EN.get(Role(claim.claimed_role), claim.claimed_role)}"
++                for index, claim in own_claims[-3:]
++            )
++            lines.append(f"[CLAIM] You already published: {refs} (unverified).")
++        else:
++            lines.append(
++                "[CLAIM] You have published no role claim yet."
++            )
++        conversation = tuple(self.state.conversation_log)
++        current_day_history = PromptBuilder.current_day_messages(conversation)
++        for message in reversed(current_day_history[-8:]):
++            if message.speaker == actor.name:
++                continue
++            content = message.content if isinstance(message.content, str) else ""
++            if any(
++                cue in content
++                for cue in ("?", "・・, "縺ｪ縺・, "逅・罰縺ｯ", "雉ｪ蝠・, "遒ｺ隱・, "謨吶∴縺ｦ", "閨槭°縺帙※")
++            ) and PromptBuilder._is_directed_to_player(
++                actor, message, current_day_history
++            ):
++                lines.append(
++                    f"- Current question to answer: {message.speaker}: {content[:200]}"
++                )
++                break
++        keep_claim_option = bool(engine_backed or (allow_bluff and spoken_result))
++        if keep_claim_option:
++            target = co_target or (spoken_result[0] if spoken_result else None)
++            result = co_result or (spoken_result[1] if spoken_result else None)
++            source_label = (
++                "your engine-issued result"
++                if engine_backed
++                else "the reading you stated publicly (unverified - it will be logged "
++                "as a claim, not as an engine fact)"
++            )
++            lines.extend(
++                [
++                    f"Option A - publish the Seer CO together with {source_label}:",
++                    "[CO] Seer",
++                    f"[RESULT] Target={target} Result={self._result_label(result)}",
++                ]
++            )
++        if allow_bluff:
++            lines.append(
++                "Option B - publish the Seer CO without any result line "
++                "([CO] Seer then optionally [BODY]), or answer the current question "
++                "without ability wording. Which form you choose is yours; tone, topics "
++                "and reasoning order stay free."
++            )
++        else:
++            lines.append(
++                "Option B - answer the current question without claiming a role: this "
++                "game setting disallows publishing a role you do not hold, so keep the "
++                "answer plain (no [CO] / no divination verdict)."
++            )
++        lines.append(f"蜃ｺ蜉帙・蜴ｳ蟇・↓{actor.response_language}縺ｧ陦後▲縺ｦ縺上□縺輔＞縲・)
+         return "\n".join(lines)
+ 
+     @staticmethod
+@@ -6063,6 +6186,29 @@ class OllamaActions(ActionPolicy):
+             result=result,
+             discussion_turn=self.state.discussion_turn,
+         )
++        # TASK-064: CO蛻晏・繧定・蜉帛｢・阜蜿ｰ蟶ｳ縺ｫ繧ょ綾繧縲ょ・縺ｫ閭ｽ蜉幄｡ｨ迴ｾ縺悟・縺ｦ縺・◆蝣ｴ蜷医・
++        # 霍晞屬縺縺代ｒ荳ｭ遶九↑謨ｰ蛟､繧､繝吶Φ繝医↓縺吶ｋ・医←縺ｮCO縺梧悽迚ｩ縺九ｒ遉ｺ縺呎ュ蝣ｱ縺ｯ霈峨○縺ｪ縺・ｼ峨・+        boundary_tracker = getattr(self.state, "role_action_provenance", None)
++        claim_to_ability_delta = (
++            boundary_tracker.mark_public_claim(
++                actor.name,
++                int(self.state.day),
++                int(self.state.discussion_turn or 1),
++            )
++            if boundary_tracker is not None
++            else None
++        )
++        if claim_to_ability_delta is not None:
++            self._emit(
++                "claim_to_ability_distance",
++                action,
++                actor,
++                started_at,
++                day=int(self.state.day),
++                discussion_turn=int(self.state.discussion_turn or 1),
++                turn_delta=int(claim_to_ability_delta),
++                order="ability_then_claim",
++            )
+         self._emit(
+             "claim_role_published",
+             action,

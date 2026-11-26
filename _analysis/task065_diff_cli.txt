@@ -1,0 +1,424 @@
+diff --git a/src/werewolf/cli.py b/src/werewolf/cli.py
+index 2d30175..6b2ae30 100644
+--- a/src/werewolf/cli.py
++++ b/src/werewolf/cli.py
+@@ -91,12 +91,13 @@ from werewolf.core_compression import (
+     core_compression_policy_label,
+     normalize_core_compression_policy,
+ )
+-# TASK-060: 隴ｰ隲悶・繝ｭ繝ｳ繝励ヨ縺ｮ遽鬆・ｼ・ayout・峨ょｮ滓ｸｬ縺励◆蟶ｯ蟄玲焚繝ｻ髫｣謗･霍晞屬繝ｻ驥崎､・｡後・蜑頑ｸ帙ｒ
+-# 繝ｭ繧ｰ縺ｧ豈斐∋繧峨ｌ繧九ｈ縺・↓縺励∝酔縺・eed縺ｧ v4 / v3 / v2 / auto 繧貞・繧頑崛縺医※A/B隧穂ｾ｡縺ｧ縺阪ｋ繧医≧縺ｫ縺吶ｋ縲・+# TASK-060 / TASK-064: 隴ｰ隲悶・繝ｭ繝ｳ繝励ヨ縺ｮ遽鬆・ｼ・ayout・峨ょｮ滓ｸｬ縺励◆蟶ｯ蟄玲焚繝ｻ髫｣謗･霍晞屬繝ｻ驥崎､・｡後・蜑頑ｸ帙ｒ
++# 繝ｭ繧ｰ縺ｧ豈斐∋繧峨ｌ繧九ｈ縺・↓縺励∝酔縺・eed縺ｧ v5 / v4 / v3 / v2 / auto 繧貞・繧頑崛縺医※A/B隧穂ｾ｡縺ｧ縺阪ｋ繧医≧縺ｫ縺吶ｋ縲・ from werewolf.prompt_layout import (
+     PROMPT_LAYOUT_POLICY_DEFAULT,
+     PROMPT_LAYOUT_V3,
+     PROMPT_LAYOUT_V4,
++    PROMPT_LAYOUT_V5,
+     normalize_prompt_layout_policy,
+     prompt_layout_policy_label,
+ )
+@@ -302,6 +303,25 @@ class GameLogger:
+             "continuity_fold_saved_chars_total": 0,
+             "prompt_gap_state_to_evidence_sum": 0.0,
+             "prompt_gap_state_to_question_sum": 0.0,
++            # TASK-064: 蠖ｹ閨ｷ閭ｽ蜉帙・蠅・阜蜿ｰ蟶ｳ縺ｮ髮・ｨ茨ｼ亥・髢九Ο繧ｰ縺ｫ縺ｯ荳ｭ遶九↑蜷郁ｨ亥､縺縺題ｼ峨○繧具ｼ峨・+            # 蠅・阜遽縺ｮ螳滓ｸｬ蟄玲焚縲‘ngine_action/public_role_claim/unsupported_role_action/
++            # inference 縺ｮ蛻・｡槫区焚縲√お繝ｳ繧ｸ繝ｳ邨先棡縺ｨ縺ｮ遏帷崟縲，O陬懈ｭ｣縺ｮ蜀崎ｦ∵ｱゅ〒蠅励∴縺溯・蜉幄｡ｨ迴ｾ縲・+            # 陬懈ｭ｣繝励Ο繝ｳ繝励ヨ縺ｮ遏ｭ邵ｮ蜉ｹ譫懶ｼ磯壼ｸｸ繝励Ο繝ｳ繝励ヨ髟ｷ縺ｨ縺ｮ豈碑ｼ・畑・峨・+            "role_boundary_char_total": 0,
++            "role_boundary_sections": 0,
++            "prompt_gap_rbound_to_question_sum": 0.0,
++            "prompt_gap_rbound_to_own_speeches_sum": 0.0,
++            "role_ability_assertions_observed": 0,
++            "unsupported_role_action_count": 0,
++            "claim_vs_engine_conflict_count": 0,
++            "hedged_ability_mentions_observed": 0,
++            "role_action_engine_actions": 0,
++            "retry_added_ability_expressions": 0,
++            "co_correction_reask_prompt_char_total": 0,
++            "co_correction_normal_prompt_char_total": 0,
++            "co_correction_events": 0,
++            "claim_to_ability_delta_sum": 0.0,
++            "claim_to_ability_delta_count": 0,
+         }
+         # TASK-056: 譛ｪ譚･蜿ら・繧ｫ繝・ざ繝ｪ蛻･縺ｮ謖・遭謨ｰ・亥・髢区悽譁・・菫ｮ豁｣縺励※縺・↑縺・ｦｳ貂ｬ蛟､・・         self._timeline_category_counts: dict[str, int] = {
+@@ -325,13 +345,14 @@ class GameLogger:
+         # TASK-059: 蜈ｬ髢区ュ蝣ｱ縺ｮ蜈･蜉帷ｵ瑚ｷｯ蛻･縺ｮ讀懈渊謨ｰ・育匱險・修O陦鯉ｼ乗兜逾ｨ・乗ｭｻ莠｡・峨よ､懈渊蟇ｾ雎｡螟悶ｂ
+         # 逅・罰莉倥″縺ｧ謨ｰ縺医ｋ縺薙→縺ｧ縲後↑縺・3莉ｶ縺縺代□縺｣縺溘・縺九阪ｒ隱ｬ譏弱〒縺阪ｋ繧医≧縺ｫ縺吶ｋ縲・         self._timeline_public_path_counts: dict[str, int] = {}
+-        # TASK-058 / TASK-060 / TASK-062: 繝ｬ繧､繧｢繧ｦ繝亥挨縺ｮ繝励Ο繝ｳ繝励ヨ讒狗ｯ画焚
+-        # ・・egacy_v1 / v2_attention / v3_grounding / v4_continuity・・+        # TASK-058 / TASK-060 / TASK-062 / TASK-064: 繝ｬ繧､繧｢繧ｦ繝亥挨縺ｮ繝励Ο繝ｳ繝励ヨ讒狗ｯ画焚
++        # ・・egacy_v1 / v2_attention / v3_grounding / v4_continuity / v5_role_boundary・・         self._prompt_layout_counts: dict[str, int] = {
+             PROMPT_LAYOUT_LEGACY: 0,
+             PROMPT_LAYOUT_V2: 0,
+             PROMPT_LAYOUT_V3: 0,
+             PROMPT_LAYOUT_V4: 0,
++            PROMPT_LAYOUT_V5: 0,
+         }
+         # v2縺ｮ遽鬆・′蟠ｩ繧後◆蝗樊焚・育ｷｨ髮・Α繧ｹ縺ｮ髱咏噪讀懈渊縲・繧堤ｶｭ謖√☆繧具ｼ・         self._prompt_layout_violations = 0
+@@ -769,12 +790,16 @@ class GameLogger:
+                         "evidence_continuity_fold_saved_chars",
+                         "continuity_fold_saved_chars_total",
+                     ),
++                    # TASK-064: 繝｢繝・Ν蛻･縺ｮ閭ｽ蜉帛｢・阜遽縺ｮ謠千､ｺ驥擾ｼ亥ｭ玲焚繝ｻ遽繧定ｼ峨○縺溷屓謨ｰ・・+                    ("role_boundary_section_chars", "role_boundary_char_total"),
+                 ):
+                     value = diagnostic_record.get(key)
+                     if isinstance(value, int) and not isinstance(value, bool):
+                         stats[metric] += max(0, int(value))
+                 if int(diagnostic_record.get("continuity_state_chars") or 0) > 0:
+                     stats["continuity_sections"] += 1
++                if int(diagnostic_record.get("role_boundary_section_chars") or 0) > 0:
++                    stats["role_boundary_sections"] += 1
+                 for key, metric in (
+                     (
+                         "prompt_gap_question_to_evidence",
+@@ -791,6 +816,16 @@ class GameLogger:
+                     # TASK-062: 隲也炊迥ｶ諷狗ｯ縺ｮ髫｣謗･霍晞屬・郁ｨｼ諡縺ｨ縺ｮ霍晞屬・冗樟蝨ｨ雉ｪ蝠上→縺ｮ霍晞屬・・                     ("prompt_gap_state_to_evidence", "prompt_gap_state_to_evidence_sum"),
+                     ("prompt_gap_state_to_question", "prompt_gap_state_to_question_sum"),
++                    # TASK-064: 閭ｽ蜉帛｢・阜遽縺ｮ髫｣謗･霍晞屬・育樟蝨ｨ雉ｪ蝠上・閾ｪ蛻・・逋ｺ險縺ｨ縺ｮ霍晞屬・峨・+                    # v5縺ｧ蜃咲ｵ舌＠縺滉ｽ咲ｽｮ縺九ｉ螟悶ｌ縺ｦ縺・↑縺・°繧偵Δ繝・Ν蛻･縺ｫ隕九ｋ縲・+                    (
++                        "prompt_gap_role_boundary_to_question",
++                        "prompt_gap_rbound_to_question_sum",
++                    ),
++                    (
++                        "prompt_gap_role_boundary_to_own_speeches",
++                        "prompt_gap_rbound_to_own_speeches_sum",
++                    ),
+                 ):
+                     value = diagnostic_record.get(key)
+                     if isinstance(value, (int, float)) and not isinstance(value, bool):
+@@ -801,6 +836,135 @@ class GameLogger:
+                     stage_counts = stats["contract_removal_stage_counts"]
+                     stage_key = f"stage{limited}"
+                     stage_counts[stage_key] = int(stage_counts.get(stage_key, 0)) + 1
++        # TASK-064: 閭ｽ蜉帛｢・阜遽縺ｮ螳滓ｸｬ縺ｨ髫｣謗･霍晞屬繧帝寔險医☆繧具ｼ亥・髢区欠讓吶・荳ｭ遶九↑謨ｰ蛟､縺縺托ｼ峨・+        boundary_chars = diagnostic_record.get("role_boundary_section_chars")
++        if isinstance(boundary_chars, int) and not isinstance(boundary_chars, bool):
++            self._ledger_metrics["role_boundary_char_total"] += max(0, int(boundary_chars))
++            if boundary_chars > 0:
++                self._ledger_metrics["role_boundary_sections"] += 1
++        for key, metric in (
++            (
++                "prompt_gap_role_boundary_to_question",
++                "prompt_gap_rbound_to_question_sum",
++            ),
++            (
++                "prompt_gap_role_boundary_to_own_speeches",
++                "prompt_gap_rbound_to_own_speeches_sum",
++            ),
++        ):
++            value = diagnostic_record.get(key)
++            if isinstance(value, (int, float)) and not isinstance(value, bool):
++                self._ledger_metrics[metric] += max(0.0, float(value))
++        # TASK-064: 蜈ｬ髢狗匱險縺ｮ閭ｽ蜉幄｡御ｽｿ陦ｨ迴ｾ縺ｮ隕ｳ貂ｬ・医お繝ｳ繧ｸ繝ｳ縺檎匱陦後＠縺溽ｮ｡逅・・ン繝･繝ｼ蟆ら畑・峨・+        # 繧ｫ繝・ざ繝ｪ繝ｻ謾ｯ謠ｴ蜿ｯ蜷ｦ縺ｯ菫晄怏閠・挨縺ｮ逵溷⊃繧貞性繧縺溘ａ縲∝床蟶ｳ縺ｮ荳ｭ遶句粋險医→繧､繝吶Φ繝医Ο繧ｰ
++        # 縺縺代↓谿九＠縲√・繝ｭ繝ｳ繝励ヨ繧・・髢玖｡後↓縺ｯ邨ｶ蟇ｾ縺ｫ豬√＆縺ｪ縺・ｼ・ASK-055縺ｮ邱壼ｼ輔″繧定ｸ剰･ｲ・峨・+        observations = diagnostic_record.get("role_ability_observations")
++        if isinstance(observations, list) and observations:
++            obs_model = diagnostic_record.get("role_action_model")
++            stats = None
++            if isinstance(obs_model, str):
++                stats = self._model_stats.setdefault(obs_model, self._new_model_stats())
++            for observation in observations:
++                if not isinstance(observation, dict):
++                    continue
++                self._ledger_metrics["role_ability_assertions_observed"] += 1
++                if stats is not None:
++                    stats["role_ability_assertions_observed"] = int(
++                        stats.get("role_ability_assertions_observed", 0)
++                    ) + 1
++                category = observation.get("category")
++                if category == "unsupported_role_action":
++                    self._ledger_metrics["unsupported_role_action_count"] += 1
++                    if stats is not None:
++                        stats["unsupported_role_action_count"] = int(
++                            stats.get("unsupported_role_action_count", 0)
++                        ) + 1
++                elif category == "engine_action":
++                    self._ledger_metrics["role_action_engine_actions"] += 1
++                if bool(observation.get("conflict")):
++                    self._ledger_metrics["claim_vs_engine_conflict_count"] += 1
++                    if stats is not None:
++                        stats["claim_vs_engine_conflict_count"] = int(
++                            stats.get("claim_vs_engine_conflict_count", 0)
++                        ) + 1
++            delta = diagnostic_record.get("claim_to_ability_turn_delta")
++            if isinstance(delta, int) and not isinstance(delta, bool):
++                self._ledger_metrics["claim_to_ability_delta_sum"] += float(
++                    max(0, int(delta))
++                )
++                self._ledger_metrics["claim_to_ability_delta_count"] += 1
++                if stats is not None:
++                    stats["claim_to_ability_delta_sum"] = (
++                        float(stats.get("claim_to_ability_delta_sum", 0.0))
++                        + float(max(0, int(delta)))
++                    )
++                    stats["claim_to_ability_delta_count"] = int(
++                        stats.get("claim_to_ability_delta_count", 0)
++                    ) + 1
++        # TASK-064: CO蛻晏・竊定・蜉幄｡ｨ迴ｾ・医∪縺溘・縺昴・騾・ｼ峨・繧ｿ繝ｼ繝ｳ霍晞屬繧､繝吶Φ繝医ｒ髮・ｨ医☆繧九・+        # 謨ｰ蛟､縺ｮ縺ｿ縺ｧ縲√←縺ｮCO縺梧悽迚ｩ縺九ｒ遉ｺ縺呎ュ蝣ｱ縺ｯ蜷ｫ縺ｾ繧後↑縺・・+        if event_type == "claim_to_ability_distance":
++            distance_delta = diagnostic_record.get("turn_delta")
++            if isinstance(distance_delta, int) and not isinstance(distance_delta, bool):
++                self._ledger_metrics["claim_to_ability_delta_sum"] += float(
++                    max(0, int(distance_delta))
++                )
++                self._ledger_metrics["claim_to_ability_delta_count"] += 1
++                distance_model = diagnostic_record.get("model")
++                if isinstance(distance_model, str):
++                    stats = self._model_stats.setdefault(
++                        distance_model, self._new_model_stats()
++                    )
++                    stats["claim_to_ability_delta_sum"] = (
++                        float(stats.get("claim_to_ability_delta_sum", 0.0))
++                        + float(max(0, int(distance_delta)))
++                    )
++                    stats["claim_to_ability_delta_count"] = int(
++                        stats.get("claim_to_ability_delta_count", 0)
++                    ) + 1
++        # TASK-064: CO陬懈ｭ｣縺ｮ蜀崎ｦ∵ｱゅ′遏ｭ邵ｮ縺縺｣縺溘°縺ｨ譛ｪ讀懆ｨｼ縺ｮ閭ｽ蜉幄｡ｨ迴ｾ繧貞｢励ｄ縺輔↑縺九▲縺溘°繧・+        # 陦悟虚蛻･繝ｻ繝｢繝・Ν蛻･縺ｫ遨阪・・郁ｦｳ貂ｬ蟆ら畑縲よ悽譁・・螟画峩縺輔ｌ縺ｦ縺・↑縺・ｼ峨・+        if event_type == "co_correction_boundary":
++            reask_chars = diagnostic_record.get("reask_prompt_chars")
++            normal_chars = diagnostic_record.get("normal_prompt_chars")
++            added_expressions = diagnostic_record.get("ability_assertions_added")
++            if isinstance(reask_chars, int) and not isinstance(reask_chars, bool):
++                self._ledger_metrics["co_correction_events"] += 1
++                self._ledger_metrics["co_correction_reask_prompt_char_total"] += max(
++                    0, int(reask_chars)
++                )
++            if isinstance(normal_chars, int) and not isinstance(normal_chars, bool):
++                self._ledger_metrics["co_correction_normal_prompt_char_total"] += max(
++                    0, int(normal_chars)
++                )
++            if isinstance(added_expressions, int) and not isinstance(
++                added_expressions, bool
++            ):
++                self._ledger_metrics["retry_added_ability_expressions"] += max(
++                    0, int(added_expressions)
++                )
++            correction_model = diagnostic_record.get("model")
++            if isinstance(correction_model, str):
++                stats = self._model_stats.setdefault(
++                    correction_model, self._new_model_stats()
++                )
++                stats["co_correction_events"] = int(
++                    stats.get("co_correction_events", 0)
++                ) + 1
++                if isinstance(reask_chars, int) and not isinstance(reask_chars, bool):
++                    stats["co_correction_reask_prompt_char_total"] = int(
++                        stats.get("co_correction_reask_prompt_char_total", 0)
++                    ) + max(0, int(reask_chars))
++                if isinstance(normal_chars, int) and not isinstance(normal_chars, bool):
++                    stats["co_correction_normal_prompt_char_total"] = int(
++                        stats.get("co_correction_normal_prompt_char_total", 0)
++                    ) + max(0, int(normal_chars))
++                if isinstance(
++                    added_expressions, int
++                ) and not isinstance(added_expressions, bool):
++                    stats["retry_added_ability_expressions"] = int(
++                        stats.get("retry_added_ability_expressions", 0)
++                    ) + max(0, int(added_expressions))
+         if event_type == "secret_role_leak_detected":
+             # TASK-054: hard繧ｲ繝ｼ繝茨ｼ域悽蠖薙↓遘伜諺諠・ｱ繧貞・縺励◆蝣ｴ蜷茨ｼ峨□縺代ｒ謨ｰ縺医ｋ縲・             self._ledger_metrics["secret_leaks_detected"] += 1
+@@ -1159,6 +1323,23 @@ class GameLogger:
+             "continuity_fold_saved_chars_total": 0,
+             "prompt_gap_state_to_evidence_sum": 0.0,
+             "prompt_gap_state_to_question_sum": 0.0,
++            # TASK-064: 繝｢繝・Ν蛻･縺ｮ蠖ｹ閨ｷ閭ｽ蜉帙・蠅・阜・亥｢・阜遽蟄玲焚繝ｻ髫｣謗･霍晞屬繝ｻ隕ｳ貂ｬ繧ｫ繧ｦ繝ｳ繧ｿ・峨・+            # unsupported_role_action_count / claim_vs_engine_conflict_count 縺ｯ隕ｳ貂ｬ蟆ら畑縺ｧ縲・+            # 譛ｬ譁・・蜀咲函謌舌↓縺ｯ菴ｿ繧上ｌ縺ｦ縺・↑縺・ｼ医Ο繧ｰ蛛ｴ縺ｧ陦悟虚蛻･縺ｨ豈碑ｼ・☆繧具ｼ峨・O陬懈ｭ｣縺ｮ遏ｭ邵ｮ蜉ｹ譫懊・
++            # reask/normal 縺ｮ蟄玲焚蜷郁ｨ医〒謖√■縲’inalize 縺ｧ蛟咲紫繧貞・縺吶・+            "role_boundary_char_total": 0,
++            "role_boundary_sections": 0,
++            "prompt_gap_rbound_to_question_sum": 0.0,
++            "prompt_gap_rbound_to_own_speeches_sum": 0.0,
++            "claim_to_ability_delta_sum": 0.0,
++            "claim_to_ability_delta_count": 0,
++            "unsupported_role_action_count": 0,
++            "claim_vs_engine_conflict_count": 0,
++            "role_ability_assertions_observed": 0,
++            "retry_added_ability_expressions": 0,
++            "co_correction_events": 0,
++            "co_correction_reask_prompt_char_total": 0,
++            "co_correction_normal_prompt_char_total": 0,
+             # TASK-059: 蠑慕畑譎らせ縺ｮ蜀・ｨｳ縺ｨ縲・＆蜿阪↓縺ｯ謨ｰ縺医↑縺・ｦｳ蟇溷､・亥ｩ画峇繝ｻ荳闊ｬ蜷肴欠縺暦ｼ・             "citation_status_counts": {},
+             "hedged_pending_citations": 0,
+@@ -1413,6 +1594,45 @@ class GameLogger:
+             stats["avg_gap_state_to_question"] = round(
+                 float(stats["prompt_gap_state_to_question_sum"]) / prompts, 4
+             )
++            # TASK-064: 繝｢繝・Ν蛻･縺ｮ閭ｽ蜉帛｢・阜遽縺ｮ螳滓ｸｬ・・繝ｪ繧ｯ繧ｨ繧ｹ繝亥ｹｳ蝮・・蟄玲焚繝ｻ髫｣謗･霍晞屬・峨→縲・+            # 螳溯｡瑚ｨ倬鹸縺ｮ縺ｪ縺・・蜉幄｡御ｽｿ縺ｮ隕ｳ貂ｬ謨ｰ繝ｻ繧ｨ繝ｳ繧ｸ繝ｳ邨先棡縺ｨ縺ｮ遏帷崟繝ｻCO陬懈ｭ｣縺ｮ遏ｭ邵ｮ蜉ｹ譫懊・+            # v5縺ｧ雉ｪ蝠冗峩蠕後↓鄂ｮ縺・◆蠅・阜縺悟ｮ滄圀縺ｫ縺ｩ縺薙∈逹蝨ｰ縺励◆縺九ｒA/B豈碑ｼ・〒縺阪ｋ蠖｢縺ｫ縺吶ｋ縲・+            boundary_sections = int(stats.get("role_boundary_sections", 0))
++            stats["avg_claim_boundary_chars"] = (
++                round(int(stats.get("role_boundary_char_total", 0)) / boundary_sections, 1)
++                if boundary_sections
++                else 0.0
++            )
++            stats["avg_gap_role_boundary_to_question"] = round(
++                float(stats.get("prompt_gap_rbound_to_question_sum", 0.0)) / prompts, 4
++            )
++            stats["avg_gap_role_boundary_to_own_speeches"] = round(
++                float(stats.get("prompt_gap_rbound_to_own_speeches_sum", 0.0)) / prompts,
++                4,
++            )
++            delta_count = int(stats.get("claim_to_ability_delta_count", 0))
++            stats["avg_claim_to_ability_turn_delta"] = (
++                round(
++                    float(stats.get("claim_to_ability_delta_sum", 0.0)) / delta_count,
++                    2,
++                )
++                if delta_count
++                else 0.0
++            )
++            correction_events = int(stats.get("co_correction_events", 0))
++            if correction_events:
++                reask_chars = int(stats.get("co_correction_reask_prompt_char_total", 0))
++                normal_chars = int(
++                    stats.get("co_correction_normal_prompt_char_total", 0)
++                )
++                stats["avg_co_correction_reask_prompt_chars"] = round(
++                    reask_chars / correction_events, 1
++                )
++                # 遏ｭ邵ｮ蛟咲紫・・.0譛ｪ貅縺ｪ繧蛾壼ｸｸ繝励Ο繝ｳ繝励ヨ繧医ｊ遏ｭ縺・ｼ峨ょｮ御ｺ・擅莉ｶ縺ｮ
++                # 縲悟・隕∵ｱゅ′騾壼ｸｸ繝励Ο繝ｳ繝励ヨ繧医ｊ譏守｢ｺ縺ｫ遏ｭ縺・阪ｒ繝｢繝・Ν蛻･謨ｰ蛟､縺ｧ遉ｺ縺吶・+                stats["co_correction_shortening_ratio"] = (
++                    round(reask_chars / normal_chars, 4) if normal_chars else None
++                )
+ 
+         public_players_data = [
+             {
+@@ -1505,6 +1725,10 @@ class GameLogger:
+             # TASK-055: 蠖ｹ閨ｷ荳ｻ蠑ｵ縺ｮ蜃ｺ謇蜿ｰ蟶ｳ縲ょ・髢矩擇縺ｯ蜈ｨCO陦後ｒ荳ｭ遶九Λ繝吶Ν縺ｫ謠・∴縲√お繝ｳ繧ｸ繝ｳ辣ｧ蜷医・
+             # 逵溷⊃縺ｯ蜷ｫ縺ｾ縺ｪ縺・ｼ・erialize_public() 縺ｫ逵溷⊃繧ｭ繝ｼ縺後↑縺・％縺ｨ縺ｯ繝・せ繝医〒讀懆ｨｼ縺吶ｋ・峨・             "role_provenance": state.role_provenance.serialize_public(),
++            # TASK-064: 蠖ｹ閨ｷ閭ｽ蜉帙・蠅・阜蜿ｰ蟶ｳ・・ngine_action / public_role_claim /
++            # unsupported_role_action / inference・峨ょ・髢矩擇縺ｯ繧ｫ繝・ざ繝ｪ蜷郁ｨ医→荳ｭ遶九Λ繝吶Ν縺縺代〒縲・+            # 縺ｩ縺ｮCO縺梧悽迚ｩ縺九・螳溯｡瑚ｨ倬鹸縺ｨ縺ｮ荳閾ｴ蜿ｯ蜷ｦ縺ｯ邂｡逅・・ン繝･繝ｼ蟆ら畑縺ｫ谿九☆縲・+            "role_action_provenance": state.role_action_provenance.serialize_public(),
+             "allow_bluff_role_claim": bool(
+                 getattr(state, "allow_bluff_role_claim", ALLOW_BLUFF_ROLE_CLAIM_DEFAULT)
+             ),
+@@ -1714,6 +1938,80 @@ class GameLogger:
+                     / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                     4,
+                 ),
++                # TASK-064: 蠖ｹ閨ｷ閭ｽ蜉帙・蠅・阜遽縺ｨ隕ｳ貂ｬ縺ｮ蜷郁ｨ茨ｼ亥・髢区欠讓吶・荳ｭ遶九↑謨ｰ蛟､縺縺托ｼ峨・+                # 菫晄怏閠・挨縺ｮ蛻・｡槫・險ｳ縺ｯ邂｡逅・・ン繝･繝ｼ・・erialize_admin・牙・縺縺代〒謖√▽縲・+                # unsupported_role_action 縺ｯ隕ｳ貂ｬ蟆ら畑縺ｧ譛ｬ譁・・蜀咲函謌舌↓縺ｯ菴ｿ繧上ｌ縺ｦ縺・↑縺・◆繧√・+                # 縺薙％縺ｧ縺ｮ蠅怜刈縺ｯ縲檎匱險縺梧ｶ医∴縺溘阪％縺ｨ繧呈э蜻ｳ縺励↑縺・・+                "role_boundary_sections": int(
++                    self._ledger_metrics["role_boundary_sections"]
++                ),
++                "avg_claim_boundary_chars": round(
++                    int(self._ledger_metrics["role_boundary_char_total"])
++                    / max(1, int(self._ledger_metrics["role_boundary_sections"])),
++                    1,
++                ),
++                "avg_gap_role_boundary_to_question": round(
++                    float(self._ledger_metrics["prompt_gap_rbound_to_question_sum"])
++                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
++                    4,
++                ),
++                "avg_gap_role_boundary_to_own_speeches": round(
++                    float(self._ledger_metrics["prompt_gap_rbound_to_own_speeches_sum"])
++                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
++                    4,
++                ),
++                "role_ability_assertions_observed": int(
++                    self._ledger_metrics["role_ability_assertions_observed"]
++                ),
++                "unsupported_role_action_count": int(
++                    self._ledger_metrics["unsupported_role_action_count"]
++                ),
++                "claim_vs_engine_conflict_count": int(
++                    self._ledger_metrics["claim_vs_engine_conflict_count"]
++                ),
++                "retry_added_ability_expressions": int(
++                    self._ledger_metrics["retry_added_ability_expressions"]
++                ),
++                # 蟀画峇・育桝蝠上・莉ｮ螳壹・蠑慕畑繝ｻ蜷ｦ螳夲ｼ峨・閭ｽ蜉幄ｨ蜿翫・譁ｭ螳夂噪縺ｪ陦御ｽｿ縺ｨ縺励※謨ｰ縺医↑縺・・+                # 蜿ｰ蟶ｳ・・oleActionProvenance・峨′謖√▲縺溯ｦｳ貂ｬ蛟､繧偵％縺薙∈蜀吶☆・井ｸｭ遶九↑莉ｶ謨ｰ縺ｮ縺ｿ・峨・+                "hedged_ability_mentions_observed": int(
++                    getattr(
++                        getattr(state, "role_action_provenance", None),
++                        "hedged_mentions_observed",
++                        0,
++                    )
++                ),
++                "co_correction_events": int(self._ledger_metrics["co_correction_events"]),
++                "avg_co_correction_reask_prompt_chars": round(
++                    int(self._ledger_metrics["co_correction_reask_prompt_char_total"])
++                    / max(1, int(self._ledger_metrics["co_correction_events"])),
++                    1,
++                ),
++                # 陬懈ｭ｣繝励Ο繝ｳ繝励ヨ縺ｮ騾壼ｸｸ繝励Ο繝ｳ繝励ヨ豈費ｼ・1 縺ｧ遏ｭ邵ｮ縲ょｮ御ｺ・擅莉ｶ縺ｮ謨ｰ蛟､遒ｺ隱咲畑・・+                "co_correction_shortening_ratio": (
++                    round(
++                        int(self._ledger_metrics["co_correction_reask_prompt_char_total"])
++                        / int(
++                            self._ledger_metrics["co_correction_normal_prompt_char_total"]
++                        ),
++                        4,
++                    )
++                    if int(self._ledger_metrics["co_correction_events"]) > 0
++                    and int(
++                        self._ledger_metrics["co_correction_normal_prompt_char_total"]
++                    )
++                    > 0
++                    else None
++                ),
++                "avg_claim_to_ability_turn_delta": (
++                    round(
++                        float(self._ledger_metrics["claim_to_ability_delta_sum"])
++                        / int(self._ledger_metrics["claim_to_ability_delta_count"]),
++                        2,
++                    )
++                    if int(self._ledger_metrics["claim_to_ability_delta_count"]) > 0
++                    else 0.0
++                ),
+                 # TASK-059: 蠑慕畑縺励◆逶ｸ謇九・譎らせ蛻･蜀・ｨｳ・亥酔荳繧ｿ繝ｼ繝ｳ蜈郁｡鯉ｼ丞挨繧ｿ繝ｼ繝ｳ譌｢逋ｺ險・・                 # 豁ｻ莠｡蠕悟ｱ･豁ｴ・乗悴逋ｺ險・峨る＆蜿肴欠鞫倥・ future_event_reference_categories 縺ｨ縺ｯ
+                 # 蛻･譫縺ｧ縲∝ｩ画峇縺ｪ莉ｮ螳壼ｼ慕畑繝ｻ譛ｪ逋ｺ險閠・錐縺ｮ荳闊ｬ險蜿翫・縺薙％縺ｸ騾・′縺励※謨ｰ縺医ｋ縲・@@ -1943,6 +2241,10 @@ class GameLogger:
+             # TASK-055: 邂｡逅・・畑縲ゅお繝ｳ繧ｸ繝ｳ縺檎匱陦後＠縺溷頃縺・ｵ先棡・井ｿ晄怏閠・錐縺､縺搾ｼ峨→蜷ГO陦後・辣ｧ蜷育ｵ先棡繧・             # 縺薙％縺ｫ縺縺第ｮ九☆縲ょ・髢九Ο繧ｰ蛛ｴ縺ｫ縺ｯ逵溷⊃繧ｭ繝ｼ繧貞性繧蠖｢縺ｧ縺ｯ蜃ｺ縺輔↑縺・・             "role_provenance": state.role_provenance.serialize_admin(),
++            # TASK-064: 邂｡逅・・畑縲ゅお繝ｳ繧ｸ繝ｳ縺悟ｮ溯｡後＠縺溯・蜉幄｡悟虚・亥頃縺・・隘ｲ謦・ｼ峨・螳溯｡瑚ｨ倬鹸縺ｨ縲・+            # 蜈ｬ髢狗匱險縺ｧ隕ｳ貂ｬ縺励◆閭ｽ蜉幄｡御ｽｿ陦ｨ迴ｾ縺ｮ繧ｫ繝・ざ繝ｪ蜀・ｨｳ繝ｻ譛ｬ莠ｺ繧ｨ繝ｳ繧ｸ繝ｳ邨先棡縺ｨ縺ｮ遏帷崟繧貞・縺吶・+            # 縺薙・諠・ｱ繧呈戟縺､縺ｮ縺ｯ邂｡逅・・Ο繧ｰ縺縺代〒縲∝・髢句床蟶ｳ繝ｻcheckpoint繝ｻ繝励Ο繝ｳ繝励ヨ縺ｫ縺ｯ豺ｷ蜈･縺励↑縺・・+            "role_action_provenance": state.role_action_provenance.serialize_admin(),
+             "traces": private_traces_data,
+         }
+         self.append_record(public_summary, private_summary)
+@@ -2467,7 +2769,20 @@ def run_cli_game(args: argparse.Namespace) -> int:
+     def on_engine_event(event: dict[str, object]) -> None:
+         """Persist engine events and display public speeches as they arrive."""
+         nonlocal pending_claims, pending_claim_speaker
+-        logger.append_record(event)
++        # TASK-064: 閭ｽ蜉幄｡御ｽｿ縺ｮ蛻・｡櫁ｦｳ貂ｬ・亥ｮ溯｡瑚ｨ倬鹸縺ｨ縺ｮ荳閾ｴ蜿ｯ蜷ｦ繝ｻ繧ｫ繝・ざ繝ｪ繝ｻ遏帷崟・峨・菫晄怏閠・挨縺ｮ
++        # 逵溷⊃繧貞性繧縺溘ａ縲∝・髢徽SONL縺ｫ縺ｯ蜃ｺ縺輔↑縺・ｼ・ASK-055縺ｧ豎ｺ繧√◆邱壼ｼ輔″縺ｨ蜷後§・峨・+        # 邂｡逅・・Ξ繧ｳ繝ｼ繝会ｼ・rivate蛛ｴ・峨□縺代↓谿九＠縲∝・髢句・縺ｯ荳ｭ遶九↑譛ｬ譁・→ID陦ｨ遉ｺ縺ｮ縺ｾ縺ｾ縺ｨ縺吶ｋ縲・+        public_event = {
++            key: value
++            for key, value in event.items()
++            if key
++            not in {
++                "role_ability_observations",
++                "claim_to_ability_turn_delta",
++                "claim_to_ability_order",
++            }
++        }
++        logger.append_record(public_event, event)
+         event_type = event.get("type")
+         if event_type in PUBLIC_CLAIM_DISPLAY_TYPES:
+             claimant = str(event.get("claimant", "?"))
+@@ -2817,21 +3132,25 @@ def build_parser() -> argparse.ArgumentParser:
+             "prescribes tone, topics or reasoning order."
+         ),
+     )
+-    # TASK-060 / TASK-062: 隴ｰ隲悶・繝ｭ繝ｳ繝励ヨ縺ｮ遽鬆・ｼ磯・鄂ｮ縺縺大､峨∴縲∝・螳ｹ縺ｨ逋ｺ險縺ｮ閾ｪ逕ｱ縺ｯ螟峨∴縺ｪ縺・ｼ・+    # TASK-060 / TASK-062 / TASK-064: 隴ｰ隲悶・繝ｭ繝ｳ繝励ヨ縺ｮ遽鬆・ｼ磯・鄂ｮ縺縺大､峨∴縲∝・螳ｹ縺ｨ逋ｺ險縺ｮ閾ｪ逕ｱ縺ｯ螟峨∴縺ｪ縺・ｼ・     parser.add_argument(
+         "--prompt-layout",
+         dest="prompt_layout",
+-        choices=["v4", "v3", "v2", "auto"],
++        choices=["v5", "v4", "v3", "v2", "auto"],
+         default=PROMPT_LAYOUT_POLICY_DEFAULT,
+         help=(
+             "Where each information block sits inside the discussion prompt. Only positions and "
+             "duplicate wording change - tone, length, topics, conclusions and reasoning order stay "
+-            "the model's own. v4 (default): the v3 chain plus [CONTINUITY_CHECKPOINT], the "
+-            "engine-issued logical state (confirmed facts, public statements, refuted hypotheses "
+-            "and open questions as short id-bearing lines with authority tags) sitting directly "
+-            "after the speech evidence and immediately before the current question, so the player "
+-            "carries state across days without rereading old bodies. v3: the same chain without "
+-            "that section - your action record, board facts and engine-issued "
++            "the model's own. v5 (default): the v4 chain plus [ROLE_ACTION_BOUNDARY], the short "
++            "engine-issued line pair that separates what the engine actually executed for you "
++            "([DONE], divination/attack nights - results stay in your private section) from what "
++            "you publicly claimed ([CLAIM], unverified), sitting directly after the current "
++            "question and immediately before your own speeches, so bluffing, doubt and stance "
++            "changes stay free while an ability sentence cannot be misread as an engine record; "
++            "no bodies are restated. v4: the same chain without that boundary section (A/B base "
++            "for prompt size and unsupported_role_action rates); it keeps [CONTINUITY_CHECKPOINT] "
++            "after the speech evidence and before the current question. v3: no checkpoint either - "
++            "your action record, board facts and engine-issued "
+             "private info sit early; weak-middle band holds only droppable derived content (theory "
+             "card, topic digest, hypothesis diff, temporary guidance, round header); the tail runs "
+             "claim index -> timeline -> speech evidence -> current question -> your speeches and "
+@@ -2842,8 +3161,10 @@ def build_parser() -> argparse.ArgumentParser:
+             "v2: TASK-058 ordering. auto: follow --prompt-contract (legacy keeps the old byte "
+             "order). Compare one seed with prompt_zone_*_chars, prompt_gap_*, "
+             "prompt_instructions_to_end_chars, prompt_theory_card_chars and "
+-            "duplicate_constraint_total, and the continuity_* keys (avg_continuity_state_chars, "
+-            "evidence_continuity_folded_total, continuity_fold_saved_chars_total)."
++            "duplicate_constraint_total, the continuity_* keys (avg_continuity_state_chars, "
++            "evidence_continuity_folded_total, continuity_fold_saved_chars_total), and the "
++            "TASK-064 keys (avg_claim_boundary_chars, avg_gap_role_boundary_to_question, "
++            "unsupported_role_action_count, co_correction_shortening_ratio)."
+         ),
+     )
+     # TASK-062: 譌･繧偵∪縺溘＄隲也炊迥ｶ諷九・豁｣隕丞喧・医お繝ｳ繧ｸ繝ｳ逋ｺ陦後・迥ｶ諷句ｷｮ蛻・□縺代ｒ菴ｿ縺・∝哨隱ｿ繝ｻ隲也せ縺ｫ縺ｯ蟷ｲ貂峨＠縺ｪ縺・ｼ・

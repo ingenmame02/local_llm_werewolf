@@ -84,6 +84,16 @@ class EffectiveContextResolution:
     configured_source: str | None = None
     server_observed: int | None = None
     server_observed_source: str | None = None
+    # TASK-065（レビュー対応）: cap方策で採用値を縮退させた場合、`limit` は実際に送る値へ
+    # 更新する（送信側が旧 `resolved.limit` を使い続ける状態をなくす）。設定値は
+    # `configured` / `integrity_requested_limit` にそのまま残し、由来を追跡できるようにする。
+    integrity_requested_limit: int | None = None
+    integrity_policy: str | None = None
+    # /api/ps で観測できたロード済み実効値（None＝解決時に未ロード・診断不能）
+    loaded_context_from_ps: int | None = None
+    # 解決時にロード値が取れなかったため、以後の送信で判明した実ロード値から
+    # 再解決できる（キャッシュを恒久確定させない印）。
+    provisional: bool = False
 
 
 # サーバー側観測値の優先順（観測済みのロード時実効値 > プロセスenv > Modelfile既定値）。
@@ -91,6 +101,10 @@ SERVER_OBSERVED_PRIORITY: tuple[str, ...] = ("api_ps_loaded", "process_env", "mo
 
 # 設定由来の候補（明示指定はOllamaの既定値を上書きする）。
 CONFIGURED_SOURCES: tuple[str, ...] = ("player_setting", "cli_setting")
+
+# TASK-065: 整合チェックの方策 cap で採用値を縮退させたことを示す由来名。
+# 送信側・ログのどちらでも「安全値を採用した」が判別できるようにする。
+CONTEXT_INTEGRITY_CAP_SOURCE = "context_integrity_cap"
 
 
 def resolve_effective_context_limit(

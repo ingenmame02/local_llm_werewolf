@@ -1,0 +1,49 @@
+total_lines=3363
+--- [add_argument\(\"--prompt-layout\"] hits=0
+--- [add_argument\(\"--continuity\"] hits=0
+--- [add_argument\(\"--day-timeline\"] hits=0
+--- [getattr\(args, \"continuity\"] hits=1
+2340:         getattr(args, "continuity", CONTINUITY_POLICY_DEFAULT)
+--- [\"continuity_policy\": continuity_policy] hits=2
+1759:             "continuity_policy": continuity_policy_label(
+2419:         "continuity_policy": continuity_policy,
+--- [policy_label] hits=16
+65:     bluff_role_claim_policy_label,
+74:     day_timeline_policy_label,
+81:     prompt_contract_policy_label,
+91:     core_compression_policy_label,
+102:     prompt_layout_policy_label,
+109:     continuity_policy_label,
+1739:             "day_timeline_policy": day_timeline_policy_label(
+1744:             "prompt_contract_policy": prompt_contract_policy_label(
+1749:             "core_compression_policy": core_compression_policy_label(
+1754:             "prompt_layout_policy": prompt_layout_policy_label(
+1759:             "continuity_policy": continuity_policy_label(
+2408:         "allow_bluff_role_claim": bluff_role_claim_policy_label(allow_bluff_role_claim),
+2486:     novelty_policy_labels = {
+2491:     print(f"低新規性ポリシー: {novelty_policy_labels[novelty_policy]}")
+--- [timeline_category_counts] hits=4
+327:         self._timeline_category_counts: dict[str, int] = {
+525:                         self._timeline_category_counts[category] = (
+526:                             self._timeline_category_counts.get(category, 0) + count
+1796:                 "timeline_violation_counts": dict(self._timeline_category_counts),
+--- [_timeline_public_path_counts] hits=4
+347:         self._timeline_public_path_counts: dict[str, int] = {}
+375:         self._timeline_public_path_counts[path] = (
+376:             self._timeline_public_path_counts.get(path, 0) + 1
+2028:                 "timeline_public_info_paths": dict(self._timeline_public_path_counts),
+--- [def summary_metrics] hits=0
+--- [print_summary] hits=0
+--- [def print_banner] hits=1
+2253: def print_banner(text: str) -> None:
+--- [client\.ping\(\)] hits=1
+2815:         if not client.ping():
+--- [def build_parser|subparsers|add_parser] hits=1
+3013: def build_parser() -> argparse.ArgumentParser:
+--- [thinking_budget_fallbacks] hits=2
+1209:             stats["thinking_budget_fallbacks"] += 1
+1351:             "thinking_budget_fallbacks": 0,
+--- [\"ledger_repairs\"] hits=3
+215:             "ledger_repairs": 0,
+438:             self._ledger_metrics["ledger_repairs"] += 1
+2057:                     int(self._ledger_metrics["ledger_repairs"])

@@ -1,0 +1,36 @@
+### policy=cap configured=16384 env/modelfile=4096 loaded_after_send=None
+  initial   : limit=4096 source=context_integrity_cap provisional=True loaded=None
+  send#1    : num_ctx=4096
+  refresh   : limit=4096 source=context_integrity_cap provisional=True loaded=None
+  send#2    : num_ctx=4096
+  stages    : ['initial', 'post_load_refresh'] adopted=[4096, 4096]
+  cfg log   : requested=4096 eff_limit=4096 src_after=context_integrity_cap / requested=4096 eff_limit=4096 src_after=context_integrity_cap
+  verdict   : PASS
+
+### policy=warn configured=16384 env/modelfile=4096 loaded_after_send=None
+  initial   : limit=16384 source=player_setting provisional=True loaded=None
+  send#1    : num_ctx=16384
+  refresh   : limit=16384 source=player_setting provisional=True loaded=None
+  send#2    : num_ctx=16384
+  stages    : ['initial', 'post_load_refresh'] adopted=[16384, 16384]
+  cfg log   : requested=16384 eff_limit=16384 src_after=player_setting / requested=16384 eff_limit=16384 src_after=player_setting
+  verdict   : n/a
+
+### policy=cap configured=16384 env/modelfile=4096 loaded_after_send=4096
+  initial   : limit=4096 source=context_integrity_cap provisional=True loaded=None
+  send#1    : num_ctx=4096
+  refresh   : limit=4096 source=context_integrity_cap provisional=False loaded=4096
+  send#2    : num_ctx=4096
+  stages    : ['initial', 'post_load_refresh'] adopted=[4096, 4096]
+  cfg log   : requested=4096 eff_limit=4096 src_after=context_integrity_cap / requested=4096 eff_limit=4096 src_after=context_integrity_cap
+  verdict   : PASS
+
+### policy=off configured=16384 env/modelfile=4096 loaded_after_send=None
+  initial   : limit=16384 source=player_setting provisional=True loaded=None
+  send#1    : num_ctx=16384
+  refresh   : limit=16384 source=player_setting provisional=True loaded=None
+  send#2    : num_ctx=16384
+  stages    : ['initial', 'post_load_refresh'] adopted=[16384, 16384]
+  cfg log   : requested=16384 eff_limit=16384 src_after=player_setting / requested=16384 eff_limit=16384 src_after=player_setting
+  verdict   : n/a
+

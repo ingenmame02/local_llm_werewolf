@@ -1,0 +1,138 @@
+diff --git a/src/werewolf/engine.py b/src/werewolf/engine.py
+index c291fdd..ef317d3 100644
+--- a/src/werewolf/engine.py
++++ b/src/werewolf/engine.py
+@@ -60,10 +60,14 @@ from .role_provenance import (
+     PUBLIC_LINE_LABEL,
+     SOURCE_COMPATIBILITY_TEXT,
+ )
++# TASK-064: 蠖ｹ閨ｷ閭ｽ蜉帙・螳溯｡瑚ｨ倬鹸蜿ｰ蟶ｳ・・oleActionProvenance・峨ょ､懊・螳溯｡後ｒ [DONE] 縺ｨ縺励※逋ｻ骭ｲ縺励・+# 蜈ｬ髢狗匱險縺ｮ閭ｽ蜉幄｡御ｽｿ陦ｨ迴ｾ縺ｯ隕ｳ貂ｬ蟆ら畑縺ｧ蛻・｡槭☆繧具ｼ域悽譁・・螟画峩縺励↑縺・ｼ峨・+from .role_action_provenance import KIND_ATTACK, KIND_DIVINATION
+ # TASK-056: Day蜀・う繝吶Φ繝医・譎らｳｻ蛻怜床蟶ｳ縺ｨ譛ｪ譚･蜿ら・縺ｮ隕ｳ貂ｬ・域､懷・縺ｯ隕ｳ貂ｬ蟆ら畑縺ｧ譛ｬ譁・・譖ｸ縺肴鋤縺医↑縺・ｼ・ from .day_timeline import (
+     DAY_TIMELINE_POLICY_DEFAULT,
+     DAY_TIMELINE_POLICY_OFF,
++    TIMELINE_INTENT_POLICY_DEFAULT,
+     TurnSnapshot,
+     inspect_public_body,
+     normalize_day_timeline_policy,
+@@ -1146,6 +1150,12 @@ class GameEngine:
+                 target if target in candidate_set.candidates else candidate_set.fallback
+             )
+             if self.state.pending_attack is not None:
++                # TASK-064: 隘ｲ謦・・繝√・繝豎ｺ螳壹□縺後∝・莠ｺ迢ｼ譛ｬ莠ｺ縺ｮ螳溯｡瑚ｨ倬鹸縺ｨ縺励※逋ｻ骭ｲ縺吶ｋ
++                # ・医瑚･ｲ縺｣縺溘阪→縺・≧逋ｺ險縺ｮ陬丈ｻ倥￠繧・[DONE] 蛛ｴ縺ｧ謖√◆縺帙ｋ縺溘ａ・峨・+                for wolf in wolves:
++                    self.state.role_action_provenance.record_engine_action(
++                        wolf.name, KIND_ATTACK, self.state.day
++                    )
+                 self._record_action_memory(
+                     player=wolves[0],
+                     action_type="attack",
+@@ -1207,6 +1217,11 @@ class GameEngine:
+         )
+         self.state.seer_results[target] = result
+         self.state.seer_result_history.append((self.state.day, target, result))
++        # TASK-064: 繧ｨ繝ｳ繧ｸ繝ｳ縺悟ｮ滄圀縺ｫ蜊縺・ｒ螳溯｡後＠縺滉ｺ句ｮ溘ｒ譛ｬ莠ｺ逕ｨ縺ｮ螳溯｡瑚ｨ倬鹸縺ｸ遨阪・縲・+        # 蛻､螳壹◎縺ｮ繧ゅ・縺ｯ髱槫・髢九・縺ｾ縺ｾ・亥床蟶ｳ縺ｫ縺ｯ譌･縺縺代′谿九ｋ・峨・+        self.state.role_action_provenance.record_engine_action(
++            seer.name, KIND_DIVINATION, self.state.day
++        )
+         self.state.fact_ledger.confirmed_facts.append(
+             LedgerFact(
+                 day=self.state.day,
+@@ -1976,6 +1991,9 @@ class GameEngine:
+                 actor_role=actor.role.value if actor is not None else None,
+                 discussion_turn=self.state.discussion_turn,
+             )
++            # TASK-064: CO縺ｮ蛻晏・繧呈悽莠ｺ縺ｮ蠅・阜蜿ｰ蟶ｳ縺ｫ蛻ｻ縺ｿ縲∝・縺ｫ閭ｽ蜉幄｡ｨ迴ｾ縺悟・縺ｦ縺・◆蝣ｴ蜷医・
++            # 縺昴・霍晞屬縺縺代ｒ荳ｭ遶九↑謨ｰ蛟､繧､繝吶Φ繝医↓縺吶ｋ・育悄蛛ｽ縺ｯ荳蛻・ｼ峨○縺ｪ縺・ｼ峨・+            self._record_role_action_claim(speaker, actor)
+             self._emit_public_claim(
+                 "claim_role_corrected"
+                 if correction and prior_role is not None
+@@ -2103,6 +2121,8 @@ class GameEngine:
+             result=claimed_result,
+             discussion_turn=self.state.discussion_turn,
+         )
++        # TASK-064: 邨先棡陦後・蜈ｬ髢九〒繧・O蛻晏・險倬鹸繧堤｢ｺ隱阪☆繧具ｼ域里縺ｫ縺ゅｌ縺ｰ no-op・峨・+        self._record_role_action_claim(speaker, actor)
+         self._emit_public_claim(
+             "seer_result_corrected"
+             if correction and previous_result is not None
+@@ -2485,6 +2505,9 @@ class GameEngine:
+         inspectable = message.speaker != "system" and policy != DAY_TIMELINE_POLICY_OFF
+         snapshot = self.state.timeline_snapshot(message.speaker) if inspectable else None
+         appended = self.state.append_discussion_message(message)
++        # TASK-064: 逋ｺ險譛ｬ譁・・閭ｽ蜉幄｡御ｽｿ陦ｨ迴ｾ縺ｯ繧ｳ繝ｼ繝ｫ繝舌ャ繧ｯ縺ｮ譛臥┌縺ｫ髢｢繧上ｉ縺夊ｦｳ貂ｬ縺吶ｋ
++        # ・亥・鬘槫ｰら畑縺ｧ譛ｬ譁・・螟画峩縺励↑縺・ょ・髢九＆繧後ｋ繝｡繝・そ繝ｼ繧ｸ閾ｪ菴薙・縺昴・縺ｾ縺ｾ・峨・+        role_action_fields = self._role_action_observation_fields(appended)
+         if self.event_callback is None:
+             return
+         event: dict[str, object] = {
+@@ -2504,8 +2527,82 @@ class GameEngine:
+         event.update(
+             self._timeline_reference_fields(appended, snapshot, policy)
+         )
++        # TASK-064: 閭ｽ蜉幄｡御ｽｿ陦ｨ迴ｾ縺ｮ邂｡逅・・ン繝･繝ｼ隕ｳ貂ｬ繧貞酔縺倥う繝吶Φ繝医↓豺ｻ縺医ｋ・亥・髢区悽譁・・荳榊､会ｼ・+        event.update(role_action_fields)
+         self.event_callback(event)
+ 
++    def _record_role_action_claim(self, speaker: str, actor: object) -> None:
++        """TASK-064: CO蛻晏・繧貞｢・阜蜿ｰ蟶ｳ縺ｫ蛻ｻ縺ｿ縲∬・蜉幄｡ｨ迴ｾ縺悟・縺ｫ蜃ｺ縺ｦ縺・◆蝣ｴ蜷郁ｷ晞屬縺縺大・縺吶・+
++        逋ｺ陦後☆繧九・縺ｯ荳ｭ遶九↑謨ｰ蛟､縺ｮ縺ｿ・医←縺ｮCO縺梧悽迚ｩ縺九・荳蛻・､ｺ縺輔↑縺・ｼ峨よ悽譁・・莉悶・蜿ｰ蟶ｳ縺ｸ縺ｯ
++        菴輔ｂ譖ｸ縺崎ｾｼ縺ｾ縺ｪ縺・りｦｳ貂ｬ蟆ら畑縺ｧ縲√％縺薙°繧牙・逕滓・繧・┌螳ｳ蛹悶・陦後ｏ縺ｪ縺・・+        """
++        tracker = getattr(self.state, "role_action_provenance", None)
++        if tracker is None:
++            return
++        delta = tracker.mark_public_claim(
++            speaker, int(self.state.day), int(self.state.discussion_turn or 1)
++        )
++        if delta is not None:
++            self._emit_public_claim(
++                "claim_to_ability_distance",
++                day=int(self.state.day),
++                discussion_turn=int(self.state.discussion_turn or 1),
++                player=speaker,
++                model=getattr(actor, "model", None),
++                turn_delta=int(delta),
++                order="ability_then_claim",
++            )
++
++    def _role_action_observation_fields(self, message: Message) -> dict[str, object]:
++        """TASK-064: 蜈ｬ髢狗匱險縺ｮ荳ｭ縺ｮ閭ｽ蜉幄｡御ｽｿ陦ｨ迴ｾ繧定ｦｳ貂ｬ縺吶ｋ・域悽譁・・螟画峩縺励↑縺・ｼ峨・+
++        蛻・｡槭・譛ｬ莠ｺ繧ｨ繝ｳ繧ｸ繝ｳ邨先棡縺ｨ縺ｮ荳閾ｴ蜿ｯ蜷ｦ縺ｯ繝ｭ繧ｰ縺ｮ邂｡逅・・ン繝･繝ｼ逕ｨ繝輔ぅ繝ｼ繝ｫ繝峨↓縺縺第ｮ九☆縲・+        蜈ｬ髢矩擇縺ｧ縺ｯ TASK-055 縺ｨ蜷後§荳ｭ遶九Λ繝吶Ν・・ublic_claim_line・峨〒縲∵悽譁・ｂ蜿ｰ蟶ｳ繧・+        蜷後§謇ｱ縺・・縺ｾ縺ｾ縺縲よ､懷・縺励※繧ら匱險縺ｮ蜀咲函謌舌・辟｡螳ｳ蛹悶・險縺・鋤縺医・荳蛻・｡後ｏ縺ｪ縺・・+        """
++        if message.speaker == "system":
++            return {}
++        tracker = getattr(self.state, "role_action_provenance", None)
++        if tracker is None:
++            return {}
++        actor = next(
++            (player for player in self.state.players if player.name == message.speaker),
++            None,
++        )
++        # 譛ｬ莠ｺ蛻・・蜊縺・ｵ先棡縺縺代ｒ辣ｧ蜷医↓菴ｿ縺・ｼ井ｻ冶・・縺ｯ邨ｶ蟇ｾ縺ｫ貂｡縺輔↑縺・ｼ・+        own_results = (
++            dict(self.state.seer_results)
++            if actor is not None and actor.role is Role.SEER
++            else {}
++        )
++        was_marked_ability = message.speaker in tracker.first_ability_turn
++        observations = tracker.observe_public_speech(
++            player=message.speaker,
++            day=int(self.state.day),
++            discussion_turn=int(message.turn or self.state.discussion_turn or 1),
++            text=message.content,
++            own_engine_results=own_results,
++            allow_bluff_role_claim=bool(
++                getattr(self.state, "allow_bluff_role_claim", True)
++            ),
++            known_player_names=tuple(player.name for player in self.state.players),
++        )
++        fields: dict[str, object] = {}
++        if not observations:
++            return fields
++        # 繝ｭ繧ｰ逕ｨ・育ｮ｡逅・・ン繝･繝ｼ・峨ょ・髢九・繝ｭ繝ｳ繝励ヨ縺ｫ縺ｯ邨ｶ蟇ｾ縺ｫ豬√＆縺ｪ縺・・+        fields["role_ability_observations"] = [o.admin_view() for o in observations]
++        fields["role_action_model"] = getattr(actor, "model", None)
++        if not was_marked_ability and not (message.speaker in tracker.first_ability_turn):
++            return fields
++        if not was_marked_ability:
++            delta = tracker.last_claim_to_ability_delta
++            if delta is not None:
++                fields["claim_to_ability_turn_delta"] = int(delta)
++                fields["claim_to_ability_order"] = "claim_then_ability"
++        return fields
++
+     def _timeline_reference_fields(
+         self,
+         message: Message,

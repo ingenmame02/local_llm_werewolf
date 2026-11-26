@@ -91,12 +91,13 @@ from werewolf.core_compression import (
     core_compression_policy_label,
     normalize_core_compression_policy,
 )
-# TASK-060: 議論プロンプトの節順（layout）。実測した帯字数・隣接距離・重複行の削減を
-# ログで比べられるようにし、同じseedで v4 / v3 / v2 / auto を切り替えてA/B評価できるようにする。
+# TASK-060 / TASK-064: 議論プロンプトの節順（layout）。実測した帯字数・隣接距離・重複行の削減を
+# ログで比べられるようにし、同じseedで v5 / v4 / v3 / v2 / auto を切り替えてA/B評価できるようにする。
 from werewolf.prompt_layout import (
     PROMPT_LAYOUT_POLICY_DEFAULT,
     PROMPT_LAYOUT_V3,
     PROMPT_LAYOUT_V4,
+    PROMPT_LAYOUT_V5,
     normalize_prompt_layout_policy,
     prompt_layout_policy_label,
 )
@@ -107,6 +108,32 @@ from werewolf.continuity_state import (
     CONTINUITY_POLICY_DEFAULT,
     continuity_policy_label,
     normalize_continuity_policy,
+)
+# TASK-065: 運用安定化の4テーマ（実効コンテキスト整合／thinking・timeout処置のスコープ、
+# 未発言者に関する意図分離、プレイヤー名表記ゆれの内部解決）。いずれも観測・数値だけで、
+# 議論本文の語彙・口調・結論には干渉しない。方策はA/B比較用に旧挙動へ戻せる。
+from werewolf.context_integrity import (
+    CONTEXT_INTEGRITY_POLICY_DEFAULT,
+    assess_context_integrity,
+    context_integrity_policy_label,
+    normalize_context_integrity_policy,
+)
+from werewolf.context_budget import process_env_context
+from werewolf.day_timeline import (
+    TIMELINE_INTENT_POLICY_DEFAULT,
+    UNSPOKEN_INTENTS,
+    normalize_timeline_intent_policy,
+    timeline_intent_policy_label,
+)
+from werewolf.name_resolution import (
+    NAME_RESOLUTION_POLICY_DEFAULT,
+    name_resolution_policy_label,
+    normalize_name_resolution_policy,
+)
+from werewolf.output_stability import (
+    OUTPUT_STABILIZATION_SCOPE_DEFAULT,
+    output_stabilization_scope_label,
+    normalize_output_stabilization_scope,
 )
 
 # フェーズ表示用ラベル
@@ -302,6 +329,46 @@ class GameLogger:
             "continuity_fold_saved_chars_total": 0,
             "prompt_gap_state_to_evidence_sum": 0.0,
             "prompt_gap_state_to_question_sum": 0.0,
+            # TASK-064: 役職能力の境界台帳の集計（公開ログには中立な合計値だけ載せる）。
+            # 境界節の実測字数、engine_action/public_role_claim/unsupported_role_action/
+            # inference の分類個数、エンジン結果との矛盾、CO補正の再要求で増えた能力表現、
+            # 補正プロンプトの短縮効果（通常プロンプト長との比較用）。
+            "role_boundary_char_total": 0,
+            "role_boundary_sections": 0,
+            "prompt_gap_rbound_to_question_sum": 0.0,
+            "prompt_gap_rbound_to_own_speeches_sum": 0.0,
+            "role_ability_assertions_observed": 0,
+            "unsupported_role_action_count": 0,
+            "claim_vs_engine_conflict_count": 0,
+            "hedged_ability_mentions_observed": 0,
+            "role_action_engine_actions": 0,
+            "retry_added_ability_expressions": 0,
+            "co_correction_reask_prompt_char_total": 0,
+            "co_correction_normal_prompt_char_total": 0,
+            "co_correction_events": 0,
+            "claim_to_ability_delta_sum": 0.0,
+            "claim_to_ability_delta_count": 0,
+            # TASK-065: 意図分離（実質的未来参照／これから聞く質問行為／これからの行動推測）、
+            # プレイヤー名表記ゆれの内部解決、実行コンテキスト整合、thinking・timeout処置の
+            # スコープ別実績。すべて観測専用で、本文の書き換えは行っていない。
+            "timeline_past_attributions_observed": 0,
+            "timeline_future_question_acts": 0,
+            "timeline_future_action_speculations": 0,
+            "name_variant_mentions_absorbed": 0,
+            "legacy_unknown_name_flags_avoided": 0,
+            "unresolved_name_references": 0,
+            "name_reference_scans": 0,
+            "context_integrity_checks": 0,
+            "context_integrity_mismatches": 0,
+            "context_integrity_caps_applied": 0,
+            "context_preflight_runs": 0,
+            "context_resolutions_provisional": 0,
+            "context_resolutions_refreshed_after_load": 0,
+            "output_stabilization_scope_events": 0,
+            "timeout_downgrade_events": 0,
+            "timeout_downgrades_scoped_to_action": 0,
+            "thinking_off_action_events": 0,
+            "stabilization_relaxations": 0,
         }
         # TASK-056: 未来参照カテゴリ別の指摘数（公開本文は修正していない観測値）
         self._timeline_category_counts: dict[str, int] = {
@@ -317,6 +384,17 @@ class GameLogger:
         self._hedged_pending_citations = 0
         self._unattributed_name_mentions = 0
         self._timeline_checks_skipped_empty_body = 0
+        # TASK-065: 未発言者に関する文の意図内訳（実質的未来参照／これから聞く質問行為／
+        # これからの行動推測）。future_event_reference は past_attribution の断定だけなので、
+        # 「質問したから未来参照」を数えない分離が効いているかをここで確認する（観測専用）。
+        self._timeline_intent_counts: dict[str, int] = {
+            intent: 0 for intent in UNSPOKEN_INTENTS
+        }
+        # TASK-065: モデル×行動別の処置スコープ観察（timeout縮小・thinking off・解除）と
+        # コンテキスト整合チェックの実施モデル（設定値とサーバー観測値の不一致を観測する）
+        self._stability_actions: dict[str, set[str]] = {}
+        self._context_integrity_models: set[str] = set()
+        self._context_mismatch_models: set[str] = set()
         # TASK-059: 証拠ID参照 `[speech:N]` / `[ref:sN]` の解決結果（原因別）。未解決参照の
         # 「ID欠落・旧ログ互換・実際の未来参照」を分解するために観測する（本文は触らない）。
         self._reference_cause_counts: dict[str, int] = {
@@ -325,13 +403,14 @@ class GameLogger:
         # TASK-059: 公開情報の入力経路別の検査数（発言／CO行／投票／死亡）。検査対象外も
         # 理由付きで数えることで「なぜ53件だけだったのか」を説明できるようにする。
         self._timeline_public_path_counts: dict[str, int] = {}
-        # TASK-058 / TASK-060 / TASK-062: レイアウト別のプロンプト構築数
-        # （legacy_v1 / v2_attention / v3_grounding / v4_continuity）
+        # TASK-058 / TASK-060 / TASK-062 / TASK-064: レイアウト別のプロンプト構築数
+        # （legacy_v1 / v2_attention / v3_grounding / v4_continuity / v5_role_boundary）
         self._prompt_layout_counts: dict[str, int] = {
             PROMPT_LAYOUT_LEGACY: 0,
             PROMPT_LAYOUT_V2: 0,
             PROMPT_LAYOUT_V3: 0,
             PROMPT_LAYOUT_V4: 0,
+            PROMPT_LAYOUT_V5: 0,
         }
         # v2の節順が崩れた回数（編集ミスの静的検査。0を維持する）
         self._prompt_layout_violations = 0
@@ -415,6 +494,98 @@ class GameLogger:
                 self._ledger_metrics["question_answer_forced"] += 1
         if event_type == "ledger_repair":
             self._ledger_metrics["ledger_repairs"] += 1
+        # --- TASK-065: プレイヤー名表記ゆれの内部解決（公開本文は変更しない観測のみ） ---
+        if event_type == "name_reference_resolution":
+            absorbed = int(diagnostic_record.get("name_variants_absorbed") or 0)
+            unresolved = int(diagnostic_record.get("unresolved_name_references") or 0)
+            avoided = int(diagnostic_record.get("legacy_unknown_flags_avoided") or 0)
+            self._ledger_metrics["name_variant_mentions_absorbed"] += absorbed
+            self._ledger_metrics["unresolved_name_references"] += unresolved
+            self._ledger_metrics["legacy_unknown_name_flags_avoided"] += avoided
+            self._ledger_metrics["name_reference_scans"] += 1
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["name_variant_mentions_absorbed"] += absorbed
+                stats["unresolved_name_references"] += unresolved
+                stats["legacy_unknown_name_flags_avoided"] += avoided
+                labels = diagnostic_record.get("mention_labels")
+                if isinstance(labels, dict):
+                    bucket = stats.setdefault("name_mention_labels", {})
+                    for label, count in labels.items():
+                        bucket[str(label)] = int(bucket.get(str(label), 0)) + int(count or 0)
+        # --- TASK-065: 実効コンテキスト整合（configured / server_observed / loaded / requested）
+        if event_type == "effective_context_resolution":
+            self._ledger_metrics["context_integrity_checks"] += 1
+            if bool(diagnostic_record.get("context_integrity_mismatch")):
+                self._ledger_metrics["context_integrity_mismatches"] += 1
+            if bool(diagnostic_record.get("context_integrity_applied")):
+                self._ledger_metrics["context_integrity_caps_applied"] += 1
+            # TASK-065（レビュー対応）: 解決がロード値を持てたか（provisional）と、
+            # 送信後に実ロード値へ取り直した回数を集計する（キャッシュ固定の検証用）
+            if diagnostic_record.get("context_resolution_stage") == "post_load_refresh":
+                self._ledger_metrics["context_resolutions_refreshed_after_load"] += 1
+            elif bool(diagnostic_record.get("context_resolution_provisional")):
+                self._ledger_metrics["context_resolutions_provisional"] += 1
+            if isinstance(model, str):
+                self._context_integrity_models.add(str(model))
+                if bool(diagnostic_record.get("context_integrity_mismatch")):
+                    self._context_mismatch_models.add(str(model))
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["context_integrity_checks"] += 1
+                for key, metric in (
+                    ("configured_context_limit", "context_configured_limit"),
+                    ("server_observed_context_limit", "context_server_observed_limit"),
+                    ("loaded_context_from_ps", "context_loaded_from_ps"),
+                    ("modelfile_num_ctx", "context_modelfile_num_ctx"),
+                    ("requested_num_ctx", "context_requested_num_ctx"),
+                    ("adopted_num_ctx", "context_adopted_num_ctx"),
+                ):
+                    value = diagnostic_record.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        stats[metric] = max(int(stats.get(metric, 0) or 0), value)
+        # --- TASK-065: thinking・timeout処置のスコープ（モデル×行動へ限定し恒久化しない） ---
+        if event_type == "model_timeout_downgrade":
+            self._ledger_metrics["timeout_downgrade_events"] += 1
+            self._ledger_metrics["output_stabilization_scope_events"] += 1
+            if bool(diagnostic_record.get("scoped_to_action")):
+                self._ledger_metrics["timeout_downgrades_scoped_to_action"] += 1
+            action_key = str(diagnostic_record.get("action_budget_key") or "")
+            scope = str(diagnostic_record.get("stabilization_scope") or "")
+            if isinstance(model, str) and action_key:
+                entry = f"timeout_fit/{action_key}"
+                self._stability_actions.setdefault(str(model), set()).add(entry)
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["timeout_downgrade_events"] += 1
+                scoped = stats.setdefault("stabilized_actions", [])
+                marker = f"{scope}:{entry}"
+                if marker not in scoped:
+                    scoped.append(marker)
+        if event_type == "thinking_stabilization":
+            self._ledger_metrics["thinking_off_action_events"] += 1
+            self._ledger_metrics["output_stabilization_scope_events"] += 1
+            action_key = str(diagnostic_record.get("action_budget_key") or "")
+            scope = str(diagnostic_record.get("stabilization_scope") or "")
+            if isinstance(model, str) and action_key:
+                self._stability_actions.setdefault(str(model), set()).add(
+                    f"thinking_off/{action_key}"
+                )
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["thinking_off_action_events"] += 1
+                scoped = stats.setdefault("stabilized_actions", [])
+                marker = f"{scope}:thinking_off/{action_key}"
+                if marker not in scoped:
+                    scoped.append(marker)
+        if event_type == "output_stabilization_relaxed":
+            self._ledger_metrics["stabilization_relaxations"] += 1
+            action_key = str(diagnostic_record.get("action_budget_key") or "")
+            cleared = diagnostic_record.get("cleared_downgrades")
+            if isinstance(model, str):
+                stats = self._model_stats.setdefault(model, self._new_model_stats())
+                stats["stabilization_relaxations"] += 1
+                if isinstance(cleared, list) and action_key:
+                    bucket = self._stability_actions.setdefault(str(model), set())
+                    for kind in cleared:
+                        bucket.discard(f"{kind}/{action_key}")
         # TASK-048: 新規性の計測と低新規性処理（再生成回避回数）を別指標で積む
         if event_type == "discussion_novelty_measured":
             self._ledger_metrics["novelty_measurements"] += 1
@@ -519,6 +690,27 @@ class GameLogger:
             )
             self._unattributed_name_mentions += int(
                 diagnostic_record.get("mentions_without_attribution_observed") or 0
+            )
+            # TASK-065: 未発言者に関する文の意図内訳を積む。違反（future_event_reference）へ
+            # 数えるのは past_attribution_to_unspoken の断定だけで、これから説明を求める質問
+            # 行為とこれからの行動推測はここへ分ける（TASKS.mdの実装案3。本文は変更しない）。
+            intent_counts = diagnostic_record.get("timeline_intent_counts")
+            if isinstance(intent_counts, dict):
+                for intent, count in intent_counts.items():
+                    value = int(count or 0)
+                    if value:
+                        key = str(intent)
+                        self._timeline_intent_counts[key] = (
+                            self._timeline_intent_counts.get(key, 0) + value
+                        )
+            self._ledger_metrics["timeline_past_attributions_observed"] += int(
+                diagnostic_record.get("past_attributions_observed") or 0
+            )
+            self._ledger_metrics["timeline_future_question_acts"] += int(
+                diagnostic_record.get("future_question_acts_observed") or 0
+            )
+            self._ledger_metrics["timeline_future_action_speculations"] += int(
+                diagnostic_record.get("future_action_speculations_observed") or 0
             )
             if diagnostic_record.get("timeline_checks_skipped_empty_body"):
                 self._timeline_checks_skipped_empty_body += 1
@@ -769,12 +961,16 @@ class GameLogger:
                         "evidence_continuity_fold_saved_chars",
                         "continuity_fold_saved_chars_total",
                     ),
+                    # TASK-064: モデル別の能力境界節の提示量（字数・節を載せた回数）
+                    ("role_boundary_section_chars", "role_boundary_char_total"),
                 ):
                     value = diagnostic_record.get(key)
                     if isinstance(value, int) and not isinstance(value, bool):
                         stats[metric] += max(0, int(value))
                 if int(diagnostic_record.get("continuity_state_chars") or 0) > 0:
                     stats["continuity_sections"] += 1
+                if int(diagnostic_record.get("role_boundary_section_chars") or 0) > 0:
+                    stats["role_boundary_sections"] += 1
                 for key, metric in (
                     (
                         "prompt_gap_question_to_evidence",
@@ -791,6 +987,16 @@ class GameLogger:
                     # TASK-062: 論理状態節の隣接距離（証拠との距離／現在質問との距離）
                     ("prompt_gap_state_to_evidence", "prompt_gap_state_to_evidence_sum"),
                     ("prompt_gap_state_to_question", "prompt_gap_state_to_question_sum"),
+                    # TASK-064: 能力境界節の隣接距離（現在質問・自分の発言との距離）。
+                    # v5で凍結した位置から外れていないかをモデル別に見る。
+                    (
+                        "prompt_gap_role_boundary_to_question",
+                        "prompt_gap_rbound_to_question_sum",
+                    ),
+                    (
+                        "prompt_gap_role_boundary_to_own_speeches",
+                        "prompt_gap_rbound_to_own_speeches_sum",
+                    ),
                 ):
                     value = diagnostic_record.get(key)
                     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -801,6 +1007,135 @@ class GameLogger:
                     stage_counts = stats["contract_removal_stage_counts"]
                     stage_key = f"stage{limited}"
                     stage_counts[stage_key] = int(stage_counts.get(stage_key, 0)) + 1
+        # TASK-064: 能力境界節の実測と隣接距離を集計する（公開指標は中立な数値だけ）。
+        boundary_chars = diagnostic_record.get("role_boundary_section_chars")
+        if isinstance(boundary_chars, int) and not isinstance(boundary_chars, bool):
+            self._ledger_metrics["role_boundary_char_total"] += max(0, int(boundary_chars))
+            if boundary_chars > 0:
+                self._ledger_metrics["role_boundary_sections"] += 1
+        for key, metric in (
+            (
+                "prompt_gap_role_boundary_to_question",
+                "prompt_gap_rbound_to_question_sum",
+            ),
+            (
+                "prompt_gap_role_boundary_to_own_speeches",
+                "prompt_gap_rbound_to_own_speeches_sum",
+            ),
+        ):
+            value = diagnostic_record.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self._ledger_metrics[metric] += max(0.0, float(value))
+        # TASK-064: 公開発言の能力行使表現の観測（エンジンが発行した管理者ビュー専用）。
+        # カテゴリ・支援可否は保有者別の真偽を含むため、台帳の中立合計とイベントログ
+        # だけに残し、プロンプトや公開行には絶対に流さない（TASK-055の線引きを踏襲）。
+        observations = diagnostic_record.get("role_ability_observations")
+        if isinstance(observations, list) and observations:
+            obs_model = diagnostic_record.get("role_action_model")
+            stats = None
+            if isinstance(obs_model, str):
+                stats = self._model_stats.setdefault(obs_model, self._new_model_stats())
+            for observation in observations:
+                if not isinstance(observation, dict):
+                    continue
+                self._ledger_metrics["role_ability_assertions_observed"] += 1
+                if stats is not None:
+                    stats["role_ability_assertions_observed"] = int(
+                        stats.get("role_ability_assertions_observed", 0)
+                    ) + 1
+                category = observation.get("category")
+                if category == "unsupported_role_action":
+                    self._ledger_metrics["unsupported_role_action_count"] += 1
+                    if stats is not None:
+                        stats["unsupported_role_action_count"] = int(
+                            stats.get("unsupported_role_action_count", 0)
+                        ) + 1
+                elif category == "engine_action":
+                    self._ledger_metrics["role_action_engine_actions"] += 1
+                if bool(observation.get("conflict")):
+                    self._ledger_metrics["claim_vs_engine_conflict_count"] += 1
+                    if stats is not None:
+                        stats["claim_vs_engine_conflict_count"] = int(
+                            stats.get("claim_vs_engine_conflict_count", 0)
+                        ) + 1
+            delta = diagnostic_record.get("claim_to_ability_turn_delta")
+            if isinstance(delta, int) and not isinstance(delta, bool):
+                self._ledger_metrics["claim_to_ability_delta_sum"] += float(
+                    max(0, int(delta))
+                )
+                self._ledger_metrics["claim_to_ability_delta_count"] += 1
+                if stats is not None:
+                    stats["claim_to_ability_delta_sum"] = (
+                        float(stats.get("claim_to_ability_delta_sum", 0.0))
+                        + float(max(0, int(delta)))
+                    )
+                    stats["claim_to_ability_delta_count"] = int(
+                        stats.get("claim_to_ability_delta_count", 0)
+                    ) + 1
+        # TASK-064: CO初出→能力表現（またはその逆）のターン距離イベントを集計する。
+        # 数値のみで、どのCOが本物かを示す情報は含まれない。
+        if event_type == "claim_to_ability_distance":
+            distance_delta = diagnostic_record.get("turn_delta")
+            if isinstance(distance_delta, int) and not isinstance(distance_delta, bool):
+                self._ledger_metrics["claim_to_ability_delta_sum"] += float(
+                    max(0, int(distance_delta))
+                )
+                self._ledger_metrics["claim_to_ability_delta_count"] += 1
+                distance_model = diagnostic_record.get("model")
+                if isinstance(distance_model, str):
+                    stats = self._model_stats.setdefault(
+                        distance_model, self._new_model_stats()
+                    )
+                    stats["claim_to_ability_delta_sum"] = (
+                        float(stats.get("claim_to_ability_delta_sum", 0.0))
+                        + float(max(0, int(distance_delta)))
+                    )
+                    stats["claim_to_ability_delta_count"] = int(
+                        stats.get("claim_to_ability_delta_count", 0)
+                    ) + 1
+        # TASK-064: CO補正の再要求が短縮だったかと未検証の能力表現を増やさなかったかを
+        # 行動別・モデル別に積む（観測専用。本文は変更されていない）。
+        if event_type == "co_correction_boundary":
+            reask_chars = diagnostic_record.get("reask_prompt_chars")
+            normal_chars = diagnostic_record.get("normal_prompt_chars")
+            added_expressions = diagnostic_record.get("ability_assertions_added")
+            if isinstance(reask_chars, int) and not isinstance(reask_chars, bool):
+                self._ledger_metrics["co_correction_events"] += 1
+                self._ledger_metrics["co_correction_reask_prompt_char_total"] += max(
+                    0, int(reask_chars)
+                )
+            if isinstance(normal_chars, int) and not isinstance(normal_chars, bool):
+                self._ledger_metrics["co_correction_normal_prompt_char_total"] += max(
+                    0, int(normal_chars)
+                )
+            if isinstance(added_expressions, int) and not isinstance(
+                added_expressions, bool
+            ):
+                self._ledger_metrics["retry_added_ability_expressions"] += max(
+                    0, int(added_expressions)
+                )
+            correction_model = diagnostic_record.get("model")
+            if isinstance(correction_model, str):
+                stats = self._model_stats.setdefault(
+                    correction_model, self._new_model_stats()
+                )
+                stats["co_correction_events"] = int(
+                    stats.get("co_correction_events", 0)
+                ) + 1
+                if isinstance(reask_chars, int) and not isinstance(reask_chars, bool):
+                    stats["co_correction_reask_prompt_char_total"] = int(
+                        stats.get("co_correction_reask_prompt_char_total", 0)
+                    ) + max(0, int(reask_chars))
+                if isinstance(normal_chars, int) and not isinstance(normal_chars, bool):
+                    stats["co_correction_normal_prompt_char_total"] = int(
+                        stats.get("co_correction_normal_prompt_char_total", 0)
+                    ) + max(0, int(normal_chars))
+                if isinstance(
+                    added_expressions, int
+                ) and not isinstance(added_expressions, bool):
+                    stats["retry_added_ability_expressions"] = int(
+                        stats.get("retry_added_ability_expressions", 0)
+                    ) + max(0, int(added_expressions))
         if event_type == "secret_role_leak_detected":
             # TASK-054: hardゲート（本当に秘匿情報を出した場合）だけを数える。
             self._ledger_metrics["secret_leaks_detected"] += 1
@@ -1159,6 +1494,42 @@ class GameLogger:
             "continuity_fold_saved_chars_total": 0,
             "prompt_gap_state_to_evidence_sum": 0.0,
             "prompt_gap_state_to_question_sum": 0.0,
+            # TASK-064: モデル別の役職能力の境界（境界節字数・隣接距離・観測カウンタ）。
+            # unsupported_role_action_count / claim_vs_engine_conflict_count は観測専用で、
+            # 本文の再生成には使われていない（ログ側で行動別と比較する）。CO補正の短縮効果は
+            # reask/normal の字数合計で持ち、finalize で倍率を出す。
+            "role_boundary_char_total": 0,
+            "role_boundary_sections": 0,
+            "prompt_gap_rbound_to_question_sum": 0.0,
+            "prompt_gap_rbound_to_own_speeches_sum": 0.0,
+            "claim_to_ability_delta_sum": 0.0,
+            "claim_to_ability_delta_count": 0,
+            "unsupported_role_action_count": 0,
+            "claim_vs_engine_conflict_count": 0,
+            "role_ability_assertions_observed": 0,
+            "retry_added_ability_expressions": 0,
+            "co_correction_events": 0,
+            "co_correction_reask_prompt_char_total": 0,
+            "co_correction_normal_prompt_char_total": 0,
+            # TASK-065: モデル別の名前内部解決（吸収した表記ゆれ／未解決／旧判定なら未知名前と
+            # 誤っていた数）と、実効コンテキストの証拠（設定・サーバー観測・ロード実測）。
+            # timeout縮小・thinking off を掛けた行動名もモデル別に残す（恒久適用していない
+            # ことをログ側で確かめられるようにする）。すべて観測専用で本文は変更しない。
+            "name_variant_mentions_absorbed": 0,
+            "unresolved_name_references": 0,
+            "legacy_unknown_name_flags_avoided": 0,
+            "name_mention_labels": {},
+            "context_integrity_checks": 0,
+            "context_configured_limit": 0,
+            "context_server_observed_limit": 0,
+            "context_loaded_from_ps": 0,
+            "context_modelfile_num_ctx": 0,
+            "context_requested_num_ctx": 0,
+            "context_adopted_num_ctx": 0,
+            "timeout_downgrade_events": 0,
+            "thinking_off_action_events": 0,
+            "stabilization_relaxations": 0,
+            "stabilized_actions": [],
             # TASK-059: 引用時点の内訳と、違反には数えない観察値（婉曲・一般名指し）
             "citation_status_counts": {},
             "hedged_pending_citations": 0,
@@ -1413,6 +1784,45 @@ class GameLogger:
             stats["avg_gap_state_to_question"] = round(
                 float(stats["prompt_gap_state_to_question_sum"]) / prompts, 4
             )
+            # TASK-064: モデル別の能力境界節の実測（1リクエスト平均の字数・隣接距離）と、
+            # 実行記録のない能力行使の観測数・エンジン結果との矛盾・CO補正の短縮効果。
+            # v5で質問直後に置いた境界が実際にどこへ着地したかをA/B比較できる形にする。
+            boundary_sections = int(stats.get("role_boundary_sections", 0))
+            stats["avg_claim_boundary_chars"] = (
+                round(int(stats.get("role_boundary_char_total", 0)) / boundary_sections, 1)
+                if boundary_sections
+                else 0.0
+            )
+            stats["avg_gap_role_boundary_to_question"] = round(
+                float(stats.get("prompt_gap_rbound_to_question_sum", 0.0)) / prompts, 4
+            )
+            stats["avg_gap_role_boundary_to_own_speeches"] = round(
+                float(stats.get("prompt_gap_rbound_to_own_speeches_sum", 0.0)) / prompts,
+                4,
+            )
+            delta_count = int(stats.get("claim_to_ability_delta_count", 0))
+            stats["avg_claim_to_ability_turn_delta"] = (
+                round(
+                    float(stats.get("claim_to_ability_delta_sum", 0.0)) / delta_count,
+                    2,
+                )
+                if delta_count
+                else 0.0
+            )
+            correction_events = int(stats.get("co_correction_events", 0))
+            if correction_events:
+                reask_chars = int(stats.get("co_correction_reask_prompt_char_total", 0))
+                normal_chars = int(
+                    stats.get("co_correction_normal_prompt_char_total", 0)
+                )
+                stats["avg_co_correction_reask_prompt_chars"] = round(
+                    reask_chars / correction_events, 1
+                )
+                # 短縮倍率（1.0未満なら通常プロンプトより短い）。完了条件の
+                # 「再要求が通常プロンプトより明確に短い」をモデル別数値で示す。
+                stats["co_correction_shortening_ratio"] = (
+                    round(reask_chars / normal_chars, 4) if normal_chars else None
+                )
 
         public_players_data = [
             {
@@ -1505,6 +1915,10 @@ class GameLogger:
             # TASK-055: 役職主張の出所台帳。公開面は全CO行を中立ラベルに揃え、エンジン照合の
             # 真偽は含まない（serialize_public() に真偽キーがないことはテストで検証する）。
             "role_provenance": state.role_provenance.serialize_public(),
+            # TASK-064: 役職能力の境界台帳（engine_action / public_role_claim /
+            # unsupported_role_action / inference）。公開面はカテゴリ合計と中立ラベルだけで、
+            # どのCOが本物か・実行記録との一致可否は管理者ビュー専用に残す。
+            "role_action_provenance": state.role_action_provenance.serialize_public(),
             "allow_bluff_role_claim": bool(
                 getattr(state, "allow_bluff_role_claim", ALLOW_BLUFF_ROLE_CLAIM_DEFAULT)
             ),
@@ -1534,6 +1948,28 @@ class GameLogger:
             # だけを次の発言へ渡す設定で、口調・論点・結論には干渉しない。
             "continuity_policy": continuity_policy_label(
                 getattr(state, "continuity_policy", CONTINUITY_POLICY_DEFAULT)
+            ),
+            # TASK-065: 意図分離・名前正規化・コンテキスト整合・処置スコープの方策ラベル。
+            # いずれも旧挙動へ戻せる（A/B比較用）で、発言の口調・論点・結論は変えない。
+            "timeline_intent_policy": timeline_intent_policy_label(
+                getattr(state, "timeline_intent_policy", TIMELINE_INTENT_POLICY_DEFAULT)
+            ),
+            "player_name_resolution_policy": name_resolution_policy_label(
+                getattr(
+                    state, "player_name_resolution_policy", NAME_RESOLUTION_POLICY_DEFAULT
+                )
+            ),
+            "context_integrity_policy": context_integrity_policy_label(
+                getattr(state, "context_integrity_policy", CONTEXT_INTEGRITY_POLICY_DEFAULT)
+            ),
+            "output_stabilization_scope": output_stabilization_scope_label(
+                getattr(
+                    state, "output_stabilization_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT
+                )
+            ),
+            # 実効コンテキスト整合チェックで集めた証拠（数値のみ。公開プロンプトには載らない）
+            "context_integrity_evidence": dict(
+                getattr(state, "context_integrity_checks", {}) or {}
             ),
             "unverified_hypothesis_as_fact_alerts": sum(
                 alert.category == UNVERIFIED_HYPOTHESIS_AS_FACT
@@ -1570,6 +2006,59 @@ class GameLogger:
                     1,
                 ),
                 "timeline_violation_counts": dict(self._timeline_category_counts),
+                # TASK-065: 未発言者に関する文の意図内訳。違反（future_event_reference）へ数える
+                # のは実質的な過去帰属の断定だけで、これから説明を求める質問行為とこれからの
+                # 行動推測は別へ分ける（game_425755ce9a83 Day2 T1 Player 1 の誤検出を分離した効果）
+                "timeline_unspoken_intent_counts": dict(self._timeline_intent_counts),
+                "timeline_past_attributions_per_body": round(
+                    int(self._ledger_metrics["timeline_past_attributions_observed"])
+                    / max(1, int(self._ledger_metrics["timeline_reference_checks"])),
+                    4,
+                ),
+                "timeline_question_acts_per_body": round(
+                    int(self._ledger_metrics["timeline_future_question_acts"])
+                    / max(1, int(self._ledger_metrics["timeline_reference_checks"])),
+                    4,
+                ),
+                "timeline_action_speculations_per_body": round(
+                    int(self._ledger_metrics["timeline_future_action_speculations"])
+                    / max(1, int(self._ledger_metrics["timeline_reference_checks"])),
+                    4,
+                ),
+                # TASK-065: プレイヤー名表記ゆれの内部解決。旧判定（文字列一致）なら未知名前と
+                # 誤った件数を回避した数として分け、公開本文の表記は変えていない実測を残す
+                "name_variants_absorbed_total": int(
+                    self._ledger_metrics["name_variant_mentions_absorbed"]
+                ),
+                "legacy_unknown_name_flags_avoided_total": int(
+                    self._ledger_metrics["legacy_unknown_name_flags_avoided"]
+                ),
+                "unresolved_name_references_total": int(
+                    self._ledger_metrics["unresolved_name_references"]
+                ),
+                # TASK-065: thinking・timeout処置のスコープ（モデル×行動へ限定した実績）と
+                # 実効コンテキスト整合チェックの実施・不一致・縮退（数値だけの観測）
+                "timeout_downgrades_scoped_to_action_rate": round(
+                    int(self._ledger_metrics["timeout_downgrades_scoped_to_action"])
+                    / max(1, int(self._ledger_metrics["timeout_downgrade_events"])),
+                    4,
+                ),
+                "stabilization_relaxations_total": int(
+                    self._ledger_metrics["stabilization_relaxations"]
+                ),
+                "context_integrity_mismatch_models": sorted(self._context_mismatch_models),
+                "context_integrity_checked_models": sorted(self._context_integrity_models),
+                # TASK-065（レビュー対応）: ロード値を取れない解決数と、送信後に実ロード値へ
+                # 取り直した回数。cap採用が実送信へ効いた件数も併せて出す（数値だけ）
+                "context_resolutions_provisional": int(
+                    self._ledger_metrics["context_resolutions_provisional"]
+                ),
+                "context_resolutions_refreshed_after_load": int(
+                    self._ledger_metrics["context_resolutions_refreshed_after_load"]
+                ),
+                "context_integrity_caps_applied_events": int(
+                    self._ledger_metrics["context_integrity_caps_applied"]
+                ),
                 # TASK-057: プロンプト契約の効果（core を保ったまま総量を減らせたか、同じ制約の
                 # 再掲が減ったか、どの段階で何を落としたかをA/B比較できるようにする）
                 "avg_prompt_user_chars": round(
@@ -1713,6 +2202,80 @@ class GameLogger:
                     float(self._ledger_metrics["prompt_gap_state_to_question_sum"])
                     / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
                     4,
+                ),
+                # TASK-064: 役職能力の境界節と観測の合計（公開指標は中立な数値だけ）。
+                # 保有者別の分類内訳は管理者ビュー（serialize_admin）側だけで持つ。
+                # unsupported_role_action は観測専用で本文の再生成には使われていないため、
+                # ここでの増加は「発言が消えた」ことを意味しない。
+                "role_boundary_sections": int(
+                    self._ledger_metrics["role_boundary_sections"]
+                ),
+                "avg_claim_boundary_chars": round(
+                    int(self._ledger_metrics["role_boundary_char_total"])
+                    / max(1, int(self._ledger_metrics["role_boundary_sections"])),
+                    1,
+                ),
+                "avg_gap_role_boundary_to_question": round(
+                    float(self._ledger_metrics["prompt_gap_rbound_to_question_sum"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    4,
+                ),
+                "avg_gap_role_boundary_to_own_speeches": round(
+                    float(self._ledger_metrics["prompt_gap_rbound_to_own_speeches_sum"])
+                    / max(1, int(self._ledger_metrics["prompt_requests_contracted"])),
+                    4,
+                ),
+                "role_ability_assertions_observed": int(
+                    self._ledger_metrics["role_ability_assertions_observed"]
+                ),
+                "unsupported_role_action_count": int(
+                    self._ledger_metrics["unsupported_role_action_count"]
+                ),
+                "claim_vs_engine_conflict_count": int(
+                    self._ledger_metrics["claim_vs_engine_conflict_count"]
+                ),
+                "retry_added_ability_expressions": int(
+                    self._ledger_metrics["retry_added_ability_expressions"]
+                ),
+                # 婉曲（疑問・仮定・引用・否定）の能力言及は断定的な行使として数えない。
+                # 台帳（RoleActionProvenance）が持った観測値をここへ写す（中立な件数のみ）。
+                "hedged_ability_mentions_observed": int(
+                    getattr(
+                        getattr(state, "role_action_provenance", None),
+                        "hedged_mentions_observed",
+                        0,
+                    )
+                ),
+                "co_correction_events": int(self._ledger_metrics["co_correction_events"]),
+                "avg_co_correction_reask_prompt_chars": round(
+                    int(self._ledger_metrics["co_correction_reask_prompt_char_total"])
+                    / max(1, int(self._ledger_metrics["co_correction_events"])),
+                    1,
+                ),
+                # 補正プロンプトの通常プロンプト比（<1 で短縮。完了条件の数値確認用）
+                "co_correction_shortening_ratio": (
+                    round(
+                        int(self._ledger_metrics["co_correction_reask_prompt_char_total"])
+                        / int(
+                            self._ledger_metrics["co_correction_normal_prompt_char_total"]
+                        ),
+                        4,
+                    )
+                    if int(self._ledger_metrics["co_correction_events"]) > 0
+                    and int(
+                        self._ledger_metrics["co_correction_normal_prompt_char_total"]
+                    )
+                    > 0
+                    else None
+                ),
+                "avg_claim_to_ability_turn_delta": (
+                    round(
+                        float(self._ledger_metrics["claim_to_ability_delta_sum"])
+                        / int(self._ledger_metrics["claim_to_ability_delta_count"]),
+                        2,
+                    )
+                    if int(self._ledger_metrics["claim_to_ability_delta_count"]) > 0
+                    else 0.0
                 ),
                 # TASK-059: 引用した相手の時点別内訳（同一ターン先行／別ターン既発言／
                 # 死亡後履歴／未発言）。違反指摘の future_event_reference_categories とは
@@ -1943,9 +2506,83 @@ class GameLogger:
             # TASK-055: 管理者用。エンジンが発行した占い結果（保有者名つき）と各CO行の照合結果を
             # ここにだけ残す。公開ログ側には真偽キーを含む形では出さない。
             "role_provenance": state.role_provenance.serialize_admin(),
+            # TASK-064: 管理者用。エンジンが実行した能力行動（占い・襲撃）の実行記録と、
+            # 公開発言で観測した能力行使表現のカテゴリ内訳・本人エンジン結果との矛盾を出す。
+            # この情報を持つのは管理者ログだけで、公開台帳・checkpoint・プロンプトには混入しない。
+            "role_action_provenance": state.role_action_provenance.serialize_admin(),
             "traces": private_traces_data,
         }
         self.append_record(public_summary, private_summary)
+
+
+def run_context_integrity_preflight(
+    client: object,
+    state: object,
+    logger: GameLogger,
+) -> list[str]:
+    """TASK-065: ゲーム開始前にモデル別の実効コンテキスト証拠を1度だけ集める。
+
+    `configured`（プレイヤー/CLI設定）、`server_observed`（プロセスenv・Modelfile）、
+    `loaded`（/api/psの実測）、`requested`（今回送りたい値）を1つの値へ潰さず分けて記録し、
+    不一致は起動時の警告として出す。方策 cap のときだけ採用値を安全側へ縮め、実際の送信は
+    OllamaActions側がstateを読んで反映する。議論本文・プロンプトには一切載らない（数値と
+    運用警告のみ）。強化モデルで「timeout後に初めて不一致を知る」状態を避けるためのチェック。
+    """
+    policy = normalize_context_integrity_policy(
+        getattr(state, "context_integrity_policy", CONTEXT_INTEGRITY_POLICY_DEFAULT)
+    )
+    if str(policy) == "off":
+        return []
+    env_value, env_key = process_env_context()
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for player in getattr(state, "players", ()) or ():
+        model = str(getattr(player, "model", "") or "")
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        diagnostics: dict[str, object] = {}
+        getter = getattr(client, "context_diagnostics", None)
+        if callable(getter):
+            try:
+                raw = getter(model)
+            except Exception as error:  # noqa: BLE001 - 診断失敗でゲームを止めない
+                raw = {"context_diagnostics_error": str(error)}
+            if isinstance(raw, dict):
+                diagnostics = raw
+        configured = getattr(player, "num_ctx", None)
+        source = "player_setting"
+        if configured is None:
+            configured = getattr(player, "recommended_num_ctx", None)
+            source = "player_recommended_setting"
+        if configured is None:
+            configured = getattr(state, "cli_num_ctx", None)
+            source = "cli_setting"
+        check = assess_context_integrity(
+            model,
+            configured=configured,
+            configured_source=source,
+            ps_loaded_context=diagnostics.get("ollama_ps_context"),
+            modelfile_num_ctx=diagnostics.get("modelfile_num_ctx"),
+            process_env_num_ctx=env_value,
+            max_num_ctx=getattr(player, "max_num_ctx", None),
+            policy=policy,
+        )
+        checks = getattr(state, "context_integrity_checks", None)
+        if isinstance(checks, dict):
+            checks[model] = check.to_fields()
+        record: dict[str, object] = {
+            "type": "context_integrity_preflight",
+            **check.to_fields(),
+            "process_env_key": env_key,
+            "context_diagnostics_error": diagnostics.get("context_diagnostics_error"),
+            "note": "起動時に1度だけ確認した実効コンテキストの証拠（本文・役職は含まない）",
+        }
+        logger.append_record(record, record)
+        for line in check.warning_lines():
+            warnings.append(line)
+            print(f"  [コンテキスト整合] {line}", flush=True)
+    return warnings
 
 
 def print_banner(text: str) -> None:
@@ -2037,6 +2674,20 @@ def run_cli_game(args: argparse.Namespace) -> int:
     continuity_policy = normalize_continuity_policy(
         getattr(args, "continuity", CONTINUITY_POLICY_DEFAULT)
     )
+    # TASK-065: 運用安定化の4方策を正規化する（既定は warn / separated / normalized / action。
+    # いずれも旧挙動を明示設定で選べる＝同一seedでのA/B比較が可能。本文の自由は削らない）。
+    context_integrity_policy = normalize_context_integrity_policy(
+        getattr(args, "context_integrity", CONTEXT_INTEGRITY_POLICY_DEFAULT)
+    )
+    timeline_intent_policy = normalize_timeline_intent_policy(
+        getattr(args, "timeline_intent", TIMELINE_INTENT_POLICY_DEFAULT)
+    )
+    player_name_resolution_policy = normalize_name_resolution_policy(
+        getattr(args, "player_name_resolution", NAME_RESOLUTION_POLICY_DEFAULT)
+    )
+    output_stabilization_scope = normalize_output_stabilization_scope(
+        getattr(args, "output_stability_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT)
+    )
     options["continuity_policy"] = continuity_policy
     if args.thinking in {"on", "off"}:
         options["thinking"] = args.thinking == "on"
@@ -2076,6 +2727,12 @@ def run_cli_game(args: argparse.Namespace) -> int:
     # 台帳側のポリシーとも揃える）。ここでの再正規化は行わず、台帳へも同じ値を書く。
     state.continuity_policy = continuity_policy
     state.continuity_state.policy = continuity_policy
+    # TASK-065: 4つの運用ポリシーをstateへ反映する（builder・engine・llm_actions が同じ値を
+    # 読む）。整合チェックは送信num_ctxの縮退にだけ使い、プロンプト本文へは書かない。
+    state.context_integrity_policy = context_integrity_policy
+    state.timeline_intent_policy = timeline_intent_policy
+    state.player_name_resolution_policy = player_name_resolution_policy
+    state.output_stabilization_scope = output_stabilization_scope
 
     meta = {
         "mode": args.mode,
@@ -2115,6 +2772,13 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "prompt_layout_policy": prompt_layout_policy,
         # TASK-062: 論理状態の正規化ポリシー（normalized/off）をログへ残す
         "continuity_policy": continuity_policy,
+        # TASK-065: 運用安定化の4方策をログへ残す（A/B比較の判別用）。整合チェックは
+        # off/warn/cap、意図分離は separated/literal、名前正規化は normalized/literal、
+        # 処置スコープは action/model。いずれも本文の自由には干渉しない設定のみ。
+        "context_integrity_policy": context_integrity_policy,
+        "timeline_intent_policy": timeline_intent_policy,
+        "player_name_resolution_policy": player_name_resolution_policy,
+        "output_stabilization_scope": output_stabilization_scope,
         "base_url": args.base_url,
         "show_private": args.show_private,
         "response_language": getattr(args, "language", None),
@@ -2467,7 +3131,20 @@ def run_cli_game(args: argparse.Namespace) -> int:
     def on_engine_event(event: dict[str, object]) -> None:
         """Persist engine events and display public speeches as they arrive."""
         nonlocal pending_claims, pending_claim_speaker
-        logger.append_record(event)
+        # TASK-064: 能力行使の分類観測（実行記録との一致可否・カテゴリ・矛盾）は保有者別の
+        # 真偽を含むため、公開JSONLには出さない（TASK-055で決めた線引きと同じ）。
+        # 管理者レコード（private側）だけに残し、公開側は中立な本文とID表示のままとする。
+        public_event = {
+            key: value
+            for key, value in event.items()
+            if key
+            not in {
+                "role_ability_observations",
+                "claim_to_ability_turn_delta",
+                "claim_to_ability_order",
+            }
+        }
+        logger.append_record(public_event, event)
         event_type = event.get("type")
         if event_type in PUBLIC_CLAIM_DISPLAY_TYPES:
             claimant = str(event.get("claimant", "?"))
@@ -2503,6 +3180,11 @@ def run_cli_game(args: argparse.Namespace) -> int:
             logger.finalize(state, traces=None, error=err_msg)
             print(f"ログを保存しました: {logger.log_file}")
             return 1
+        # TASK-065: ゲーム開始前に実効コンテキストの証拠を1度だけ集める。設定値（configured）と
+        # サーバー観測値・ロード実測の不一致を、約360秒のtimeoutのあとで初めて知る状態を避ける。
+        # 方策 cap のときだけ採用値を安全側へ縮め（warnは警告のみで送信値は不変）、議論本文へは
+        # 何も書かない。診断が取れなくてもゲームはそのまま続行する。
+        run_context_integrity_preflight(client, state, logger)
         def on_action_event(event: dict[str, object]) -> None:
             nonlocal active_call
             if event["type"] == "llm_action_started":
@@ -2798,6 +3480,69 @@ def build_parser() -> argparse.ArgumentParser:
             "regeneration). Use this for A/B runs of bluff freedom."
         ),
     )
+    # TASK-065: 運用安定化の4設定（実効コンテキスト整合／未発言者の意図分離／プレイヤー名
+    # 表記ゆれの内部解決／thinking・timeout処置のスコープ）。いずれも観測と数値の制御だけで、
+    # 議論本文の語彙・口調・結論には干渉せず、旧挙動へ戻してA/B比較できる。
+    parser.add_argument(
+        "--context-integrity",
+        dest="context_integrity",
+        choices=["off", "warn", "cap"],
+        default="warn",
+        help=(
+            "How the effective context limit is checked before sending requests. "
+            "warn (default): keep the configured value but log configured / "
+            "server_observed / loaded separately and print a warning at startup, so "
+            "a mismatch is known before a timeout instead of after it. cap: adopt "
+            "the safe value confirmed from server evidence when the configuration "
+            "exceeds it. off: skip the check (pre-TASK-065 behavior for A/B runs). "
+            "This never adds constraint text to the discussion prompt."
+        ),
+    )
+    parser.add_argument(
+        "--timeline-intent",
+        dest="timeline_intent",
+        choices=["separated", "literal"],
+        default="separated",
+        help=(
+            "How future-reference detection reads sentences about a player who has "
+            "not spoken yet. separated (default): only claiming that such a player "
+            "already said something counts as a future reference; asking them to "
+            "explain from now on and speculating about their next action are logged "
+            "as separate intents and never as violations. literal: pre-TASK-065 flat "
+            "counting for A/B comparison of false-positive rates. Bodies stay "
+            "published word for word either way; questioning and doubt stay free."
+        ),
+    )
+    parser.add_argument(
+        "--player-name-resolution",
+        dest="player_name_resolution",
+        choices=["normalized", "literal"],
+        default="normalized",
+        help=(
+            "How player names written by a model are matched inside the ledger and "
+            "diagnostics. normalized (default): resolve spacing variants, full-width "
+            "text, lowercase spellings and alternative labels into the canonical name "
+            "for internal lookups only, so a non-breaking space no longer triggers an "
+            "unknown-player repair; numbers with no such player stay unresolved and "
+            "are still observed. literal: old exact-string matching (A/B baseline). "
+            "Published text is never rewritten in either mode."
+        ),
+    )
+    parser.add_argument(
+        "--output-stability-scope",
+        dest="output_stability_scope",
+        choices=["action", "model"],
+        default="action",
+        help=(
+            "Where timeout narrowing and thinking-off switches apply after a failure. "
+            "action (default): apply them to that model and action only, using the "
+            "recent per-action history, and lift them once bodies keep arriving - a "
+            "vote that ran out of budget no longer constrains discussion or divination "
+            "for the same model. model: legacy whole-model downgrade (pre-TASK-065) "
+            "for A/B comparison. Neither mode changes tone, topics or conclusions, and "
+            "a generated body is always preserved."
+        ),
+    )
     # TASK-058: core予算の段階圧縮（anchor/recent/historical に分け、歴史情報の本文だけを短い行へ畳む）
     parser.add_argument(
         "--core-compression",
@@ -2817,21 +3562,25 @@ def build_parser() -> argparse.ArgumentParser:
             "prescribes tone, topics or reasoning order."
         ),
     )
-    # TASK-060 / TASK-062: 議論プロンプトの節順（配置だけ変え、内容と発言の自由は変えない）
+    # TASK-060 / TASK-062 / TASK-064: 議論プロンプトの節順（配置だけ変え、内容と発言の自由は変えない）
     parser.add_argument(
         "--prompt-layout",
         dest="prompt_layout",
-        choices=["v4", "v3", "v2", "auto"],
+        choices=["v5", "v4", "v3", "v2", "auto"],
         default=PROMPT_LAYOUT_POLICY_DEFAULT,
         help=(
             "Where each information block sits inside the discussion prompt. Only positions and "
             "duplicate wording change - tone, length, topics, conclusions and reasoning order stay "
-            "the model's own. v4 (default): the v3 chain plus [CONTINUITY_CHECKPOINT], the "
-            "engine-issued logical state (confirmed facts, public statements, refuted hypotheses "
-            "and open questions as short id-bearing lines with authority tags) sitting directly "
-            "after the speech evidence and immediately before the current question, so the player "
-            "carries state across days without rereading old bodies. v3: the same chain without "
-            "that section - your action record, board facts and engine-issued "
+            "the model's own. v5 (default): the v4 chain plus [ROLE_ACTION_BOUNDARY], the short "
+            "engine-issued line pair that separates what the engine actually executed for you "
+            "([DONE], divination/attack nights - results stay in your private section) from what "
+            "you publicly claimed ([CLAIM], unverified), sitting directly after the current "
+            "question and immediately before your own speeches, so bluffing, doubt and stance "
+            "changes stay free while an ability sentence cannot be misread as an engine record; "
+            "no bodies are restated. v4: the same chain without that boundary section (A/B base "
+            "for prompt size and unsupported_role_action rates); it keeps [CONTINUITY_CHECKPOINT] "
+            "after the speech evidence and before the current question. v3: no checkpoint either - "
+            "your action record, board facts and engine-issued "
             "private info sit early; weak-middle band holds only droppable derived content (theory "
             "card, topic digest, hypothesis diff, temporary guidance, round header); the tail runs "
             "claim index -> timeline -> speech evidence -> current question -> your speeches and "
@@ -2842,8 +3591,10 @@ def build_parser() -> argparse.ArgumentParser:
             "v2: TASK-058 ordering. auto: follow --prompt-contract (legacy keeps the old byte "
             "order). Compare one seed with prompt_zone_*_chars, prompt_gap_*, "
             "prompt_instructions_to_end_chars, prompt_theory_card_chars and "
-            "duplicate_constraint_total, and the continuity_* keys (avg_continuity_state_chars, "
-            "evidence_continuity_folded_total, continuity_fold_saved_chars_total)."
+            "duplicate_constraint_total, the continuity_* keys (avg_continuity_state_chars, "
+            "evidence_continuity_folded_total, continuity_fold_saved_chars_total), and the "
+            "TASK-064 keys (avg_claim_boundary_chars, avg_gap_role_boundary_to_question, "
+            "unsupported_role_action_count, co_correction_shortening_ratio)."
         ),
     )
     # TASK-062: 日をまたぐ論理状態の正規化（エンジン発行の状態差分だけを使い、口調・論点には干渉しない）

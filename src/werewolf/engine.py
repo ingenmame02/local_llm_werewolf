@@ -60,10 +60,14 @@ from .role_provenance import (
     PUBLIC_LINE_LABEL,
     SOURCE_COMPATIBILITY_TEXT,
 )
+# TASK-064: 役職能力の実行記録台帳（RoleActionProvenance）。夜の実行を [DONE] として登録し、
+# 公開発言の能力行使表現は観測専用で分類する（本文は変更しない）。
+from .role_action_provenance import KIND_ATTACK, KIND_DIVINATION
 # TASK-056: Day内イベントの時系列台帳と未来参照の観測（検出は観測専用で本文は書き換えない）
 from .day_timeline import (
     DAY_TIMELINE_POLICY_DEFAULT,
     DAY_TIMELINE_POLICY_OFF,
+    TIMELINE_INTENT_POLICY_DEFAULT,
     TurnSnapshot,
     inspect_public_body,
     normalize_day_timeline_policy,
@@ -1146,6 +1150,12 @@ class GameEngine:
                 target if target in candidate_set.candidates else candidate_set.fallback
             )
             if self.state.pending_attack is not None:
+                # TASK-064: 襲撃はチーム決定だが、全人狼本人の実行記録として登録する
+                # （「襲った」という発言の裏付けを [DONE] 側で持たせるため）。
+                for wolf in wolves:
+                    self.state.role_action_provenance.record_engine_action(
+                        wolf.name, KIND_ATTACK, self.state.day
+                    )
                 self._record_action_memory(
                     player=wolves[0],
                     action_type="attack",
@@ -1207,6 +1217,11 @@ class GameEngine:
         )
         self.state.seer_results[target] = result
         self.state.seer_result_history.append((self.state.day, target, result))
+        # TASK-064: エンジンが実際に占いを実行した事実を本人用の実行記録へ積む。
+        # 判定そのものは非公開のまま（台帳には日だけが残る）。
+        self.state.role_action_provenance.record_engine_action(
+            seer.name, KIND_DIVINATION, self.state.day
+        )
         self.state.fact_ledger.confirmed_facts.append(
             LedgerFact(
                 day=self.state.day,
@@ -1976,6 +1991,9 @@ class GameEngine:
                 actor_role=actor.role.value if actor is not None else None,
                 discussion_turn=self.state.discussion_turn,
             )
+            # TASK-064: COの初出を本人の境界台帳に刻み、先に能力表現が出ていた場合は
+            # その距離だけを中立な数値イベントにする（真偽は一切載せない）。
+            self._record_role_action_claim(speaker, actor)
             self._emit_public_claim(
                 "claim_role_corrected"
                 if correction and prior_role is not None
@@ -2103,6 +2121,8 @@ class GameEngine:
             result=claimed_result,
             discussion_turn=self.state.discussion_turn,
         )
+        # TASK-064: 結果行の公開でもCO初出記録を確認する（既にあれば no-op）。
+        self._record_role_action_claim(speaker, actor)
         self._emit_public_claim(
             "seer_result_corrected"
             if correction and previous_result is not None
@@ -2485,6 +2505,9 @@ class GameEngine:
         inspectable = message.speaker != "system" and policy != DAY_TIMELINE_POLICY_OFF
         snapshot = self.state.timeline_snapshot(message.speaker) if inspectable else None
         appended = self.state.append_discussion_message(message)
+        # TASK-064: 発言本文の能力行使表現はコールバックの有無に関わらず観測する
+        # （分類専用で本文は変更しない。公開されるメッセージ自体はそのまま）。
+        role_action_fields = self._role_action_observation_fields(appended)
         if self.event_callback is None:
             return
         event: dict[str, object] = {
@@ -2504,7 +2527,81 @@ class GameEngine:
         event.update(
             self._timeline_reference_fields(appended, snapshot, policy)
         )
+        # TASK-064: 能力行使表現の管理者ビュー観測を同じイベントに添える（公開本文は不変）
+        event.update(role_action_fields)
         self.event_callback(event)
+
+    def _record_role_action_claim(self, speaker: str, actor: object) -> None:
+        """TASK-064: CO初出を境界台帳に刻み、能力表現が先に出ていた場合距離だけ出す。
+
+        発行するのは中立な数値のみ（どのCOが本物かは一切示さない）。本文・他の台帳へは
+        何も書き込まない。観測専用で、ここから再生成や無害化は行わない。
+        """
+        tracker = getattr(self.state, "role_action_provenance", None)
+        if tracker is None:
+            return
+        delta = tracker.mark_public_claim(
+            speaker, int(self.state.day), int(self.state.discussion_turn or 1)
+        )
+        if delta is not None:
+            self._emit_public_claim(
+                "claim_to_ability_distance",
+                day=int(self.state.day),
+                discussion_turn=int(self.state.discussion_turn or 1),
+                player=speaker,
+                model=getattr(actor, "model", None),
+                turn_delta=int(delta),
+                order="ability_then_claim",
+            )
+
+    def _role_action_observation_fields(self, message: Message) -> dict[str, object]:
+        """TASK-064: 公開発言の中の能力行使表現を観測する（本文は変更しない）。
+
+        分類・本人エンジン結果との一致可否はログの管理者ビュー用フィールドにだけ残す。
+        公開面では TASK-055 と同じ中立ラベル（public_claim_line）で、本文も台帳も
+        同じ扱いのままだ。検出しても発言の再生成・無害化・言い換えは一切行わない。
+        """
+        if message.speaker == "system":
+            return {}
+        tracker = getattr(self.state, "role_action_provenance", None)
+        if tracker is None:
+            return {}
+        actor = next(
+            (player for player in self.state.players if player.name == message.speaker),
+            None,
+        )
+        # 本人分の占い結果だけを照合に使う（他者分は絶対に渡さない）
+        own_results = (
+            dict(self.state.seer_results)
+            if actor is not None and actor.role is Role.SEER
+            else {}
+        )
+        was_marked_ability = message.speaker in tracker.first_ability_turn
+        observations = tracker.observe_public_speech(
+            player=message.speaker,
+            day=int(self.state.day),
+            discussion_turn=int(message.turn or self.state.discussion_turn or 1),
+            text=message.content,
+            own_engine_results=own_results,
+            allow_bluff_role_claim=bool(
+                getattr(self.state, "allow_bluff_role_claim", True)
+            ),
+            known_player_names=tuple(player.name for player in self.state.players),
+        )
+        fields: dict[str, object] = {}
+        if not observations:
+            return fields
+        # ログ用（管理者ビュー）。公開プロンプトには絶対に流さない。
+        fields["role_ability_observations"] = [o.admin_view() for o in observations]
+        fields["role_action_model"] = getattr(actor, "model", None)
+        if not was_marked_ability and not (message.speaker in tracker.first_ability_turn):
+            return fields
+        if not was_marked_ability:
+            delta = tracker.last_claim_to_ability_delta
+            if delta is not None:
+                fields["claim_to_ability_turn_delta"] = int(delta)
+                fields["claim_to_ability_order"] = "claim_then_ability"
+        return fields
 
     def _timeline_reference_fields(
         self,
@@ -2522,6 +2619,11 @@ class GameEngine:
             message.content,
             snapshot,
             tuple(player.name for player in self.state.players),
+            # TASK-065: 未発言者に関する文の意図分離（既定 separated）。
+            # literal はTASK-059までの旧算入を再現するA/B比較用の設定で、本文は変わらない。
+            intent_policy=getattr(
+                self.state, "timeline_intent_policy", TIMELINE_INTENT_POLICY_DEFAULT
+            ),
         )
         timeline = self.state.public_timeline
         # TASK-059: 本文が空のときは検査そのものが空振りなので、検査対象には数えず

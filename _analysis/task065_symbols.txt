@@ -1,0 +1,266 @@
+===== ollama.py (552 lines)
+--- [def context_diagnostics] hits=1
+386: def context_diagnostics(self, model: str) -> dict[str, object]:
+--- [ollama_ps_context] hits=3
+357: def parse_ollama_ps_context(output: str, model: str) -> int | None:
+394: "ollama_ps_context": None,
+445: diagnostics["ollama_ps_context"] = api_model.get("context_length")
+--- [modelfile_num_ctx] hits=10
+392: "modelfile_num_ctx": None,
+393: "modelfile_num_ctx_error": None,
+402: diagnostics["modelfile_num_ctx"] = (
+416: parsed_context = self.parse_modelfile_num_ctx(
+420: diagnostics["modelfile_num_ctx"] = parsed_context
+422: diagnostics["modelfile_num_ctx_error"] = (
+427: diagnostics["modelfile_num_ctx_error"] = "ollama executable not found"
+429: diagnostics["modelfile_num_ctx_error"] = "ollama show --modelfile timed out"
+431: diagnostics["modelfile_num_ctx_error"] = str(error)
+499: def parse_modelfile_num_ctx(output: str) -> int | None:
+--- [def ping] hits=1
+171: def ping(self) -> bool:
+===== context_budget.py (152 lines)
+--- [^def |^class |limit|conflict] hits=22
+6: 比較し、設定値が観測値を超える場合は `conflict` を記録する（設定値と実効値の曖昧な
+10: - `configured_context_limit`: プレイヤー/CLI設定由来の上限（明示設定はOllama既定値を上書きする）
+11: - `server_observed_context_limit`: /api/ps・プロセスenv・Modelfileから観測したサーバー側実効値
+13: - `effective_context_limit`: 互換名称。優先順位で採用された単一値（`limit`）であり、
+39: def parse_positive_int(value: object) -> int | None:
+54: def process_env_context(
+67: class EffectiveContextResolution:
+73: - `limit`: 優先順位で採用された単一値（実際にリクエストへ送る根拠値）。
+74: 互換名称 `effective_context_limit` の実体で、設定があれば `configured`、
+78: limit: int | None
+82: conflict: bool = False
+96: def resolve_effective_context_limit(
+99: """複数ソースの実効num_ctxを1つの採用値（`limit`）へ解決する。
+102: `limit` = `configured`）。設定値がなければサーバー観測値（/api/ps > env > Modelfile の順）を
+103: 採用する（`limit` = `server_observed`）。採用値がサーバー観測値の最大値より大きい場合は
+104: `conflict=True`（送信num_ctxはOllama既定値を上書きできるが、観測実効値との差を
+105: ログで検証可能にする）。旧名称 `effective_context_limit` はこの `limit` の互換名称として
+114: return EffectiveContextResolution(limit=None, source=None, candidates={})
+137: conflict = (
+143: limit=adopted,
+146: conflict=conflict,
+152: return EffectiveContextResolution(limit=None, source=None, candidates=present)
+===== llm_actions.py (6755 lines)
+--- [def _resolve_context_budget] hits=1
+836: def _resolve_context_budget(
+--- [effective_context_resolution] hits=2
+881: "effective_context_resolution",
+6259: # 単一値として解決（モデル別キャッシュ・初回のみeffective_context_resolutionイベント記録）。
+--- [def _options_for] hits=1
+5239: def _options_for(
+--- [timed_out] hits=11
+711: timed_out: bool = False,
+737: timed_out=timed_out,
+5330: capabilities.get("timed_out") is True
+5384: self.state.model_capabilities.get(actor.model, {}).get("timed_out") is True
+5476: first_detection = capabilities.get("timed_out") is not True
+5477: capabilities["timed_out"] = True
+5847: timed_out = error.kind == "timeout"
+5852: timed_out=timed_out,
+5853: transport_error=not timed_out,
+5880: timed_out=timed_out,
+5881: transport_error=not timed_out,
+--- [thinking_budget_disabled] hits=0
+
+--- [def _record_generation_failure] hits=1
+5827: def _record_generation_failure(
+--- [output_budget_trace|OutputBudgetTrace] hits=3
+60: from .output_budget_trace import (
+63: OutputBudgetTrace,
+690: self._output_trace = OutputBudgetTrace()
+--- [def _short_retry_prompt|short_retry] hits=4
+719: short_retry: bool = False,
+745: short_retry=short_retry,
+5725: short_retry: bool = False,
+5820: short_retry=short_retry
+--- [LEDGER_REPAIR_ISSUES] hits=3
+395: LEDGER_REPAIR_ISSUES: frozenset[str] = frozenset(
+2627: and response_issue in LEDGER_REPAIR_ISSUES
+2699: and response_issue in LEDGER_REPAIR_ISSUES
+--- [unknown_player_reference] hits=6
+412: "unknown_player_reference",
+3396: "unknown_player_reference": "Do not mention non-existent player names; refer only to current players.",
+4636: elif issue == "unknown_player_reference":
+4659: "unknown_player_reference",
+4697: or issue == "unknown_player_reference"
+4958: return "unknown_player_reference"
+--- [unresolvable_references] hits=0
+
+===== engine.py (2782 lines)
+--- [future_event_reference] hits=0
+
+--- [inspect_public_body] hits=2
+71: inspect_public_body,
+2617: report = inspect_public_body(
+--- [unknown_player_reference] hits=0
+
+--- [ledger_repair] hits=0
+
+--- [def record_speech|speech_id] hits=12
+602: speech_id = sum(
+610: speech_id=speech_id,
+628: "speech_id": speech_id,
+1461: speech_id=len(self.state.conversation_log) + 1,
+1473: speech_id=len(self.state.conversation_log) + 1,
+1489: speech_id=len(self.state.conversation_log) + 1,
+1501: speech_id=len(self.state.conversation_log) + 1,
+1511: speech_id=len(self.state.conversation_log) + 1,
+1690: speech_id=len(self.state.conversation_log) + 1,
+1702: speech_id=len(self.state.conversation_log) + 1,
+2524: if appended.speech_id is not None:
+2525: event["speech_id"] = int(appended.speech_id)
+--- [def _diagnostic] hits=0
+
+===== cli.py (3363 lines)
+--- [add_argument\(\"--day-timeline\"] hits=0
+
+--- [add_argument\(\"--continuity\"] hits=0
+
+--- [future_event_references] hits=3
+248: "future_event_references": 0,
+513: self._ledger_metrics["future_event_references"] += findings
+1776: int(self._ledger_metrics["future_event_references"])
+--- [timeline_] hits=66
+74: day_timeline_policy_label,
+75: normalize_day_timeline_policy,
+247: "timeline_reference_checks": 0,
+249: "timeline_attributed_references": 0,
+250: "timeline_unresolvable_references": 0,
+251: "day_timeline_chars_total": 0,
+252: "day_timeline_lines_total": 0,
+253: "day_timeline_sections": 0,
+291: "prompt_gap_timeline_to_evidence_sum": 0.0,
+327: self._timeline_category_counts: dict[str, int] = {
+339: self._timeline_checks_skipped_empty_body = 0
+347: self._timeline_public_path_counts: dict[str, int] = {}
+375: self._timeline_public_path_counts[path] = (
+376: self._timeline_public_path_counts.get(path, 0) + 1
+489: if bool(diagnostic_record.get("timeline_observed")):
+491: elif diagnostic_record.get("timeline_observed") is False:
+492: self._bump_public_path("public_speech_uninspected_timeline_off")
+509: and bool(diagnostic_record.get("timeline_observed"))
+511: self._ledger_metrics["timeline_reference_checks"] += 1
+514: self._ledger_metrics["timeline_attributed_references"] += int(
+517: self._ledger_metrics["timeline_unresolvable_references"] += int(
+525: self._timeline_category_counts[category] = (
+526: self._timeline_category_counts.get(category, 0) + count
+544: if diagnostic_record.get("timeline_checks_skipped_empty_body"):
+545: self._timeline_checks_skipped_empty_body += 1
+559: stats["timeline_reference_checks"] += 1
+560: stats["timeline_future_references"] += findings
+587: timeline_chars = diagnostic_record.get("day_timeline_chars")
+588: if isinstance(timeline_chars, int) and not isinstance(timeline_chars, bool):
+589: self._ledger_metrics["day_timeline_chars_total"] += max(
+590: 0, int(timeline_chars)
+592: self._ledger_metrics["day_timeline_sections"] += 1
+593: timeline_lines = diagnostic_record.get("day_timeline_lines")
+595: isinstance(timeline_lines, int)
+596: and not isinstance(timeline_lines, bool)
+598: self._ledger_metrics["day_timeline_lines_total"] += max(
+599: 0, int(timeline_lines)
+689: "prompt_gap_timeline_to_evidence",
+690: "prompt_gap_timeline_to_evidence_sum",
+809: "prompt_gap_timeline_to_evidence",
+--- [ledger_repairs] hits=3
+215: "ledger_repairs": 0,
+438: self._ledger_metrics["ledger_repairs"] += 1
+2057: int(self._ledger_metrics["ledger_repairs"])
+--- [unknown_player_reference] hits=0
+
+--- [model_stats] hits=27
+198: self._model_stats: dict[str, dict[str, Any]] = {}
+456: stats = self._model_stats.setdefault(model, self._new_model_stats())
+558: stats = self._model_stats.setdefault(model, self._new_model_stats())
+719: stats = self._model_stats.setdefault(
+720: model, self._new_model_stats()
+866: stats = self._model_stats.setdefault(obs_model, self._new_model_stats())
+915: stats = self._model_stats.setdefault(
+916: distance_model, self._new_model_stats()
+948: stats = self._model_stats.setdefault(
+949: correction_model, self._new_model_stats()
+973: stats = self._model_stats.setdefault(
+974: model, self._new_model_stats()
+998: stats = self._model_stats.setdefault(model, self._new_model_stats())
+1019: stats = self._model_stats.setdefault(model, self._new_model_stats())
+1045: stats = self._model_stats.setdefault(model, self._new_model_stats())
+1060: stats = self._model_stats.setdefault(model, self._new_model_stats())
+1076: stats = self._model_stats.setdefault(model, self._new_model_stats())
+1147: stats = self._model_stats.setdefault(
+1149: self._new_model_stats(),
+1199: stats = self._model_stats.setdefault(model, self._new_model_stats())
+1205: stats = self._model_stats.setdefault(model, self._new_model_stats())
+1208: stats = self._model_stats.setdefault(model, self._new_model_stats())
+1232: def _new_model_stats() -> dict[str, Any]:
+1430: for stats in self._model_stats.values():
+1466: for stats in self._model_stats.values():
+1540: for stats in self._model_stats.values():
+2182: "model_stats": self._model_stats,
+--- [action_profiles] hits=3
+1354: "action_profiles": {},
+1404: profiles = stats.setdefault("action_profiles", {})
+1486: for entry in stats.get("action_profiles", {}).values():
+===== day_timeline.py (1196 lines)
+--- [^def |^class |^[A-Z_]+[:=]] hits=31
+36: DAY_TIMELINE_POLICIES: tuple[str, ...] = (
+54: TIMELINE_EVENT_KINDS: tuple[str, ...] = (
+67: FUTURE_REFERENCE_CATEGORIES: tuple[str, ...] = (
+81: CITATION_STATUSES: tuple[str, ...] = (
+102: REFERENCE_TOKEN_CAUSES: tuple[str, ...] = (
+110: def classify_reference_tokens(
+138: def normalize_day_timeline_policy(value: object) -> str:
+153: def day_timeline_policy_label(policy: object) -> str:
+158: def timeline_evidence_header(
+184: class TimelineEvent:
+227: class TurnSnapshot:
+292: class PublicTimeline:
+519: def _is_japanese(language: object) -> bool:
+525: def _death_day_map(state: object) -> dict[str, int]:
+543: def _next_speech_id(state: object) -> int:
+549: def build_turn_snapshot(state: object, actor_name: str) -> TurnSnapshot:
+639: def _event_short(event: TimelineEvent) -> str:
+645: def render_timeline_section(
+793: _HEDGE_TERMS: tuple[str, ...] = (
+849: _ATTRIBUTION_TERMS: tuple[str, ...] = (
+881: _VOTE_ASSERTION_TERMS: tuple[str, ...] = (
+891: _VOTE_OUTCOME_TERMS: tuple[str, ...] = (
+906: _DEATH_ASSERTION_TERMS: tuple[str, ...] = (
+927: _TONIGHT_TERMS: tuple[str, ...] = ("今夜", "今晩", "tonight", "thisnight")
+930: def _normalize_text(text: str) -> str:
+936: def mentions_players(sentence: str, player_names: tuple[str, ...]) -> tuple[str, ...]:
+953: def _is_question(sentence: str) -> bool:
+957: def _is_hedged(norm: str) -> bool:
+962: class FutureReferenceFinding:
+990: class TimelineReferenceReport:
+1044: def inspect_public_body(
+--- [findings|category] hits=29
+301: future_reference_findings: int = 0
+435: "future_event_reference_findings": self.future_reference_findings,
+437: self.future_reference_findings / checks, 4
+484: 未来参照の指摘（findings）とは別に、引用された相手の時点別内訳と
+965: category: str
+976: "category": self.category,
+993: findings: tuple[FutureReferenceFinding, ...]
+1016: categories = {category: 0 for category in FUTURE_REFERENCE_CATEGORIES}
+1017: for finding in self.findings:
+1018: categories[finding.category] = categories.get(finding.category, 0) + 1
+1020: "future_event_reference": bool(self.findings),
+1021: "future_event_reference_count": len(self.findings),
+1023: "future_event_reference_findings": [
+1024: finding.to_dict() for finding in self.findings[:8]
+1059: findings: list[FutureReferenceFinding] = []
+1106: category: str | None = None
+1115: category = FUTURE_VOTE_OUTCOME
+1119: category is None
+1131: category = FUTURE_NIGHT_ACTION
+1134: if category is None and not hedged:
+1139: category = FUTURE_DEATH_BEFORE_DEATH
+1144: category is None
+1150: category = FUTURE_SPEECH_FROM_UNSPOKEN
+1152: if category is not None:
+1155: if category == FUTURE_SPEECH_FROM_UNSPOKEN:
+1168: findings.append(
+1170: category=category,
+1180: if category == FUTURE_SPEECH_FROM_UNSPOKEN:
+1183: findings=tuple(findings),

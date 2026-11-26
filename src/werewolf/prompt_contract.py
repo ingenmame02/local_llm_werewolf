@@ -215,6 +215,20 @@ PROMPT_SECTIONS: tuple[PromptSectionMeta, ...] = (
         source=AUTHORITY_ENGINE,
         authority=AUTHORITY_ENGINE,
     ),
+    # TASK-064: 役職能力の境界節。エンジンが実際に実行した行動と、本人が公開した主張を
+    # 短い固定行で分ける（[DONE]=エンジン実行、[CLAIM]=本人申告）。エンジン結果・公開
+    # 主張・推測の本文は重複掲載せずID参照のみ。口調・論点・結論には干渉しない。
+    PromptSectionMeta(
+        name="role_action_boundary",
+        markers=("[ROLE_ACTION_BOUNDARY",),
+        tier=TIER_CORE,
+        purpose=(
+            "what abilities the engine actually executed for this actor vs. what they "
+            "publicly claimed (short symbol lines; no result bodies, ids refer to their ledgers)"
+        ),
+        source=AUTHORITY_ENGINE,
+        authority=AUTHORITY_ENGINE,
+    ),
     PromptSectionMeta(
         name="integrity_alerts",
         markers=("[INTEGRITY_ALERTS]",),
