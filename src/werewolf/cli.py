@@ -135,6 +135,13 @@ from werewolf.output_stability import (
     output_stabilization_scope_label,
     normalize_output_stabilization_scope,
 )
+# TASK-066: 再生成コンテキストの段階化ポリシー（tiered / legacy_early_compression）。
+# 圧縮を「いつ・どこまで」進めるかだけを決める設定で、発言の口調・論点・結論には干渉しない。
+from werewolf.retry_context_policy import (
+    RETRY_CONTEXT_POLICY_DEFAULT,
+    retry_context_policy_label,
+    normalize_retry_context_policy,
+)
 
 # フェーズ表示用ラベル
 PHASE_NAMES_JA = {
@@ -369,6 +376,47 @@ class GameLogger:
             "timeout_downgrades_scoped_to_action": 0,
             "thinking_off_action_events": 0,
             "stabilization_relaxations": 0,
+            # TASK-066: 再生成コンテキストの段階別実績。早期圧縮を避けられた件数（full_preserved）、
+            # 実際に圧縮が進んだ件数と節約字数、発言履歴を畳んだときに落ちた発言・証拠IDの数、
+            # 再生成本文が短くなったか（一貫性の損なわれ方）を観測する。すべて数値のみ。
+            "retry_stage_events": 0,
+            "retry_stage_full_preserved": 0,
+            "retry_stage_light_compressed": 0,
+            "retry_stage_last_resort": 0,
+            "retry_compression_events": 0,
+            "retry_speech_folding_events": 0,
+            "retry_initial_prompt_char_total": 0,
+            "retry_prompt_char_total": 0,
+            "retry_prompt_saved_char_total": 0,
+            "retry_dropped_speech_count_total": 0,
+            "retry_dropped_speech_char_total": 0,
+            "retry_preserved_evidence_id_total": 0,
+            "retry_dropped_evidence_id_total": 0,
+            "retry_body_present_events": 0,
+            "retry_body_shortened_events": 0,
+            # TASK-066（レビュー対応）: timeout起因は「意図的な例外」として別建てに数える
+            # （待ち時間優先で即時圧縮する方針と、原則どおりの段階進行を混ぜて評価しない）。
+            "retry_timeout_stage_events": 0,
+            "retry_non_timeout_stage_events": 0,
+            "retry_non_timeout_compression_events": 0,
+            "retry_non_timeout_prompt_saved_char_total": 0,
+            # TASK-066（レビュー対応）: 削除した証拠IDを「載っていた節」で分ける。core節由来・
+            # 現在質問由来が消えた場合は安全上の警告、optional 由来は圧縮の想定内。
+            "retry_dropped_protected_id_total": 0,
+            "retry_dropped_optional_only_id_total": 0,
+            "retry_dropped_question_linked_id_total": 0,
+            "retry_speech_body_kept_total": 0,
+            "retry_speech_body_lost_total": 0,
+            # 発言履歴を畳む段階以外でIDが欠けたら「想定外」の事件として計上する
+            "retry_unexpected_id_loss_events": 0,
+            # TASK-066: 根拠接続率を通常生成と再生成で分ける（公開本文は変更していない）。
+            # 発言の由来別につけた件数と、引用解決（付与できた参照／解決できない参照）の内訳。
+            "speeches_from_initial_generation": 0,
+            "speeches_from_regeneration": 0,
+            "initial_attributed_references_total": 0,
+            "initial_unresolvable_references_total": 0,
+            "regenerated_attributed_references_total": 0,
+            "regenerated_unresolvable_references_total": 0,
         }
         # TASK-056: 未来参照カテゴリ別の指摘数（公開本文は修正していない観測値）
         self._timeline_category_counts: dict[str, int] = {
@@ -384,6 +432,8 @@ class GameLogger:
         self._hedged_pending_citations = 0
         self._unattributed_name_mentions = 0
         self._timeline_checks_skipped_empty_body = 0
+        # TASK-066: 発言の由来（初回生成 / 再生成のどの段階）別の件数。本文は触らない観測値。
+        self._body_source_stage_counts: dict[str, int] = {}
         # TASK-065: 未発言者に関する文の意図内訳（実質的未来参照／これから聞く質問行為／
         # これからの行動推測）。future_event_reference は past_attribution の断定だけなので、
         # 「質問したから未来参照」を数えない分離が効いているかをここで確認する（観測専用）。
@@ -432,6 +482,19 @@ class GameLogger:
         """TASK-059: 公開情報の入力経路別の件数を1増やす（観測専用・本文は触らない）。"""
         self._timeline_public_path_counts[path] = (
             self._timeline_public_path_counts.get(path, 0) + 1
+        )
+
+    def _record_body_source_stage(self, stage: str, regenerated: bool) -> None:
+        """TASK-066: 発言がどの段階のプロンプトから出たかを1増やす（観測専用）。
+
+        段階名が欠けているときは再生成かどうかだけで寄せる（本文には一切触れない）。
+        再生成文の根拠接続率が通常生成より落ちているかを、実機A/Bで確かめるために使う。
+        """
+        name = str(stage or "").strip()
+        if not name:
+            name = "regenerated_unspecified" if regenerated else "normal_generation"
+        self._body_source_stage_counts[name] = (
+            int(self._body_source_stage_counts.get(name, 0)) + 1
         )
 
     def append_record(
@@ -653,7 +716,10 @@ class GameLogger:
             self._bump_public_path("public_vote_outcome_ledger_only")
         elif event_type in {"morning_casualty", "first_night_no_attack"}:
             self._bump_public_path("public_death_notice_ledger_only")
-        # TASK-056: 公開発言に添えた時系列検査を集計する（観測専用で本文は修正されない）
+        # TASK-056 / TASK-066: 公開発言に添えた時系列検査を集計する（観測専用で本文は修正されない）。
+        # TASK-066では、その発言が初回生成か再生成かを分けて積む。圧縮した再生成で根拠接続が
+        # 落ちているか（＝証拠を失って議論と繋がっていないか）を実機ログで確かめるため、
+        # 由来別の引用解決実績を別カウンターへ振り分ける（公開本文は不変）。
         if (
             event_type == "discussion_message"
             and bool(diagnostic_record.get("timeline_observed"))
@@ -661,12 +727,25 @@ class GameLogger:
             self._ledger_metrics["timeline_reference_checks"] += 1
             findings = int(diagnostic_record.get("future_event_reference_count") or 0)
             self._ledger_metrics["future_event_references"] += findings
-            self._ledger_metrics["timeline_attributed_references"] += int(
+            attributed_refs = int(
                 diagnostic_record.get("attributed_references_observed") or 0
             )
-            self._ledger_metrics["timeline_unresolvable_references"] += int(
-                diagnostic_record.get("unresolvable_references") or 0
-            )
+            unresolvable_refs = int(diagnostic_record.get("unresolvable_references") or 0)
+            self._ledger_metrics["timeline_attributed_references"] += attributed_refs
+            self._ledger_metrics["timeline_unresolvable_references"] += unresolvable_refs
+            regenerated_body = bool(diagnostic_record.get("regenerated_body"))
+            stage_name = str(diagnostic_record.get("body_source_stage") or "")
+            self._record_body_source_stage(stage_name, regenerated_body)
+            if regenerated_body:
+                self._ledger_metrics["speeches_from_regeneration"] += 1
+                self._ledger_metrics["regenerated_attributed_references_total"] += attributed_refs
+                self._ledger_metrics["regenerated_unresolvable_references_total"] += (
+                    unresolvable_refs
+                )
+            else:
+                self._ledger_metrics["speeches_from_initial_generation"] += 1
+                self._ledger_metrics["initial_attributed_references_total"] += attributed_refs
+                self._ledger_metrics["initial_unresolvable_references_total"] += unresolvable_refs
             categories = diagnostic_record.get("future_event_reference_categories")
             if isinstance(categories, dict):
                 for category in FUTURE_REFERENCE_CATEGORIES:
@@ -1136,6 +1215,157 @@ class GameLogger:
                     stats["retry_added_ability_expressions"] = int(
                         stats.get("retry_added_ability_expressions", 0)
                     ) + max(0, int(added_expressions))
+        # TASK-066: 再生成コンテキストの段階診断を集計する（どの段階でどれだけ節約し、何が
+        # 落ち、本文が短くなったか）。数値・ID個数・節名のみで、発言の内容は積まない。
+        if event_type == "retry_context_stage":
+            stage_name = str(diagnostic_record.get("retry_stage") or "")
+            compressed = bool(diagnostic_record.get("retry_compresses_prompt"))
+            folded = bool(diagnostic_record.get("retry_folds_speech_history"))
+            self._ledger_metrics["retry_stage_events"] += 1
+            if stage_name == "full_preserved":
+                self._ledger_metrics["retry_stage_full_preserved"] += 1
+            elif stage_name == "light_compressed":
+                self._ledger_metrics["retry_stage_light_compressed"] += 1
+            elif stage_name == "last_resort_compressed":
+                self._ledger_metrics["retry_stage_last_resort"] += 1
+            if compressed:
+                self._ledger_metrics["retry_compression_events"] += 1
+            if folded:
+                self._ledger_metrics["retry_speech_folding_events"] += 1
+            for field, metric in (
+                ("initial_user_prompt_char_count", "retry_initial_prompt_char_total"),
+                ("retry_user_prompt_char_count", "retry_prompt_char_total"),
+                ("retry_prompt_saved_chars", "retry_prompt_saved_char_total"),
+                ("dropped_speech_count", "retry_dropped_speech_count_total"),
+                ("dropped_speech_chars", "retry_dropped_speech_char_total"),
+            ):
+                value = diagnostic_record.get(field)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    self._ledger_metrics[metric] += max(0, int(value))
+            for field, metric in (
+                ("preserved_evidence_ids", "retry_preserved_evidence_id_total"),
+                ("dropped_evidence_ids", "retry_dropped_evidence_id_total"),
+            ):
+                values = diagnostic_record.get(field)
+                if isinstance(values, (list, tuple)):
+                    self._ledger_metrics[metric] += len(values)
+            if bool(diagnostic_record.get("body_preserved")):
+                self._ledger_metrics["retry_body_present_events"] += 1
+            if bool(diagnostic_record.get("retry_body_shortened")):
+                self._ledger_metrics["retry_body_shortened_events"] += 1
+            # TASK-066（レビュー対応）: timeout起因は「意図的な例外」として別建てに集計し、
+            # 削除した証拠IDは載っていた節で分類する（core節・現在質問由来の欠落は想定外）。
+            timeout_caused = bool(diagnostic_record.get("retry_timeout_caused"))
+            if timeout_caused:
+                self._ledger_metrics["retry_timeout_stage_events"] += 1
+            else:
+                self._ledger_metrics["retry_non_timeout_stage_events"] += 1
+                if compressed:
+                    self._ledger_metrics["retry_non_timeout_compression_events"] += 1
+                    saved_chars = diagnostic_record.get("retry_prompt_saved_chars")
+                    if isinstance(saved_chars, int) and not isinstance(saved_chars, bool):
+                        self._ledger_metrics["retry_non_timeout_prompt_saved_char_total"] += (
+                            max(0, int(saved_chars))
+                        )
+            for field, metric in (
+                ("dropped_ids_protected_count", "retry_dropped_protected_id_total"),
+                ("dropped_ids_optional_only_count", "retry_dropped_optional_only_id_total"),
+                ("dropped_ids_question_linked_count", "retry_dropped_question_linked_id_total"),
+                ("dropped_speech_bodies_still_present", "retry_speech_body_kept_total"),
+                ("dropped_speech_bodies_lost", "retry_speech_body_lost_total"),
+            ):
+                value = diagnostic_record.get(field)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    self._ledger_metrics[metric] += max(0, int(value))
+            if not folded and diagnostic_record.get("dropped_ids_safety_clean") is False:
+                # 発言履歴を畳む段階以外で core 節・現在質問のIDが消えた（圧縮の想定外）
+                self._ledger_metrics["retry_unexpected_id_loss_events"] += 1
+            stage_model = diagnostic_record.get("model")
+            if isinstance(stage_model, str):
+                stats = self._model_stats.setdefault(
+                    stage_model, self._new_model_stats()
+                )
+                stats["retry_stage_events"] = int(stats.get("retry_stage_events", 0)) + 1
+                if stage_name == "full_preserved":
+                    stats["retry_stage_full_preserved"] = int(
+                        stats.get("retry_stage_full_preserved", 0)
+                    ) + 1
+                if compressed:
+                    stats["retry_compression_events"] = int(
+                        stats.get("retry_compression_events", 0)
+                    ) + 1
+                if folded:
+                    stats["retry_speech_folding_events"] = int(
+                        stats.get("retry_speech_folding_events", 0)
+                    ) + 1
+                for field, metric in (
+                    ("initial_user_prompt_char_count", "retry_initial_prompt_char_total"),
+                    ("retry_user_prompt_char_count", "retry_prompt_char_total"),
+                    ("retry_prompt_saved_chars", "retry_prompt_saved_char_total"),
+                    ("dropped_speech_count", "retry_dropped_speech_count_total"),
+                    ("dropped_speech_chars", "retry_dropped_speech_char_total"),
+                ):
+                    value = diagnostic_record.get(field)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        stats[metric] = int(stats.get(metric, 0)) + max(0, int(value))
+                for field, metric in (
+                    ("preserved_evidence_ids", "retry_preserved_evidence_id_total"),
+                    ("dropped_evidence_ids", "retry_dropped_evidence_id_total"),
+                ):
+                    values = diagnostic_record.get(field)
+                    if isinstance(values, (list, tuple)):
+                        stats[metric] = int(stats.get(metric, 0)) + len(values)
+                if bool(diagnostic_record.get("body_preserved")):
+                    stats["retry_body_present_events"] = int(
+                        stats.get("retry_body_present_events", 0)
+                    ) + 1
+                if bool(diagnostic_record.get("retry_body_shortened")):
+                    stats["retry_body_shortened_events"] = int(
+                        stats.get("retry_body_shortened_events", 0)
+                    ) + 1
+                # TASK-066（レビュー対応）: timeout起因の分離と削除IDの節別分類（モデル別）。
+                if timeout_caused:
+                    stats["retry_timeout_stage_events"] = int(
+                        stats.get("retry_timeout_stage_events", 0)
+                    ) + 1
+                else:
+                    stats["retry_non_timeout_stage_events"] = int(
+                        stats.get("retry_non_timeout_stage_events", 0)
+                    ) + 1
+                    if compressed:
+                        stats["retry_non_timeout_compression_events"] = int(
+                            stats.get("retry_non_timeout_compression_events", 0)
+                        ) + 1
+                        saved_model_chars = diagnostic_record.get("retry_prompt_saved_chars")
+                        if isinstance(saved_model_chars, int) and not isinstance(
+                            saved_model_chars, bool
+                        ):
+                            stats["retry_non_timeout_prompt_saved_char_total"] = int(
+                                stats.get("retry_non_timeout_prompt_saved_char_total", 0)
+                            ) + max(0, int(saved_model_chars))
+                for field, metric in (
+                    ("dropped_ids_protected_count", "retry_dropped_protected_id_total"),
+                    (
+                        "dropped_ids_optional_only_count",
+                        "retry_dropped_optional_only_id_total",
+                    ),
+                    (
+                        "dropped_ids_question_linked_count",
+                        "retry_dropped_question_linked_id_total",
+                    ),
+                    (
+                        "dropped_speech_bodies_still_present",
+                        "retry_speech_body_kept_total",
+                    ),
+                    ("dropped_speech_bodies_lost", "retry_speech_body_lost_total"),
+                ):
+                    value = diagnostic_record.get(field)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        stats[metric] = int(stats.get(metric, 0)) + max(0, int(value))
+                if not folded and diagnostic_record.get("dropped_ids_safety_clean") is False:
+                    stats["retry_unexpected_id_loss_events"] = int(
+                        stats.get("retry_unexpected_id_loss_events", 0)
+                    ) + 1
         if event_type == "secret_role_leak_detected":
             # TASK-054: hardゲート（本当に秘匿情報を出した場合）だけを数える。
             self._ledger_metrics["secret_leaks_detected"] += 1
@@ -1511,6 +1741,33 @@ class GameLogger:
             "co_correction_events": 0,
             "co_correction_reask_prompt_char_total": 0,
             "co_correction_normal_prompt_char_total": 0,
+            # TASK-066: モデル別の再生成コンテキスト実績（段階別件数・節約字数・畳んだ発言、
+            # 保持／欠落した証拠ID、再生成本文の長短）。段階方策のA/Bをモデル単位で見る。
+            "retry_stage_events": 0,
+            "retry_stage_full_preserved": 0,
+            "retry_compression_events": 0,
+            "retry_speech_folding_events": 0,
+            "retry_initial_prompt_char_total": 0,
+            "retry_prompt_char_total": 0,
+            "retry_prompt_saved_char_total": 0,
+            "retry_dropped_speech_count_total": 0,
+            "retry_dropped_speech_char_total": 0,
+            "retry_preserved_evidence_id_total": 0,
+            "retry_dropped_evidence_id_total": 0,
+            "retry_body_present_events": 0,
+            "retry_body_shortened_events": 0,
+            # TASK-066（レビュー対応）: timeout起因を別建てにし、削除IDを載っていた節で分類する。
+            # core節・現在質問由来の欠落は想定外（light_compressed では 0 でなければならない）。
+            "retry_timeout_stage_events": 0,
+            "retry_non_timeout_stage_events": 0,
+            "retry_non_timeout_compression_events": 0,
+            "retry_non_timeout_prompt_saved_char_total": 0,
+            "retry_dropped_protected_id_total": 0,
+            "retry_dropped_optional_only_id_total": 0,
+            "retry_dropped_question_linked_id_total": 0,
+            "retry_speech_body_kept_total": 0,
+            "retry_speech_body_lost_total": 0,
+            "retry_unexpected_id_loss_events": 0,
             # TASK-065: モデル別の名前内部解決（吸収した表記ゆれ／未解決／旧判定なら未知名前と
             # 誤っていた数）と、実効コンテキストの証拠（設定・サーバー観測・ロード実測）。
             # timeout縮小・thinking off を掛けた行動名もモデル別に残す（恒久適用していない
@@ -1823,6 +2080,101 @@ class GameLogger:
                 stats["co_correction_shortening_ratio"] = (
                     round(reask_chars / normal_chars, 4) if normal_chars else None
                 )
+            # TASK-066: モデル別の再生成コンテキスト実績。初回と同じ証拠を保持した再要求
+            # （full_preserved）の割合＝早期圧縮を避けられた度合い、実際の節約量、発言履歴を
+            # 畳んだときの平均削除数、落ちた証拠IDの平均、本文が短くなった割合を出す。
+            retry_stages = int(stats.get("retry_stage_events", 0))
+            if retry_stages:
+                stats["retry_full_preserved_rate"] = round(
+                    int(stats.get("retry_stage_full_preserved", 0)) / retry_stages, 4
+                )
+                stats["retry_compression_rate"] = round(
+                    int(stats.get("retry_compression_events", 0)) / retry_stages, 4
+                )
+                compressions = int(stats.get("retry_compression_events", 0))
+                stats["avg_retry_prompt_saved_chars"] = (
+                    round(
+                        int(stats.get("retry_prompt_saved_char_total", 0)) / compressions, 1
+                    )
+                    if compressions
+                    else 0.0
+                )
+                stats["retry_prompt_ratio"] = (
+                    round(
+                        int(stats.get("retry_prompt_char_total", 0))
+                        / int(stats.get("retry_initial_prompt_char_total", 0)),
+                        4,
+                    )
+                    if int(stats.get("retry_initial_prompt_char_total", 0))
+                    else None
+                )
+                foldings = int(stats.get("retry_speech_folding_events", 0))
+                stats["avg_dropped_speech_count_when_folded"] = (
+                    round(
+                        int(stats.get("retry_dropped_speech_count_total", 0)) / foldings, 2
+                    )
+                    if foldings
+                    else 0.0
+                )
+                stats["avg_dropped_evidence_ids_when_folded"] = (
+                    round(
+                        int(stats.get("retry_dropped_evidence_id_total", 0)) / foldings, 2
+                    )
+                    if foldings
+                    else 0.0
+                )
+                stats["avg_preserved_evidence_ids"] = round(
+                    int(stats.get("retry_preserved_evidence_id_total", 0)) / retry_stages, 2
+                )
+                stats["retry_body_shortened_rate"] = round(
+                    int(stats.get("retry_body_shortened_events", 0)) / retry_stages, 4
+                )
+                # TASK-066（レビュー対応）: timeout起因は「圧縮は最終手段」に対する意図的な
+                # 例外なので、原則どおりに進行した再生成（非timeout）だけを分けて評価できる
+                # ようにする。ここを混ぜると、待ち時間優先の短縮が早期圧縮と見えて誤判定する。
+                stats["retry_timeout_stage_share"] = round(
+                    int(stats.get("retry_timeout_stage_events", 0)) / retry_stages, 4
+                )
+                non_timeout_stages = int(stats.get("retry_non_timeout_stage_events", 0))
+                non_timeout_compressions = int(
+                    stats.get("retry_non_timeout_compression_events", 0)
+                )
+                stats["retry_non_timeout_compression_rate"] = (
+                    round(non_timeout_compressions / non_timeout_stages, 4)
+                    if non_timeout_stages
+                    else None
+                )
+                stats["avg_retry_prompt_saved_chars_excluding_timeout"] = (
+                    round(
+                        int(stats.get("retry_non_timeout_prompt_saved_char_total", 0))
+                        / non_timeout_compressions,
+                        1,
+                    )
+                    if non_timeout_compressions
+                    else 0.0
+                )
+                # 削除した証拠IDの内訳（載っていた節で分類）。core節・現在質問由来の削除は
+                # 圧縮の想定外。optional 由来の削除は light_compressed の設計どおり。
+                stats["avg_dropped_ids_from_core_sections"] = round(
+                    int(stats.get("retry_dropped_protected_id_total", 0)) / retry_stages, 3
+                )
+                stats["avg_dropped_ids_optional_only"] = round(
+                    int(stats.get("retry_dropped_optional_only_id_total", 0)) / retry_stages, 3
+                )
+                stats["avg_dropped_ids_question_linked"] = round(
+                    int(stats.get("retry_dropped_question_linked_id_total", 0)) / retry_stages, 3
+                )
+                # ID行が消えても発言本文が再生成プロンプトへ残ったか（証拠ごと失っていないか）
+                stats["dropped_speech_body_kept_total"] = int(
+                    stats.get("retry_speech_body_kept_total", 0)
+                )
+                stats["dropped_speech_body_lost_total"] = int(
+                    stats.get("retry_speech_body_lost_total", 0)
+                )
+                # 発言履歴を畳む段階以外でのID欠落（想定外の事件）。A/Bで増えたら要注意。
+                stats["unexpected_retry_id_loss_events"] = int(
+                    stats.get("retry_unexpected_id_loss_events", 0)
+                )
 
         public_players_data = [
             {
@@ -1967,6 +2319,10 @@ class GameLogger:
                     state, "output_stabilization_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT
                 )
             ),
+            # TASK-066: 再生成コンテキストの方策ラベル（A/B比較の判別用）
+            "retry_context_policy": retry_context_policy_label(
+                getattr(state, "retry_context_policy", RETRY_CONTEXT_POLICY_DEFAULT)
+            ),
             # 実効コンテキスト整合チェックで集めた証拠（数値のみ。公開プロンプトには載らない）
             "context_integrity_evidence": dict(
                 getattr(state, "context_integrity_checks", {}) or {}
@@ -1995,6 +2351,47 @@ class GameLogger:
                     / max(1, int(self._ledger_metrics["timeline_attributed_references"])),
                     4,
                 ),
+                # TASK-066: 根拠接続率を初回生成と再生成へ分ける（圧縮が議論との接続を壊して
+                # いないかを見る分離キー。公開本文は変更していない）。分子は引用解決できた参照。
+                "evidence_grounding_rate_initial_generation": (
+                    round(
+                        1.0
+                        - int(self._ledger_metrics["initial_unresolvable_references_total"])
+                        / max(
+                            1, int(self._ledger_metrics["initial_attributed_references_total"])
+                        ),
+                        4,
+                    )
+                    if int(self._ledger_metrics["speeches_from_initial_generation"]) > 0
+                    else None
+                ),
+                "evidence_grounding_rate_after_regeneration": (
+                    round(
+                        1.0
+                        - int(
+                            self._ledger_metrics["regenerated_unresolvable_references_total"]
+                        )
+                        / max(
+                            1,
+                            int(
+                                self._ledger_metrics[
+                                    "regenerated_attributed_references_total"
+                                ]
+                            ),
+                        ),
+                        4,
+                    )
+                    if int(self._ledger_metrics["speeches_from_regeneration"]) > 0
+                    else None
+                ),
+                "speeches_from_initial_generation": int(
+                    self._ledger_metrics["speeches_from_initial_generation"]
+                ),
+                "speeches_from_regeneration": int(
+                    self._ledger_metrics["speeches_from_regeneration"]
+                ),
+                # どの段階のプロンプトから発言が出たかの内訳（再生成の自由度を潰していないかの確認）
+                "body_source_stage_counts": dict(self._body_source_stage_counts),
                 "avg_day_timeline_chars": round(
                     int(self._ledger_metrics["day_timeline_chars_total"])
                     / max(1, int(self._ledger_metrics["day_timeline_sections"])),
@@ -2247,6 +2644,120 @@ class GameLogger:
                     )
                 ),
                 "co_correction_events": int(self._ledger_metrics["co_correction_events"]),
+                # TASK-066: 再生成コンテキストの段階別実績（早期圧縮を避けられた割合・節約量・
+                # 畳んだときの削除量）。本文は含まない数値のみ。
+                "retry_stage_events": int(self._ledger_metrics["retry_stage_events"]),
+                "retry_stage_full_preserved": int(
+                    self._ledger_metrics["retry_stage_full_preserved"]
+                ),
+                "retry_stage_light_compressed": int(
+                    self._ledger_metrics["retry_stage_light_compressed"]
+                ),
+                "retry_stage_last_resort_compressed": int(
+                    self._ledger_metrics["retry_stage_last_resort"]
+                ),
+                "retry_full_preserved_rate": (
+                    round(
+                        int(self._ledger_metrics["retry_stage_full_preserved"])
+                        / int(self._ledger_metrics["retry_stage_events"]),
+                        4,
+                    )
+                    if int(self._ledger_metrics["retry_stage_events"])
+                    else None
+                ),
+                "retry_compression_rate": (
+                    round(
+                        int(self._ledger_metrics["retry_compression_events"])
+                        / int(self._ledger_metrics["retry_stage_events"]),
+                        4,
+                    )
+                    if int(self._ledger_metrics["retry_stage_events"])
+                    else None
+                ),
+                "avg_retry_prompt_saved_chars": (
+                    round(
+                        int(self._ledger_metrics["retry_prompt_saved_char_total"])
+                        / int(self._ledger_metrics["retry_compression_events"]),
+                        1,
+                    )
+                    if int(self._ledger_metrics["retry_compression_events"])
+                    else 0.0
+                ),
+                "retry_prompt_shortening_ratio": (
+                    round(
+                        int(self._ledger_metrics["retry_prompt_char_total"])
+                        / int(self._ledger_metrics["retry_initial_prompt_char_total"]),
+                        4,
+                    )
+                    if int(self._ledger_metrics["retry_initial_prompt_char_total"])
+                    else None
+                ),
+                "retry_speech_folding_events": int(
+                    self._ledger_metrics["retry_speech_folding_events"]
+                ),
+                "retry_dropped_speech_count_total": int(
+                    self._ledger_metrics["retry_dropped_speech_count_total"]
+                ),
+                "retry_preserved_evidence_id_total": int(
+                    self._ledger_metrics["retry_preserved_evidence_id_total"]
+                ),
+                "retry_dropped_evidence_id_total": int(
+                    self._ledger_metrics["retry_dropped_evidence_id_total"]
+                ),
+                "retry_body_shortened_events": int(
+                    self._ledger_metrics["retry_body_shortened_events"]
+                ),
+                # TASK-066（レビュー対応）: timeout起因は「圧縮は最終手段」に対する意図的な
+                # 例外。原則どおりに進んだ再生成だけを分けて評価できるようにする。
+                "retry_timeout_stage_events": int(
+                    self._ledger_metrics["retry_timeout_stage_events"]
+                ),
+                "retry_non_timeout_stage_events": int(
+                    self._ledger_metrics["retry_non_timeout_stage_events"]
+                ),
+                "retry_non_timeout_compression_rate": (
+                    round(
+                        int(self._ledger_metrics["retry_non_timeout_compression_events"])
+                        / int(self._ledger_metrics["retry_non_timeout_stage_events"]),
+                        4,
+                    )
+                    if int(self._ledger_metrics["retry_non_timeout_stage_events"])
+                    else None
+                ),
+                "avg_retry_prompt_saved_chars_excluding_timeout": (
+                    round(
+                        int(
+                            self._ledger_metrics[
+                                "retry_non_timeout_prompt_saved_char_total"
+                            ]
+                        )
+                        / int(self._ledger_metrics["retry_non_timeout_compression_events"]),
+                        1,
+                    )
+                    if int(self._ledger_metrics["retry_non_timeout_compression_events"])
+                    else 0.0
+                ),
+                # 削除IDの内訳（載っていた節で分類）。想定外＝core節・現在質問由来、
+                # 想定内＝optional派生節由来。発言本文が残ったかも別数値で持つ。
+                "retry_dropped_ids_from_core_sections_total": int(
+                    self._ledger_metrics["retry_dropped_protected_id_total"]
+                ),
+                "retry_dropped_ids_optional_only_total": int(
+                    self._ledger_metrics["retry_dropped_optional_only_id_total"]
+                ),
+                "retry_dropped_ids_question_linked_total": int(
+                    self._ledger_metrics["retry_dropped_question_linked_id_total"]
+                ),
+                "retry_speech_body_kept_total": int(
+                    self._ledger_metrics["retry_speech_body_kept_total"]
+                ),
+                "retry_speech_body_lost_total": int(
+                    self._ledger_metrics["retry_speech_body_lost_total"]
+                ),
+                # 発言履歴を畳む段階以外でIDが欠けた事件数（A/Bで増えてはいけない安全指標）
+                "retry_unexpected_id_loss_events": int(
+                    self._ledger_metrics["retry_unexpected_id_loss_events"]
+                ),
                 "avg_co_correction_reask_prompt_chars": round(
                     int(self._ledger_metrics["co_correction_reask_prompt_char_total"])
                     / max(1, int(self._ledger_metrics["co_correction_events"])),
@@ -2688,6 +3199,10 @@ def run_cli_game(args: argparse.Namespace) -> int:
     output_stabilization_scope = normalize_output_stabilization_scope(
         getattr(args, "output_stability_scope", OUTPUT_STABILIZATION_SCOPE_DEFAULT)
     )
+    # TASK-066: 再生成コンテキストの方策（既定 tiered）。圧縮を進める条件だけを切り替える。
+    retry_context_policy = normalize_retry_context_policy(
+        getattr(args, "retry_context_policy", RETRY_CONTEXT_POLICY_DEFAULT)
+    )
     options["continuity_policy"] = continuity_policy
     if args.thinking in {"on", "off"}:
         options["thinking"] = args.thinking == "on"
@@ -2733,6 +3248,9 @@ def run_cli_game(args: argparse.Namespace) -> int:
     state.timeline_intent_policy = timeline_intent_policy
     state.player_name_resolution_policy = player_name_resolution_policy
     state.output_stabilization_scope = output_stabilization_scope
+    # TASK-066: 再生成コンテキストの方策をstateへ反映する（llm_actions が state から読む）。
+    # ここでも正規化し、A/B比較で同じ値が効いているようにする。
+    state.retry_context_policy = retry_context_policy
 
     meta = {
         "mode": args.mode,
@@ -2779,6 +3297,8 @@ def run_cli_game(args: argparse.Namespace) -> int:
         "timeline_intent_policy": timeline_intent_policy,
         "player_name_resolution_policy": player_name_resolution_policy,
         "output_stabilization_scope": output_stabilization_scope,
+        # TASK-066: 再生成コンテキストの方策（tiered / legacy_early_compression）をログへ残す
+        "retry_context_policy": retry_context_policy_label(retry_context_policy),
         "base_url": args.base_url,
         "show_private": args.show_private,
         "response_language": getattr(args, "language", None),
@@ -3042,12 +3562,56 @@ def run_cli_game(args: argparse.Namespace) -> int:
                 flush=True,
             )
         elif event_type == "context_compression_stage":
-            # TASK-046: 再要求のcore-ledger圧縮で保持した証拠を表示する（発言の自由度は維持）。
+            # TASK-046 / TASK-066: 圧縮で保持した証拠を表示する（発言の自由度は維持）。
+            # timeout・コンテキスト超過は「圧縮は最終手段」に対する意図的な例外なので、
+            # その旨を明示する（待ち時間とエラー解決が目的で、原則とは別の判断で進む）。
+            reason = str(event.get("compression_reason", "retry"))
+            intentional = reason in {"timeout_retry", "context_overflow_retry"}
+            stage_name = str(event.get("retry_context_stage") or "")
             print(
-                f"{prefix} コンテキスト圧縮 [{event.get('compression_reason', 'retry')}]: "
-                "公開CO・占い判定・投票・死亡・直近発言・本人への未回答質問・直近反証を保持",
+                f"{prefix} コンテキスト圧縮 [{reason}]"
+                + (f"（段階: {stage_name}）" if stage_name else "")
+                + ("（意図的な即時圧縮: 長文再送は待ち時間でもう一度失敗する）" if intentional else "")
+                + ": 公開CO・占い判定・投票・死亡・直近発言・本人への未回答質問・直近反証を保持",
                 flush=True,
             )
+        elif event_type == "retry_context_stage":
+            # TASK-066: 再生成がどの段階を、どの引き金で使い、証拠をどれだけ保ったかを出す。
+            # 数値・節名・ID個数のみで、発言本文は表示しない（A/B評価の一次情報にする）。
+            stage_label = str(event.get("retry_stage") or "")
+            trigger = str(event.get("compression_trigger") or "")
+            saved_chars = int(event.get("retry_prompt_saved_chars") or 0)
+            protected_loss = int(event.get("dropped_ids_protected_count") or 0)
+            question_loss = int(event.get("dropped_ids_question_linked_count") or 0)
+            optional_loss = int(event.get("dropped_ids_optional_only_count") or 0)
+            body_lost = int(event.get("dropped_speech_bodies_lost") or 0)
+            timeout_caused = bool(event.get("retry_timeout_caused"))
+            folded = bool(event.get("retry_folds_speech_history"))
+            print(
+                f"{prefix} 再生成コンテキスト [{stage_label} / {trigger}]"
+                + ("（timeout起因＝意図的な例外）" if timeout_caused else "")
+                + f": プロンプト {event.get('initial_user_prompt_char_count', 0)}字→"
+                f"{event.get('retry_user_prompt_char_count', 0)}字（-{saved_chars}字）"
+                + f"、削除ID core{protected_loss}/質問由来{question_loss}/"
+                f"optional由来{optional_loss}"
+                + (
+                    ""
+                    if not event.get("dropped_speech_bodies_still_present")
+                    and not event.get("dropped_speech_bodies_lost")
+                    else f"、IDが消えた発言は本文保持"
+                    f"{int(event.get('dropped_speech_bodies_still_present') or 0)}件／"
+                    f"喪失{body_lost}件"
+                ),
+                flush=True,
+            )
+            if protected_loss or question_loss:
+                # 現在質問・core節のIDが消えたら安全上の警告（light_compressedでは0のはず）
+                print(
+                    f"{prefix} [要注意] 保護対象の証拠IDが再生成プロンプトから欠落しました: "
+                    f"core節由来{protected_loss}件・現在質問由来{question_loss}件"
+                    + ("（発言履歴を畳む段階のため想定内）" if folded else ""),
+                    flush=True,
+                )
         elif event_type == "ledger_repair":
             reason = event.get("reason")
             if reason == "meta_instruction_echo":
@@ -3541,6 +4105,30 @@ def build_parser() -> argparse.ArgumentParser:
             "for the same model. model: legacy whole-model downgrade (pre-TASK-065) "
             "for A/B comparison. Neither mode changes tone, topics or conclusions, and "
             "a generated body is always preserved."
+        ),
+    )
+    # TASK-066: 再生成コンテキストの段階化（初回生成と同じ証拠を保持したまま対象エラーだけを
+    # 直す段階から始め、真に必要になるまで発言履歴を畳まない）。legacy_early はTASK-066以前の
+    # 早期圧縮でA/B比較用の基準側。どちらも発言の口調・文量・論点・結論・推理順は固定しない。
+    parser.add_argument(
+        "--retry-context-policy",
+        dest="retry_context_policy",
+        choices=["tiered", "legacy_early_compression"],
+        default=RETRY_CONTEXT_POLICY_DEFAULT,
+        help=(
+            "How much context a regeneration keeps after a rejected response. tiered "
+            "(default): the first retry reuses the same evidence as the first generation "
+            "and fixes only the flagged error; light compression drops just low-priority "
+            "derived sections (settled topics, reasoning guidance, hypothesis diffs, theory "
+            "cards, derived memos, integrity alerts, time-boxed guidance) once the same "
+            "failure repeats twice; folding older speech bodies into id-only lines happens "
+            "on a third strike of the same failure, on real context overflow, or when the "
+            "prompt does not fit the effective context. The current question, confirmed "
+            "facts, role claims, vote/death ledgers, recent speeches, counter-arguments and "
+            "[CONTINUITY_CHECKPOINT] are kept in every stage. legacy_early_compression: "
+            "pre-TASK-066 behaviour that shortens to the core ledger right away (A/B "
+            "baseline). Neither mode sets tone, length, topics or conclusions, and published "
+            "speech text is never rewritten."
         ),
     )
     # TASK-058: core予算の段階圧縮（anchor/recent/historical に分け、歴史情報の本文だけを短い行へ畳む）

@@ -1,0 +1,1 @@
+[('fact_ledger', ('[FACT_LEDGER]',)), ('hypothesis_ledger', ('[HYPOTHESIS_LEDGER]',)), ('conversation_evidence', ('[CONVERSATION_EVIDENCE', '[Previous Public Dialogue]')), ('question_block', ('[Current Question]',))]

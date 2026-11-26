@@ -2524,6 +2524,13 @@ class GameEngine:
         }
         if appended.speech_id is not None:
             event["speech_id"] = int(appended.speech_id)
+        # TASK-066: この発言が再生成由来かを観測する（根拠接続率を通常生成と分けて集計するため）。
+        # 段階名と真偽だけを添え、本文・口調・結論には一切干渉しない。
+        if appended.speaker != "system":
+            body_source_stage = getattr(self.actions, "last_body_source_stage", None)
+            if isinstance(body_source_stage, str) and body_source_stage:
+                event["body_source_stage"] = body_source_stage
+                event["regenerated_body"] = body_source_stage != "normal_generation"
         event.update(
             self._timeline_reference_fields(appended, snapshot, policy)
         )

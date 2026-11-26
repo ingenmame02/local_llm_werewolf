@@ -452,8 +452,11 @@ def test_cli_model_stats_split_generation_observations_per_action(tmp_path) -> N
 
 
 def test_thinking_only_discussion_retry_sends_short_prompt_for_round_transcript() -> None:
-    # round_transcript_memory 戦略でも、thinking-only 再要求では長い台本を再送しない。
+    # round_transcript_memory 戦略でも、方策 legacy_early_compression（TASK-066以前のA/B基準）
+    # では thinking-only 再要求に長い台本を再送しない。既定の tiered は同一証拠を保持する
+    # （test_task066_retry_context_policy.py で検証）。
     state, actor = _state_and_actor()
+    state.retry_context_policy = "legacy_early_compression"
     for line in range(20):
         state.conversation_log.append(
             Message(

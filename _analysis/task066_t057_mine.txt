@@ -1,0 +1,17 @@
+--- tight num_ctx=3072
+  contract_removal_stage=0
+  contract_stage_attempts=0
+  optional_removed_chars=0
+  prompt_build_calls=1
+  effective_context_limit=3072
+  budget_keys={'context_budget_source': 'player_setting', 'evidence_char_budget': None}
+policy='tiered'
+user_prompt_chars=13397
+legacy_user_prompt_chars=9346
+--- legacy policy tight
+  contract_removal_stage=4
+  contract_stage_attempts=4
+  optional_removed_chars=4051
+  prompt_build_calls=4
+  effective_context_limit=3072
+  budget_keys={'context_budget_source': 'player_setting', 'evidence_char_budget': None}

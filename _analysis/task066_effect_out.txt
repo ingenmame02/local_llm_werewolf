@@ -1,0 +1,110 @@
+
+=== policy=tiered ===
+蛻晏屓逕滓・繝励Ο繝ｳ繝励ヨ螳溷ｭ玲焚: 13745
+騾∽ｿ｡繝励Ο繝ｳ繝励ヨ螳溷ｭ玲焚・磯∽ｿ｡鬆・ｼ・ [14136, 14374, 10305]
+  1蝗樒岼蜀咲函謌・蛻晏屓: ratio=1.0168 saved=-238蟄・
+  send#1: num_predict=2560 thinking=False num_ctx=16384
+  send#2: num_predict=2560 thinking=False num_ctx=16384
+  send#3: num_predict=2560 thinking=False num_ctx=16384
+谿ｵ髫弱う繝吶Φ繝域焚: 2
+  #2 stage=full_preserved trigger=budget_adjustment_same_evidence class=empty_or_thinking_only compresses=False folds=False thinking_off=True escalate=False budget_fit=False outcome=response
+      prompt chars: initial=13745 retry=14374 saved=0 ratio=1.0458
+      style=full_preserved light_dropped=None
+      dropped_sections=[]
+      preserved_sections(25)=['actor_private_memo', 'behavior_contract', 'claim_ledger', 'continuity_checkpoint', 'continuity_memo', 'conversation_evidence', 'current_task', 'day_timeline', 'discussion_guidelines', 'fact_ledger', 'hypothesis_ledger', 'inference_line', 'info_boundaries', 'instructions', 'integrity_alerts', 'leak_boundary', 'output_checklist', 'output_language', 'own_speeches', 'question_block', 'reasoning_guidance', 'role_action_boundary', 'self_action_memory', 'system_rules', 'werewolf_theory_card']
+      evidence ids: preserved=6 dropped=0 []
+      id safety: total=0 core遽逕ｱ譚･=0 雉ｪ蝠冗罰譚･=0 optional縺ｮ縺ｿ=0 clean=True 隧ｳ邏ｰ=[]
+      ID縺梧ｶ医∴縺溽匱險縺ｮ譛ｬ譁・ 菫晄戟=None 蝟ｪ螟ｱ=None
+      timeout襍ｷ蝗=False 蜊ｳ譎ょ悸邵ｮ・域э蝗ｳ逧・↑萓句､厄ｼ・False
+      body_preserved=False delta=None shortened=None
+  #3 stage=light_compressed trigger=budget_retry_repeat_light_compression class=empty_or_thinking_only compresses=True folds=False thinking_off=True escalate=False budget_fit=False outcome=response
+      prompt chars: initial=13745 retry=10305 saved=3440 ratio=0.7497
+      style=optional_sections_light light_dropped=['continuity_memo', 'hypothesis_ledger', 'inference_line', 'integrity_alerts', 'reasoning_guidance', 'werewolf_theory_card']
+      dropped_sections=['continuity_memo', 'hypothesis_ledger', 'inference_line', 'integrity_alerts', 'reasoning_guidance', 'werewolf_theory_card']
+      preserved_sections(19)=['actor_private_memo', 'behavior_contract', 'claim_ledger', 'continuity_checkpoint', 'conversation_evidence', 'current_task', 'day_timeline', 'discussion_guidelines', 'fact_ledger', 'info_boundaries', 'instructions', 'leak_boundary', 'output_checklist', 'output_language', 'own_speeches', 'question_block', 'role_action_boundary', 'self_action_memory', 'system_rules']
+      evidence ids: preserved=5 dropped=1 ['[speech:1]']
+      id safety: total=1 core遽逕ｱ譚･=0 雉ｪ蝠冗罰譚･=0 optional縺ｮ縺ｿ=1 clean=True 隧ｳ邏ｰ=[]
+      ID縺梧ｶ医∴縺溽匱險縺ｮ譛ｬ譁・ 菫晄戟=1 蝟ｪ螟ｱ=0
+      timeout襍ｷ蝗=False 蜊ｳ譎ょ悸邵ｮ・域э蝗ｳ逧・↑萓句､厄ｼ・False
+      body_preserved=False delta=None shortened=None
+譛邨よ悽譁・ｼ亥・鬆ｭ80蟄暦ｼ・ 'Player 5縺輔ｓ縺ｮ逋ｺ險縺ｫ遲斐∴縺ｾ縺吶１layer 2縺輔ｓ縺ｮ迴ｾ蝨ｨ縺ｮ謚慕･ｨ諢乗昴→縲∫峩蜑阪・逋ｺ險縺ｮ譬ｹ諡繧堤｢ｺ隱阪＠縺溘＞縲・
+
+=== policy=legacy_early_compression ===
+蛻晏屓逕滓・繝励Ο繝ｳ繝励ヨ螳溷ｭ玲焚: 13745
+騾∽ｿ｡繝励Ο繝ｳ繝励ヨ螳溷ｭ玲焚・磯∽ｿ｡鬆・ｼ・ [14136, 2749, 2749]
+  1蝗樒岼蜀咲函謌・蛻晏屓: ratio=0.1945 saved=11387蟄・
+  send#1: num_predict=2560 thinking=False num_ctx=16384
+  send#2: num_predict=5120 thinking=False num_ctx=16384
+  send#3: num_predict=5120 thinking=False num_ctx=16384
+谿ｵ髫弱う繝吶Φ繝域焚: 2
+  #2 stage=last_resort_compressed trigger=legacy_early_core_ledger class=empty_or_thinking_only compresses=True folds=True thinking_off=True escalate=True budget_fit=False outcome=response
+      prompt chars: initial=13745 retry=2749 saved=10996 ratio=0.2
+      style=core_ledger_short light_dropped=None
+      dropped_sections=['actor_private_memo', 'behavior_contract', 'claim_ledger', 'continuity_checkpoint', 'continuity_memo', 'conversation_evidence', 'current_task', 'day_timeline', 'discussion_guidelines', 'fact_ledger', 'hypothesis_ledger', 'inference_line', 'info_boundaries', 'instructions', 'integrity_alerts', 'leak_boundary', 'output_checklist', 'output_language', 'own_speeches', 'question_block', 'reasoning_guidance', 'role_action_boundary', 'self_action_memory', 'system_rules', 'werewolf_theory_card']
+      preserved_sections(0)=[]
+      evidence ids: preserved=0 dropped=6 ['[ref:s4]', '[speech:1]', '[speech:2]', '[speech:3]', '[speech:4]', '[speech:5]']
+      id safety: total=6 core遽逕ｱ譚･=5 雉ｪ蝠冗罰譚･=1 optional縺ｮ縺ｿ=1 clean=False 隧ｳ邏ｰ=['[ref:s4]@fact_ledger', '[speech:2]@continuity_checkpoint', '[speech:3]@continuity_checkpoint', '[speech:4]@continuity_checkpoint']
+      ID縺梧ｶ医∴縺溽匱險縺ｮ譛ｬ譁・ 菫晄戟=4 蝟ｪ螟ｱ=0
+      timeout襍ｷ蝗=False 蜊ｳ譎ょ悸邵ｮ・域э蝗ｳ逧・↑萓句､厄ｼ・False
+      body_preserved=False delta=None shortened=None
+  #3 stage=last_resort_compressed trigger=legacy_early_core_ledger class=empty_or_thinking_only compresses=True folds=True thinking_off=True escalate=True budget_fit=False outcome=response
+      prompt chars: initial=13745 retry=2749 saved=10996 ratio=0.2
+      style=core_ledger_short light_dropped=None
+      dropped_sections=['actor_private_memo', 'behavior_contract', 'claim_ledger', 'continuity_checkpoint', 'continuity_memo', 'conversation_evidence', 'current_task', 'day_timeline', 'discussion_guidelines', 'fact_ledger', 'hypothesis_ledger', 'inference_line', 'info_boundaries', 'instructions', 'integrity_alerts', 'leak_boundary', 'output_checklist', 'output_language', 'own_speeches', 'question_block', 'reasoning_guidance', 'role_action_boundary', 'self_action_memory', 'system_rules', 'werewolf_theory_card']
+      preserved_sections(0)=[]
+      evidence ids: preserved=0 dropped=6 ['[ref:s4]', '[speech:1]', '[speech:2]', '[speech:3]', '[speech:4]', '[speech:5]']
+      id safety: total=6 core遽逕ｱ譚･=5 雉ｪ蝠冗罰譚･=1 optional縺ｮ縺ｿ=1 clean=False 隧ｳ邏ｰ=['[ref:s4]@fact_ledger', '[speech:2]@continuity_checkpoint', '[speech:3]@continuity_checkpoint', '[speech:4]@continuity_checkpoint']
+      ID縺梧ｶ医∴縺溽匱險縺ｮ譛ｬ譁・ 菫晄戟=4 蝟ｪ螟ｱ=0
+      timeout襍ｷ蝗=False 蜊ｳ譎ょ悸邵ｮ・域э蝗ｳ逧・↑萓句､厄ｼ・False
+      body_preserved=False delta=None shortened=None
+譛邨よ悽譁・ｼ亥・鬆ｭ80蟄暦ｼ・ 'Player 5縺輔ｓ縺ｮ逋ｺ險縺ｫ遲斐∴縺ｾ縺吶１layer 2縺輔ｓ縺ｮ迴ｾ蝨ｨ縺ｮ謚慕･ｨ諢乗昴→縲∫峩蜑阪・逋ｺ險縺ｮ譬ｹ諡繧堤｢ｺ隱阪＠縺溘＞縲・
+
+=== policy=tiered ===
+蛻晏屓逕滓・繝励Ο繝ｳ繝励ヨ螳溷ｭ玲焚: 13745
+騾∽ｿ｡繝励Ο繝ｳ繝励ヨ螳溷ｭ玲焚・磯∽ｿ｡鬆・ｼ・ [14136, 2750, 2894]
+  1蝗樒岼蜀咲函謌・蛻晏屓: ratio=0.1945 saved=11386蟄・
+  send#1: num_predict=2560 thinking=False num_ctx=16384
+  send#2: num_predict=1024 thinking=False num_ctx=4894
+  send#3: num_predict=1024 thinking=False num_ctx=4966
+谿ｵ髫弱う繝吶Φ繝域焚: 2
+  #2 stage=last_resort_compressed trigger=timeout_repeat_short_prompt class=timeout_repeat compresses=True folds=True thinking_off=True escalate=False budget_fit=True outcome=response
+      prompt chars: initial=13745 retry=2750 saved=10995 ratio=0.2001
+      style=core_ledger_short light_dropped=None
+      dropped_sections=['actor_private_memo', 'behavior_contract', 'claim_ledger', 'continuity_checkpoint', 'continuity_memo', 'conversation_evidence', 'current_task', 'day_timeline', 'discussion_guidelines', 'fact_ledger', 'hypothesis_ledger', 'inference_line', 'info_boundaries', 'instructions', 'integrity_alerts', 'leak_boundary', 'output_checklist', 'output_language', 'own_speeches', 'question_block', 'reasoning_guidance', 'role_action_boundary', 'self_action_memory', 'system_rules', 'werewolf_theory_card']
+      preserved_sections(0)=[]
+      evidence ids: preserved=0 dropped=6 ['[ref:s4]', '[speech:1]', '[speech:2]', '[speech:3]', '[speech:4]', '[speech:5]']
+      id safety: total=6 core遽逕ｱ譚･=5 雉ｪ蝠冗罰譚･=1 optional縺ｮ縺ｿ=1 clean=False 隧ｳ邏ｰ=['[ref:s4]@fact_ledger', '[speech:2]@continuity_checkpoint', '[speech:3]@continuity_checkpoint', '[speech:4]@continuity_checkpoint']
+      ID縺梧ｶ医∴縺溽匱險縺ｮ譛ｬ譁・ 菫晄戟=4 蝟ｪ螟ｱ=0
+      timeout襍ｷ蝗=True 蜊ｳ譎ょ悸邵ｮ・域э蝗ｳ逧・↑萓句､厄ｼ・True
+      body_preserved=False delta=None shortened=None
+  #3 stage=last_resort_compressed trigger=budget_retry_repeat_light_compression class=empty_or_thinking_only compresses=True folds=True thinking_off=True escalate=True budget_fit=True outcome=response
+      prompt chars: initial=13745 retry=2894 saved=10851 ratio=0.2105
+      style=core_ledger_short light_dropped=None
+      dropped_sections=['actor_private_memo', 'behavior_contract', 'claim_ledger', 'continuity_checkpoint', 'continuity_memo', 'conversation_evidence', 'current_task', 'day_timeline', 'discussion_guidelines', 'fact_ledger', 'hypothesis_ledger', 'inference_line', 'info_boundaries', 'instructions', 'integrity_alerts', 'leak_boundary', 'output_checklist', 'output_language', 'own_speeches', 'question_block', 'reasoning_guidance', 'role_action_boundary', 'self_action_memory', 'system_rules', 'werewolf_theory_card']
+      preserved_sections(0)=[]
+      evidence ids: preserved=0 dropped=6 ['[ref:s4]', '[speech:1]', '[speech:2]', '[speech:3]', '[speech:4]', '[speech:5]']
+      id safety: total=6 core遽逕ｱ譚･=5 雉ｪ蝠冗罰譚･=1 optional縺ｮ縺ｿ=1 clean=False 隧ｳ邏ｰ=['[ref:s4]@fact_ledger', '[speech:2]@continuity_checkpoint', '[speech:3]@continuity_checkpoint', '[speech:4]@continuity_checkpoint']
+      ID縺梧ｶ医∴縺溽匱險縺ｮ譛ｬ譁・ 菫晄戟=4 蝟ｪ螟ｱ=0
+      timeout襍ｷ蝗=False 蜊ｳ譎ょ悸邵ｮ・域э蝗ｳ逧・↑萓句､厄ｼ・False
+      body_preserved=False delta=None shortened=None
+譛邨よ悽譁・ｼ亥・鬆ｭ80蟄暦ｼ・ 'Player 5縺輔ｓ縺ｮ逋ｺ險縺ｫ遲斐∴縺ｾ縺吶１layer 2縺輔ｓ縺ｮ迴ｾ蝨ｨ縺ｮ謚慕･ｨ諢乗昴→縲∫峩蜑阪・逋ｺ險縺ｮ譬ｹ諡繧堤｢ｺ隱阪＠縺溘＞縲・
+
+=== A/B・亥酔荳逶､髱｢繝ｻ騾∽ｿ｡繝励Ο繝ｳ繝励ヨ蜷郁ｨ亥ｭ玲焚・・==
+  tiered total=38815 legacy total=19634 delta=19181
+  tiered stages=['full_preserved', 'light_compressed']
+  legacy stages=['last_resort_compressed', 'last_resort_compressed']
+  timeout(tiered) stages=['last_resort_compressed', 'last_resort_compressed'] prompts=[14136, 2750, 2894]
+
+  legacy 縺ｧ螟ｱ繧上ｌ縺溯ｨｼ諡ID・域怙螟ｧ・・ 6
+  tiered 1蝗樒岼縺ｮ遽邏・ｭ玲焚: 0
+  tiered light 縺ｮ遽邏・ｭ玲焚: 3440
+
+  light_compressed 縺ｮ蜑企勁ID: ['[speech:1]']
+  id safety: core遽逕ｱ譚･=0 雉ｪ蝠冗罰譚･=0 optional縺ｮ縺ｿ=1 clean=True
+  ID縺梧ｶ医∴縺溽匱險縺ｮ譛ｬ譁・ 菫晄戟=1 蝟ｪ螟ｱ=0
+  legacy・域立譁ｹ遲厄ｼ峨〒螟ｱ繧上ｌ縺歡ore遽逕ｱ譚･ID・域怙螟ｧ・・ 5
+
+OK: tiered 縺ｯ蜷御ｸ險ｼ諡菫晄戟竊呈ｴｾ逕溽ｯ縺ｮ縺ｿ縲〕egacy 縺ｯ蛻晏屓蜀咲函謌舌°繧牙ｱ･豁ｴ繧堤糞繧
+OK: 繧ｿ繧､繝繧｢繧ｦ繝亥・騾√・諢丞峙逧・↑萓句､厄ｼ亥叉譎ょ悸邵ｮ・峨→縺励※險ｺ譁ｭ縺ｸ譏手ｨ倥＆繧後ｋ
+OK: light_compressed 縺ｮ蜑企勁ID縺ｯ optional 豢ｾ逕溽ｯ逕ｱ譚･縺ｮ縺ｿ縺ｧ逋ｺ險譛ｬ譁・・菫晄戟
+PROBE_EXIT=0

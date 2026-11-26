@@ -1,0 +1,1 @@
+game_result {'type': 'game_result', 'game_id': '4309d9bc3ec1', 'day': 2, 'phase': 'ended', 'winner': 'werewolf', 'winner_reason': 'living_wolves_reached_village_parity', 'winner_counts': {'living_wolves': 2, 'living_madmen': 1, 'living_village': 2}, 'error_occurred': Fals

@@ -2902,3 +2902,134 @@ CLIのカテゴリ集計。`python -m pytest -q` で 269 passed（実機テス�
 - `loaded_context_unavailable` はpreflightでは確定できない（未ロードを観測するだけ）。以後は解決ごとに `provisional` マークを持つ限り「新しい送信が終わった時点」で `/api/ps` を取り直し、実ロード値を採用値へ反映する（試行上限3回。ロード値取得後は確定キャッシュ）。実機で `/api/ps` が常に空を返す環境では、送信後の `effective_num_ctx` を代替証拠にするため、そこで初めて枠の実測が入る。
 - 意図分離の語彙は決定的ルールで、比喩・複合文の境界は観測漏れが起こりうる（検出自体は观測専用なので本文被害はない）。literal 側との差分ログで語彙を増やす運用にしている。
 
+## TASK-066 最新ゲーム分析 — 再生成時の証拠保持優先と段階的コンテキスト圧縮
+
+状態：実装済み（2026-11-26 / `retry_context_policy.py` 新設＋llm_actions接続。LL不使用テスト345件 green、ローカル模擬A/Bで段階と節約・証拠保持を実測。実機Ollamaの同一seed比較はローカル環境の都合上未実施）
+
+### 背景
+
+`game_87ff647746e6` は、通常生成の議論自体は良好だった。議論本文保持率100%、質問回答率100%、発言時点の根拠率約98.5%、フォールバック0件で、TASK-062〜065の継続状態・名前解決・時系列診断は安定している。
+
+一方、再生成時には次の3件で、形式・空応答・生成上限の問題に対して早い段階から`core_ledger`圧縮が行われた。
+
+| プレイヤー | 再生成理由 | 圧縮前 user prompt | 圧縮後 user prompt |
+| --- | --- | ---: | ---: |
+| Player 6 | 議論出力形式の再要求 | 14,707字 | 3,245字 |
+| Player 2 | 空応答 | 16,770字 | 3,359字 |
+| Player 5 | 出力上限切れ | 18,655字 | 4,674字 |
+
+現在の再生成では`semantic_retry`や`generation_retry`でも`speech_history_beyond_recent_and_ledger`を落とすため、モデルが直前までの議論・引用・反論・自分の立場を参照できなくなり、再生成文だけが不自然に短い、一般論的、または直前の議論と接続しない状態になる可能性がある。今回のログでも、再生成後の不自然さと圧縮の因果は完全には断定できないが、通常の形式修正と本当にコンテキストが大きすぎる場合を同じ圧縮処理で扱っていることが問題である。
+
+### 目的
+
+再生成時も、まず直前の議論と証拠を保持したまま問題だけを修正する。情報圧縮は、コンテキスト超過・実効コンテキスト不足・同一条件での連続失敗など、通常の再要求で解決できない場合に限る。再生成の自由な口調・論点・結論は維持し、モデルへ推理手順を強制しない。
+
+### 実装案
+
+1. **再生成コンテキスト方策を段階化する**
+   - `full_preserved`: 通常プロンプトと必要な公開証拠をそのまま保持し、対象エラーだけを短い補足で示す。
+   - `light_compressed`: 現在質問・確定事実・役職主張・投票／死亡台帳・直近発言・反証・continuity checkpointを保持し、低優先の派生節だけを落とす。
+   - `last_resort_compressed`: コンテキスト超過、実効上限不足、または同一条件の連続失敗時だけ、古い発言本文をID付き短行へ畳む。
+   - 通常の初回生成は従来どおりとし、再生成以外のプロンプト量・節順・本文は変更しない。
+
+2. **失敗理由ごとの圧縮開始条件を分ける**
+   - `output_format`、`required_format_or_claim`、質問回答形式、軽微な意味的再要求では、原則`full_preserved`を使う。
+   - `empty_or_thinking_only`では、まずthinking制御・本文予算・同一証拠のまま再要求し、直ちに履歴を削らない。
+   - `generation_cap`では、まず`num_predict`や本文予約を調整し、同じ証拠を維持する。増量後も失敗した場合だけ`light_compressed`へ進む。
+   - `context_overflow`、実効`num_ctx`不足、または短縮なしの再要求が連続して失敗した場合に限り`last_resort_compressed`へ進む。
+   - 秘密情報漏洩の修復は安全境界を優先するが、漏洩していない公開証拠まで無関係に圧縮しない。
+
+3. **保持証拠を明示する**
+   - 再生成ごとに、`retry_context_policy`、`compression_trigger`、`preserved_evidence_ids`、`dropped_evidence_ids`、`preserved_sections`、`dropped_sections`を記録する。
+   - `speech_history_beyond_recent_and_ledger`を落とした場合は、落とした発言数・文字数・最古／最新の時点を記録する。
+   - 再生成後の発言について、直前発言・現在質問・投票理由・CO／判定などへの根拠接続率を通常生成と分けて集計する。
+
+4. **再生成の形式を短く修正する**
+   - 形式エラー時は、長い新規プロンプトを組み直さず、既存の発言本文を保持したまま不足形式だけを示す。
+   - `seer_result_without_claim`、無効投票先、空本文、質問回答形式などで、エラー固有の短い補足を使う。
+   - 再生成された本文が初回本文より不自然に短くなった場合でも、本文を自動的に捨てず、`body_preserved`と本文長の差を診断する。
+
+5. **段階の効果をA/B評価する**
+   - 同一seedで、現行の早期圧縮と`full_preserved → light_compressed → last_resort_compressed`の新方策を比較する。
+   - `retry_rate`、再生成後の本文文字数、本文保持率、質問回答率、証拠根拠率、立場の一貫性、ledger repair、再生成時間、入力文字数を比較する。
+   - 通常生成のプロンプトサイズ・勝敗・役職騙り・議論の自由度を悪化させないことを確認する。
+
+### 設計上の制約
+
+- 再生成時も口調・文量・論点・結論・推理順を指定しない。
+- 形式エラーを理由に、公開本文の意味的な削除・言い換え・中立化を行わない。
+- 圧縮は履歴のプロンプト上の表現だけを短くするものであり、公開ログ本文は一字一句変更しない。
+- 現在質問、確定台帳、役職主張、投票・死亡履歴、直近反論、continuity stateは、`last_resort_compressed`でも優先保持する。
+- 秘密情報境界と役職プロヴェナンスを弱めない。再生成用の短縮プロンプトにも、他プレイヤーの非公開情報を混入させない。
+- 既存の`--core-compression`やTASK-057のoptional段階除去と混同せず、再生成専用の方策・診断として扱う。
+
+### 完了条件
+
+- 形式・質問回答・軽微な意味的失敗では、初回の公開証拠と直近議論を保持したまま再生成できる。
+- 空応答・thinking-only・出力上限切れでは、まず予算・thinking・形式だけを調整し、早期の広範囲圧縮を避けられる。
+- コンテキスト超過または連続失敗時だけ`last_resort_compressed`へ移行し、移行理由をログから確認できる。
+- 再生成ごとに保持・削除された証拠IDと節、再生成前後の本文長、根拠接続率が記録される。
+- 実機ログで、再生成後の不自然な短文化・直前議論との断絶・質問未回答が現行方策より減少する。
+- 通常生成のコンテキスト量、処理時間、秘密情報ガード、本文保持率、役職プロヴェナンス、発言の自由を悪化させない。
+- LL不使用テスト、モックA/B、同一seedの実機A/Bを記録する。
+
+## TASK-066 実装記録 — 再生成コンテキストの段階化（2026-11-26）
+
+状態：実装完了（LL不使用テスト green・ローカル模擬A/Bで証拠保持と節約を実測。実機Ollama評価はローカル環境の都合上未実施）
+
+### 作ったもの
+
+| 対象 | 内容 |
+|---|---|
+| `src/werewolf/retry_context_policy.py`（新設） | 失敗クラスの分離、段階決定（`full_preserved` / `light_compressed` / `last_resort_compressed`）、`light_compressed` の除去候補（optional 派生節のみ）、証拠ID・節名・削除発言の実測diff、再生成プロンプトのブロック語彙＋配置コストモデルと貪欲探索、凍結順 `RETRY_PROMPT_ORDER_V1`、診断フィールド組み立て |
+| `llm_actions.py` | 議論／本文再生成の分岐を段階決定へ置換（初回生成は従来と同一プロンプト）。`retry_decisions` で同一失敗の連続数を数え、`full_preserved` では前回公開本文（秘匿違反の疑いが無い場合のみ）を引用として引き継ぐ `_retry_retained_public_sentences_block` を追加。`retry_context_stage` イベントを発行し、圧縮時のみ従来の `context_compression_stage` も併記 |
+| `engine.py` | 発言イベントへ `body_source_stage` / `regenerated_body` を付与（再生成文の根拠接続率を通常生成と分けて集計できる。段階名と真偽のみで本文には触れない） |
+| `models.py` | `retry_context_policy`（既定 `tiered`）を追加し `__post_init__` で正規化 |
+| `cli.py` | `--retry-context-policy {tiered,legacy_early_compression}`、メタ記録、`retry_context_stage` の集計とモデル別率の算出 |
+| `tests/test_task066_retry_context_policy.py` | 32件（LL不使用）。段階のはしご、legacy との差分、除去候補が optional のみ、本文非変更、禁止語（口調・論点・結論・推理順の指示）不存在、凍結順の静的検査と貪欲探索の再現性、段階診断が本文長の実測値を持つこと、削除IDの安全分類（core節／現在質問／optional由）とプレースホルダ非計上、即時圧縮フラグの分離 |
+
+### 段階とはしご（失敗理由ごとに圧縮開始条件を分離）
+
+- 形式エラー・質問回答・軽微な意味的失敗・秘密漏洩修復：**1回目は `full_preserved`**（初回と同じ公開証拠＋対象エラーだけの補足）。履歴も自分の本文も消えない
+- `empty_or_thinking_only` / `generation_cap`：初回は thinking off・本文予算・`num_predict` の調整だけで証拠は同一。2回目のみ `light_compressed`（派生節のみ除去）
+- `timeout` の再送／実効コンテキスト割り当て不足／サーバー報告の超過：**即 `last_resort_compressed`**（待ち時間と超過解決が目的なので長文再送は逆効果。これは「圧縮は最終手段」に対する**意図的な例外**として診断・集計で分離する。下記「レビュー対応」参照）
+- **同じ失敗クラスが3回目**：そこだけで発言履歴を畳む。それまで `last_resort` へ落ちた場合は元へ戻さない（単調性）
+- どの段階でも、そのターンで一度も秘匿境界を越えていない本文は `[Already Written Draft For This Turn]` として次プロンプトへ引き継ぐ（書き直しを命じず「足りない部分だけ」足す）。診断には `retry_previous_body_chars` と本文長の実測値を出し、圧縮起因で短くなったか（`retry_body_shortened_rate`）を追えるようにした
+
+### 再生成プロンプトの節順最適化（順番は挙動を変える前提での設計）
+
+通常生成の `PROMPT_LAYOUT_V5_ORDER` は一切変えず、再生成短縮プロンプト専用の語彙 `RETRY_PROMPT_BLOCKS`（12ブロック）で `RETRY_PROMPT_ORDER_V1` を凍結した。実プロンプトから実測したブロック字数（`_analysis/task066_retry_order_probe.py`／3シナリオ平均）を使い、`prompt_layout` と同じコストモデル（attention prior × role weight、隣接距離、中部沈み、先頭帯の誘導、形式仕様より後ろの希釈）で貪欲探索（単一ブロック移動＋2ブロック入替、決定的・LL不使用）。
+
+- legacy 配置（TASK-066以前）: score **-20.0** → 凍結配置: **47.56**、adjacency penalty **0.0**、primacy clutter 0.0、ハード制約違反 0
+- 冒頭 = 確定事実（自分が誰か・何日目か）→ 再生成である旨 → エンジン状態 → 公開主張（`[claim:N]` の解決を隣で）。未検証のセオリー行は中部帯へ退避（読み枠を先に決めない＝議論の自由を守る側）
+- 終端 = 反論 → 直近発言 → 本人への未回答質問 → 修正指示 → 出力形式（「いま使う」情報を recency 側へ集約し、修正点と書き方をまとめて読ませる）
+- ハード制約は `validate_retry_order` が名前で検査（確定事実が3ブロック目以降／形式仕様が末尾でない／判定語が修正指示より後／証拠が修正指示より後／重複・未知ブロック）
+
+### ローカル模擬A/Bの実測（`_analysis/task066_effect_probe.py` → `_analysis/task066_effect_out.txt`）
+
+同一シナリオ（thinking-only の再生成が2回続くケース）で方策だけを差し替えた比較：
+
+| 方策 | 再生成順 | user prompt字数 | 段階 | 落ちた証拠ID |
+|---|---|---|---|---|
+| `tiered`（既定） | 1回目 | 14,454（初回13,825） | `full_preserved`（budget_adjustment／thinking off） | **0**（6個そのまま保持） |
+| `tiered` | 2回目 | 10,385（−3,440／ratio 0.751） | `light_compressed`（派生節6つ除去） | 1（`[speech:1]`）だけ |
+| `legacy_early_compression` | 1・2回目 | 2,749（ratio 0.199） | `last_resort_compressed`（core_ledger） | **6全部**（`[ref:sN]`/`[speech:1..5]`消失） |
+
+- 総送信量では tiered が legacy より増える（39,055字 vs 19,714字）。これは「節約より証拠保持を選ぶ」という意図したトレードオフで、`retry_full_preserved_rate`（早期圧縮を避けられた度合い）と `avg_retry_prompt_saved_chars` を突き合わせて評価する設計
+- timeout 起因では tiered でも即 `last_resort`＋`num_ctx` を 16,384→4,894 へ縮小（再送の待ち時間を削る側が勝つ）
+- `light_compressed` の除去は `drop_retry_light_sections` が担い、core 節（現在質問・確定事実台帳・役職主張・発言本文・状態節・契約・出力形式）には1文字も触れないことをテストで固定
+
+### レビュー対応（2026-11-26 2巡目）— timeout例外の明文化・削除IDの安全分類・テスト数の確定
+
+レビュー3点への実装対応と記録修正：
+
+1. **timeout即時圧縮は「意図的な例外」として明文化**：`retry_context_policy.py` に `INTENTIONAL_IMMEDIATE_COMPRESSION_TRIGGERS`（timeout／コンテキスト超過／実効割り当て不足の3引き金限定）と判定関数を持ち、診断イベントへ `retry_timeout_caused` / `retry_immediate_compression_exception`（`context_compression_stage` には `intentional_immediate_compression`）を立てる。README・本記録にも原則からの例外として記載済み。**実機A/Bではこれらの試行を `retry_timeout_stage_events` / `retry_timeout_stage_share` で別建て評価する**（原則側の改善率と混ぜない）。ローカル模擬では形式・空応答再生成に timeout 例外が混ざらないこともプローブで検証（PROBE_EXIT=0）。
+2. **light_compressed の削除IDを安全性分類**：`dropped_evidence_id_safety()` が、消えたIDを「載っていた節」で `dropped_ids_protected_count`（core節由来＝想定外）/ `dropped_ids_question_linked_count`（現在質問が引用）/ `dropped_ids_optional_only_count`（optional派生節のみ＝設計どおり）に分け、`dropped_ids_safety_clean` と詳細（`[speech:1]@hypothesis_ledger` 形式）を残す。加えてテンプレ案内の `[speech:N]` / `[ref:sN]` / `[claim:N]` はID参照でなく案内文なので計上から除外。発言本文が消えたかも `dropped_speech_bodies_still_present` / `dropped_speech_bodies_lost`（話者名＋本文冒頭の文字列照合。公開本文は参照するだけで変更しない）で区別する。**実測**：tiered の light_compressed は削除1件（`[speech:1]`）が optional由のみ・core由0・質問由0・本文喪失0（保持1）、legacy は1回目から core由5〜6件のID消失。想定外の欠落のみサマリ `retry_dropped_ids_from_core_sections_total` / `retry_dropped_ids_question_linked_total` / `retry_unexpected_id_loss_events` に積む。llm_actions 側も light 圧縮時に発言行を畳まないため、ID行が減っても議論の追跡は切れないことをテストで固定。
+3. **テスト件数の記録を確定**：`_analysis/task066_pytest.txt` に記録されていた 317件 は TASK-066 テスト追加途中の部分ログだった。現在の環境（`python -m pytest tests -q`）で再実行し、**349 passed（2.03s）** を同じファイルへ更新（`_analysis/task066_pytest_full.txt`）。本 TASK 専用ファイルは 32件（内訳：新規4件＝プレースホルダ非計上／light削除IDのoptional由分類／履歴を畳む場合のcore・質問ID検出と本文喪失計測／即時圧縮フラグの分離判定）。TASK-053 の thinking-only 短縮プロンプト回帰は legacy 設定側へ移して緑（`compression_reason=generation_retry` は budget起因なら legacy でも維持し、legacy区別は `compression_trigger` 側で保持）。
+
+### 残る検証課題（実機）
+
+- ローカル環境の都合で Ollama 実機テストは行っていない。同一seedで `--retry-context-policy tiered / legacy_early_compression` を回し、`retry_full_preserved_rate`、`retry_body_shortened_rate`、`avg_preserved_evidence_ids`、質問回答率、`ledger_repairs`、再生成時間（`retry_seconds`）、通常生成の `avg_prompt_user_chars` を比較すること
+- 実機ログ `game_87ff647746e6` で確認された「再生成文だけが不自然に短い／直前議論と接続しない」現象が tiered で減るか、公開本文の一字一句変更がないことを確認すること
+- timeout起因の即時圧縮（`retry_timeout_stage_events` / `retry_timeout_stage_share`）は原則とはしごと別建てで評価する。tiered では `retry_unexpected_id_loss_events` が常に 0（発言履歴を畳まない段階で core節・現在質問のIDが消えないこと）、light_compressed の削除IDが optional由のみ（`dropped_ids_safety_clean=true`）かを実機でも確認する
+

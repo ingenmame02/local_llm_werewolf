@@ -1,0 +1,57 @@
+.....................F..F                                                [100%]
+================================== FAILURES ===================================
+____ test_overflow_triggers_staged_optional_removal_without_touching_core _____
+
+    def test_overflow_triggers_staged_optional_removal_without_touching_core() -> None:
+        from werewolf.llm_actions import OllamaActions
+    
+        state = _day1_with_speeches()
+        state.prompt_contract_policy = PROMPT_CONTRACT_POLICY_SIMPLIFIED
+        actor = _player(state, _names(state)[4])
+        actor.num_ctx = 3072  # 蜑ｲ繧雁ｽ薙※繧呈э蝗ｳ逧・↓蟆上＆縺上＠縺ｦ overflow 繧剃ｽ懊ｋ
+        actions = OllamaActions(state, FakeContractClient(), seed=1001)
+        ctx = actions._build_discussion_prompt_with_budget(
+            actor, tuple(state.alive_players), tuple(state.conversation_log), 1
+        )
+        diagnostics = ctx.diagnostics
+        assert diagnostics is not None
+        stage = int(diagnostics["contract_removal_stage"])
+>       assert stage >= 1
+E       assert 0 >= 1
+
+tests\test_task057_prompt_contract.py:701: AssertionError
+___________ test_stage_removal_does_not_rebuild_for_absent_sections ___________
+
+    def test_stage_removal_does_not_rebuild_for_absent_sections() -> None:
+        """谿ｵ髫朱勁蜴ｻ縺ｯ螳溷惠縺吶ｋ optional 遽縺ｶ繧薙□縺代＠縺狗ｵ・∩逶ｴ縺輔↑縺・ｼ医Ο繝ｼ繧ｫ繝ｫ縺ｮ讒狗ｯ峨さ繧ｹ繝域椛蛻ｶ・峨・""
+        from werewolf.llm_actions import OllamaActions
+    
+        state = _day1_with_speeches()
+        state.prompt_contract_policy = PROMPT_CONTRACT_POLICY_SIMPLIFIED
+        actor = _player(state, _names(state)[4])
+        actions = OllamaActions(state, FakeContractClient(), seed=1001)
+        # 蜑ｲ繧雁ｽ薙※縺ｫ菴呵｣輔′縺ゅｋ縺ｪ繧臥ｵ・∩逶ｴ縺苓・菴薙ｒ陦後ｏ縺ｪ縺・ｼ育┌莠育ｮ暦ｼ狗匱險螻･豁ｴ莠育ｮ励・2蝗槭∪縺ｧ・・
+        actor.num_ctx = 32768
+        roomy = actions._build_discussion_prompt_with_budget(
+            actor, tuple(state.alive_players), tuple(state.conversation_log), 1
+        )
+        roomy_diag = roomy.diagnostics or {}
+        assert int(roomy_diag["contract_stage_attempts"]) == 0
+        assert int(roomy_diag["contract_removal_stage"]) == 0
+        assert int(roomy_diag["prompt_build_calls"]) <= 2
+        assert int(roomy_diag["optional_removed_chars"]) == 0
+        # 遯ｮ螻医↑蜑ｲ繧雁ｽ薙※縺ｧ繧ゅ∫ｵ・∩逶ｴ縺励・谿ｵ髫惹ｸ企剞縺ｶ繧薙∪縺ｧ・亥ｭ伜惠縺励↑縺・ｯ縺ｮ縺溘ａ縺ｫ蜀肴ｧ狗ｯ峨＠縺ｪ縺・ｼ・
+        actor.num_ctx = 2560
+        tight = actions._build_discussion_prompt_with_budget(
+            actor, tuple(state.alive_players), tuple(state.conversation_log), 1
+        )
+        tight_diag = tight.diagnostics or {}
+>       assert int(tight_diag["contract_removal_stage"]) >= 1
+E       assert 0 >= 1
+E        +  where 0 = int(0)
+
+tests\test_task057_prompt_contract.py:823: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_task057_prompt_contract.py::test_overflow_triggers_staged_optional_removal_without_touching_core
+FAILED tests/test_task057_prompt_contract.py::test_stage_removal_does_not_rebuild_for_absent_sections
+2 failed, 23 passed in 0.28s

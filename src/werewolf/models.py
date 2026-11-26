@@ -81,6 +81,12 @@ from .output_stability import (
     OUTPUT_STABILIZATION_SCOPE_DEFAULT,
     normalize_output_stabilization_scope,
 )
+# TASK-066: 再生成コンテキストの段階化ポリシー（tiered / legacy_early_compression）。
+# prompt_contract・prompt_layout にしか依存しない純粋なモジュールで、本文は書き換えない。
+from .retry_context_policy import (
+    RETRY_CONTEXT_POLICY_DEFAULT,
+    normalize_retry_context_policy,
+)
 
 
 class Role(str, Enum):
@@ -592,6 +598,11 @@ class GameState:
     # TASK-065: thinking・timeout・生成上限の処置スコープ（action / model）。既定 action は
     # モデル全体へ恒久適用せず、モデル×行動×直近失敗履歴に限定する。
     output_stabilization_scope: str = OUTPUT_STABILIZATION_SCOPE_DEFAULT
+    # TASK-066: 再生成コンテキストの段階化（tiered / legacy_early_compression）。既定 tiered は
+    # まず初回生成と同じ証拠を保持したまま対象エラーだけを直し、圧縮はコンテキスト超過・実効
+    # 割り当て不足・同一条件の連続失敗でだけ進める。legacy_early はTASK-066以前の早期圧縮で
+    # A/B比較用の基準側。口調・文量・論点・結論・推理順にはどちらの設定でも干渉しない。
+    retry_context_policy: str = RETRY_CONTEXT_POLICY_DEFAULT
 
     def __post_init__(self) -> None:
         if self.day < 0:
@@ -627,6 +638,11 @@ class GameState:
         )
         self.output_stabilization_scope = normalize_output_stabilization_scope(
             self.output_stabilization_scope
+        )
+        # TASK-066: 再生成コンテキストの方策も正規化する（未知値は既定の tiered）。
+        # 圧縮の「いつ進めるか」だけで、発言の言い方・論点・結論には影響しない。
+        self.retry_context_policy = normalize_retry_context_policy(
+            self.retry_context_policy
         )
         if not 0 <= self.discussion_turn <= 3:
             raise ValueError("Discussion turn must be between zero and three.")

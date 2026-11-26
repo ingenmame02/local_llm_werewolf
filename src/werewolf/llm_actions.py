@@ -154,6 +154,40 @@ from .prompt_layout import normalize_prompt_layout_policy
 # TASK-064: 能力行使表現の検出は「CO補正の再要求が未検証の能力表現を増やしたか」を
 # 比べる観測専用（本文も選択肢も変えない）。エンジン実行記録台帳の定数もここで使う。
 from .role_action_provenance import KIND_DIVINATION, detect_ability_expressions
+# TASK-066: 再生成コンテキストの段階化（証拠保持優先）。失敗理由とはしごで圧縮開始条件を
+# 分け、真に必要になるまで発言履歴を畳まない。口調・文量・論点・結論・推理順には干渉せず、
+# 圧縮は常にプロンプト上の表現だけを短くする（公開ログの本文は一字一句変更しない）。
+# 既存の --core-compression / optional 段階除去とは別系統の診断キーで記録する。
+from .retry_context_policy import (
+    RETRY_BLOCK_CONFIRMED_FACTS,
+    RETRY_BLOCK_COUNTER_ARGUMENTS,
+    RETRY_BLOCK_CORRECTION_GUIDANCE,
+    RETRY_BLOCK_INFORMATION_RULES,
+    RETRY_BLOCK_OPENING_NOTE,
+    RETRY_BLOCK_OUTPUT_FORMAT,
+    RETRY_BLOCK_PRIVATE_SEER_RESULTS,
+    RETRY_BLOCK_PUBLIC_CLAIMS,
+    RETRY_BLOCK_RECENT_SPEECHES,
+    RETRY_BLOCK_STATE_CHECKPOINT,
+    RETRY_BLOCK_THEORY_LINE,
+    RETRY_BLOCK_UNANSWERED_QUESTION,
+    RETRY_CONTEXT_POLICY_DEFAULT,
+    RETRY_STAGE_FULL_PRESERVED,
+    RETRY_STAGE_LAST_RESORT_COMPRESSED,
+    RETRY_STAGE_LIGHT_COMPRESSED,
+    RETRY_STAGE_NORMAL,
+    RetryStageDecision,
+    TRIGGER_SEMANTIC_REPAIR,
+    assemble_retry_prompt,
+    decide_retry_stage,
+    drop_retry_light_sections,
+    normalize_retry_context_policy,
+    resolve_retry_prompt_order,
+    retry_compression_reason,
+    retry_failure_class,
+    retry_stage_log_fields,
+    retry_trigger_is_immediate_compression,
+)
 from .leak_gate_policy import (
     DEFAULT_LEAK_GUARD_POLICY,
     RULE_INTERNAL_CONFIG,
@@ -751,6 +785,14 @@ class OllamaActions(ActionPolicy):
         self._name_reference_counts: dict[str, dict[str, int]] = {}
         # TASK-065: コンテキスト整合チェックで送信値を縮退させたモデル（cap時のみ）
         self._context_integrity_applied: set[str] = set()
+        # TASK-066: 直近の自由文生成がどの段階のプロンプトから出たか（公開本文は変更しない）。
+        # 発言発行時に「再生成由来か」を添えるだけで使い、自由文生成の開始ごとに戻す。
+        self._last_body_source_stage: str = RETRY_STAGE_NORMAL
+
+    @property
+    def last_body_source_stage(self) -> str:
+        """TASK-066: 直近の本文が通常の初回生成か再生成か（段階名）。観測専用で本文を変えない。"""
+        return self._last_body_source_stage
 
     def thinking_profiles_snapshot(self) -> dict[str, dict[str, dict[str, object]]]:
         """TASK-053: モデル×アクション別のプロファイル（評価ログ・CLI表示用）。"""
@@ -2428,6 +2470,14 @@ class OllamaActions(ActionPolicy):
         response_metadata_history: list[dict[str, str | int | bool | None]] = []
         last_spoken_result: tuple[str, str] | None = None
         last_soft_discussion: tuple[str, str, dict[str, str | int | bool | None]] | None = None
+        # TASK-066: 再生成ごとの段階決定と、前回出ていた公開本文の引き継ぎ（圧縮で
+        # 直前の議論・自分の立場を失わないための保持）。ここに入るのは決定記録と
+        # 長短の実測だけで、口調・論点・結論を固定する情報は扱わない。
+        retry_decisions: list[RetryStageDecision] = []
+        previous_public_body: str = ""
+        previous_body_was_clean = True
+        light_dropped_sections: tuple[str, ...] = ()
+        self._last_body_source_stage = RETRY_STAGE_NORMAL
         for attempt in range(DISCUSSION_MAX_ATTEMPTS):
             # TASK-043: 3回目の再要求は生成起因の失敗（空・思考のみ・切り詰め）だけ。
             # 意味検証の失敗は従来の2回までの挙動を維持し、再試行コストを増やさない。
@@ -2449,52 +2499,107 @@ class OllamaActions(ActionPolicy):
             # round_transcript_memory でも同一の長いプロンプトを再送しない。公開台帳と
             # 直近発言だけを保持した短縮プロンプトへ差し替え、口調・結論・論点は固定しない
             # （長いままの再送が待ち時間と再要求ループの主因だった）。
-            uses_core_ledger_retry = (
-                not keeps_round_context
-                or last_response_issue in GENERATION_ISSUE_REASONS
+            attempt_budget_key = "co_correction" if is_co_correction else budget_key
+            # TASK-066: 再生成の段階を決める。初回生成（attempt==0）は従来どおりで、
+            # 圧縮は「コンテキスト超過・実効割り当て不足・同一条件の連続失敗」でだけ進む。
+            # 形式・質問回答・軽微な意味的失敗では、初回と同じ公開証拠を保持したまま対象
+            # エラーだけを短い補足で直す。決めるのは載せる情報だけで、口調・文量・論点・
+            # 結論・推理順はモデルに委ねたままにする。
+            context_overflow_seen = last_response_issue == "context_overflow_compacted"
+            failure_class = retry_failure_class(
+                last_response_issue, context_overflow=context_overflow_seen
             )
-            user_prompt = (
-                self._seer_co_correction_prompt(actor, last_spoken_result)
-                if is_co_correction
-                else (
-                    prompt_ctx.user_prompt
-                    + self._discussion_retry_instruction(
-                        action, actor, last_response_issue
+            effective_context_shortage = bool(attempt) and self._prompt_overflow_tokens(
+                actor, budget_key, prompt_ctx
+            ) > 0
+            decision = (
+                None
+                if attempt == 0
+                else decide_retry_stage(
+                    failure_class=failure_class,
+                    policy=self._retry_context_policy(),
+                    retry_request_number=attempt + 1,
+                    decided=tuple(retry_decisions),
+                    context_overflow=context_overflow_seen,
+                    effective_context_shortage=effective_context_shortage,
+                    timeout_scope_applies=self._timeout_fit_applies(actor, attempt_budget_key),
+                    keeps_round_context=keeps_round_context,
+                )
+            )
+            retry_prompt_style: str | None = None
+            light_dropped_sections = ()
+            if attempt == 0:
+                # 初回生成は従来と同一のプロンプト（ここで一切組み替えない）
+                user_prompt = prompt_ctx.user_prompt
+            elif action == "wolf_discussion":
+                # 夜の人狼相談は相談相手の直前発言だけで足りる（TASK-053の軽量再要求）
+                user_prompt = self._wolf_consult_light_retry_prompt(actor, recent_messages)
+                retry_prompt_style = "wolf_consult_short"
+            elif is_co_correction:
+                # TASK-064のCO補正は「欠けたCO行だけ」を問う専用要求のまま。発言本文の
+                # 作り直しを迫らないため、履歴を畳むのと同じ最後の手段として記録する。
+                user_prompt = self._seer_co_correction_prompt(actor, last_spoken_result)
+                retry_prompt_style = "co_correction_short"
+                if decision is not None:
+                    decision = RetryStageDecision(
+                        stage=RETRY_STAGE_LAST_RESORT_COMPRESSED,
+                        compression_trigger="format_repair_only",
+                        failure_class=decision.failure_class,
+                        request_number=decision.request_number,
+                        escalate_generation=decision.escalate_generation,
+                        thinking_off=decision.thinking_off,
+                        retry_budget_fit=False,
+                        reasons=("co_correction_asks_only_the_missing_claim_line",),
                     )
-                    + "\nKeep the full current-round transcript and continuity memo; fix only the problematic part."
-                    if (keeps_round_context and not uses_core_ledger_retry)
-                    else self._short_discussion_retry_prompt(
+            elif (
+                decision is not None
+                and decision.stage == RETRY_STAGE_LAST_RESORT_COMPRESSED
+                and action in {"discussion", "discussion_body"}
+            ):
+                # 最後の手段: 古い発言本文をID付き短行へ畳み、現在質問・確定事実・役職主張・
+                # 投票／死亡台帳・直近発言・反証・continuity checkpointだけを残す。
+                retry_prompt_style = "core_ledger_short"
+                user_prompt = self._short_discussion_retry_prompt(
                     actor,
                     last_response_issue,
                     recent_messages,
                     body_only=action == "discussion_body",
+                )
+            elif decision is not None and decision.stage == RETRY_STAGE_LIGHT_COMPRESSED:
+                # 低優先の派生節（既出論点・推理誘導・仮説差分・推測行・セオリーカード・
+                # 派生メモ・整合アラート・期限付き案内・重複引用・ラウンド台本）だけを落とす。
+                # 現在質問・確定事実・役職主張・発言本文・状態節・自分の記録・契約・形式は無傷。
+                retry_prompt_style = "optional_sections_light"
+                pruned_prompt, light_dropped_sections, _light_saved = drop_retry_light_sections(
+                    prompt_ctx.user_prompt
+                )
+                user_prompt = (
+                    pruned_prompt
+                    + self._discussion_retry_instruction(action, actor, last_response_issue)
+                    + self._retry_retained_public_sentences_block(
+                        action, previous_public_body, previous_body_was_clean
                     )
                 )
-                if is_light_retry and action in {"discussion", "discussion_body"}
-                else self._wolf_consult_light_retry_prompt(
-                    actor,
-                    recent_messages,
+            else:
+                # full_preserved: 初回プロンプトをそのまま使い、対象エラーだけの短い補足と
+                # 前回公開本文（漏洩検出が無い場合のみ）を足す。履歴も自分の本文も消さない。
+                user_prompt = prompt_ctx.user_prompt + self._discussion_retry_instruction(
+                    action, actor, last_response_issue
                 )
-                if is_light_retry and action == "wolf_discussion"
-                else prompt_ctx.user_prompt
-                + (
-                    self._discussion_retry_instruction(
-                        action, actor, last_response_issue
+                if attempt >= 1 and keeps_round_context:
+                    user_prompt += (
+                        "\nKeep the full current-round transcript and continuity memo; "
+                        "fix only the problematic part."
                     )
-                    if attempt
-                    else ""
+                retry_prompt_style = "full_preserved" if attempt >= 1 else None
+                user_prompt += self._retry_retained_public_sentences_block(
+                    action, previous_public_body, previous_body_was_clean
                 )
-            )
-            attempt_budget_key = "co_correction" if is_co_correction else budget_key
-            generation_escalation = (
-                attempt >= 1 and last_response_issue in GENERATION_ISSUE_REASONS
-            )
-            # タイムアウト再要求は短縮プロンプト・思考offに加えて、生成上限と
-            # コンテキストを要求サイズへ絞って再送の応答時間を削る（TASK-035）。
-            timeout_retry = attempt >= 1 and last_response_issue == "timeout"
-            thinking_off_retry = attempt >= 1 and (
-                last_response_issue in GENERATION_ISSUE_REASONS or timeout_retry
-            )
+            generation_escalation = bool(decision and decision.escalate_generation)
+            thinking_off_retry = bool(decision and decision.thinking_off)
+            # タイムアウト・コンテキスト超過の再送は、生成上限とコンテキストも要求サイズへ
+            # 絞って待ち時間を削る（TASK-035 / TASK-066の実効割り当て不足）。
+            timeout_retry = bool(decision and decision.retry_budget_fit)
             user_prompt += self._attempt_generation_guidance(
                 actor,
                 attempt_budget_key,
@@ -2502,46 +2607,110 @@ class OllamaActions(ActionPolicy):
                 thinking_off=thinking_off_retry,
                 retry_cap=timeout_retry,
             )
-            # TASK-046: 軽再試行の短縮プロンプト（core-ledger圧縮）では、保持した証拠
-            # （公開CO・占い判定・投票・死亡・直近発言・本人への未回答質問・直近反証）と
-            # 圧縮段階を記録し、プロンプト総量と証拠欠落を別々に検証できるようにする。
-            if (
-                is_light_retry
-                and action in {"discussion", "discussion_body"}
-                and uses_core_ledger_retry
-            ):
-                self._emit(
-                    "context_compression_stage",
-                    action,
-                    actor,
-                    started_at,
-                    compression_stage="core_ledger",
-                    compression_reason=(
-                        "timeout_retry"
-                        if timeout_retry
-                        else (
-                            "generation_retry"
-                            if thinking_off_retry
-                            else "semantic_retry"
-                        )
-                    ),
-                    protected_evidence=[
-                        "public_claims",
-                        "vote_ledger",
-                        "confirmed_deaths",
-                        "private_seer_results",
-                        "recent_speeches",
-                        "unanswered_question_to_actor",
-                        "recent_counter_arguments",
-                    ],
-                    # TASK-053: 短縮プロンプトでどこまでコンテキストを節約できたかを、初回
-                    # 送信のプロンプト長と直接比較できるようにする（長いプロンプト再送の排除）。
-                    retry_prompt_style="core_ledger_short",
-                    initial_user_prompt_char_count=len(prompt_ctx.user_prompt),
-                    retry_user_prompt_char_count=len(user_prompt),
-                    dropped_scope="speech_history_beyond_recent_and_ledger",
+            # TASK-046 / TASK-066: 圧縮が実際に起きたときは従来の `context_compression_stage` で
+            # 保持した証拠（公開CO・占い判定・投票・死亡・直近発言・本人への未回答質問・直近反証）を
+            # 記録し、新しい `retry_context_stage` は段階そのものと引き金、保持／削除した節と証拠IDを
+            # 記録する（full_preserved も「圧縮していない事実」を残す）。どちらも数値・時点・ID・節名
+            # だけで、発言本文は載せない。
+            if decision is not None:
+                retry_decisions.append(decision)
+                self._last_body_source_stage = str(decision.stage)
+            retry_stage_fields: dict[str, object] | None = None
+            retry_stage_emitted = False
+
+            def _placeholder_decision() -> RetryStageDecision:
+                """決定が無い場合の保守的な記録（圧縮なし・同一証拠で対象エラーのみ）。"""
+                return RetryStageDecision(
+                    stage=RETRY_STAGE_FULL_PRESERVED,
+                    compression_trigger=TRIGGER_SEMANTIC_REPAIR,
+                    failure_class=failure_class,
                     request_number=attempt + 1,
+                    reasons=("no_compression_applied",),
                 )
+
+            def _emit_retry_stage(outcome: str, body_char_count: int | None = None) -> None:
+                """段階診断を1試行1回だけ出す（本文は載せず長さの差分のみ）。"""
+                nonlocal retry_stage_emitted
+                if retry_stage_fields is None or retry_stage_emitted:
+                    return
+                retry_stage_emitted = True
+                fields = dict(retry_stage_fields)
+                fields["retry_outcome"] = outcome
+                previous_chars = int(fields.get("retry_previous_body_chars") or 0)
+                if body_char_count is not None:
+                    fields["body_preserved"] = bool(body_char_count)
+                    if previous_chars > 0:
+                        fields["retry_body_char_delta"] = int(body_char_count) - previous_chars
+                        fields["retry_body_shortened"] = bool(int(body_char_count) < previous_chars)
+                self._emit("retry_context_stage", action, actor, started_at, **fields)
+
+            if attempt >= 1 and action in {"discussion", "discussion_body"}:
+                conversation_rows = tuple(
+                    message
+                    for message in (recent_messages or self.state.conversation_log)
+                    if message.speaker != "system"
+                )
+                retry_stage_fields = retry_stage_log_fields(
+                    policy=self._retry_context_policy(),
+                    decision=(decision if decision is not None else _placeholder_decision()),
+                    initial_prompt_text=prompt_ctx.user_prompt,
+                    retry_prompt_text=user_prompt,
+                    messages=conversation_rows,
+                    previous_body_chars=(
+                        len(previous_public_body) if previous_public_body else None
+                    ),
+                    action=str(action),
+                )
+                retry_stage_fields["retry_prompt_style"] = retry_prompt_style
+                retry_stage_fields["request_number"] = attempt + 1
+                # 再生成「前に」出ていた本文の長さ（この試行で本文が得られたときに差分を数える）。
+                # 長短のみで、本文そのものは診断へ載せない。
+                retry_stage_fields["retry_previous_body_chars"] = len(previous_public_body)
+                if light_dropped_sections:
+                    retry_stage_fields["retry_light_dropped_sections"] = list(
+                        light_dropped_sections
+                    )
+                if decision is not None and decision.compresses:
+                    self._emit(
+                        "context_compression_stage",
+                        action,
+                        actor,
+                        started_at,
+                        compression_stage=(
+                            "core_ledger"
+                            if decision.stage == RETRY_STAGE_LAST_RESORT_COMPRESSED
+                            else "optional_sections"
+                        ),
+                        compression_reason=retry_compression_reason(decision),
+                        # timeout・コンテキスト超過は「圧縮は最終手段」の意図的な例外である
+                        # ことを機械可読で残す（実機A/Bではこの試行だけを別建てで評価する）。
+                        intentional_immediate_compression=(
+                            retry_trigger_is_immediate_compression(
+                                decision.compression_trigger
+                            )
+                        ),
+                        protected_evidence=[
+                            "public_claims",
+                            "vote_ledger",
+                            "confirmed_deaths",
+                            "private_seer_results",
+                            "recent_speeches",
+                            "unanswered_question_to_actor",
+                            "recent_counter_arguments",
+                        ],
+                        # TASK-053: 短縮プロンプトでどこまで節約できたかを初回送信長と直接比べる。
+                        retry_prompt_style=retry_prompt_style,
+                        initial_user_prompt_char_count=len(prompt_ctx.user_prompt),
+                        retry_user_prompt_char_count=len(user_prompt),
+                        dropped_scope=(
+                            "speech_history_beyond_recent_and_ledger"
+                            if decision.folds_speech_history
+                            else "low_priority_derived_sections_only"
+                        ),
+                        request_number=attempt + 1,
+                        retry_context_stage=str(decision.stage),
+                        compression_trigger=str(decision.compression_trigger),
+                    )
             messages = [
                 {"role": "system", "content": prompt_ctx.system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -2584,6 +2753,11 @@ class OllamaActions(ActionPolicy):
                 )
                 failure_reasons.append(last_response_issue)
                 transport_attempts += error.attempts
+                # TASK-066: 転送失敗でも段階診断を残す（どの段階のプロンプトが壊れたか、
+                # 圧縮が進んだ理由を追えるようにする。本文は載せない）。
+                _emit_retry_stage(
+                    "context_overflow" if context_overflow else "transport_error"
+                )
                 if (
                     attempt < DISCUSSION_MAX_ATTEMPTS - 1
                     and context_overflow
@@ -2680,6 +2854,10 @@ class OllamaActions(ActionPolicy):
                 )
             response_text = self._final_response(chat_response.content).strip()
             is_pass = self._is_pass(response_text)
+            # TASK-066: ここで初めて本文長が分かるので、段階診断を1回だけ出す。
+            # 「圧縮したのに文が短くなった」のか「同じ証拠のまま形だけ直った」のかを
+            # ログで切り分けるため、長短の差分だけを記録する（内容は記録しない）。
+            _emit_retry_stage("response", len(response_text))
             leak_findings = self._public_response_leak_findings(
                 action, actor, response_text
             )
@@ -2701,6 +2879,10 @@ class OllamaActions(ActionPolicy):
                 for finding in leak_findings
                 if finding.category != "hidden_result_leak"
             )
+            # TASK-066: 次の再生成で「今回出ていた自分の発言」を引き継ぐかどうかを決める。
+            # 秘匿境界を越えた疑いがある本文は引き継がない（次プロンプトへ載せない）。
+            previous_public_body = "" if leak_findings else response_text
+            previous_body_was_clean = not bool(leak_findings)
             if leak_findings and not seer_claim_repairable:
                 self.traces.append(
                     ActionTrace(
@@ -3837,62 +4019,98 @@ class OllamaActions(ActionPolicy):
         # 正規化した論理状態（[CONTINUITY_CHECKPOINT]）を先頭に置く。確定事実・公開申告のID・
         # 反証・未解決の問いはそこへ集約済みなので、投票台帳の全行は再掲しない（入力が減り、
         # 強化モデルの再要求コストが下がる）。口調・論点・結論はここで決めない。
-        state_prefix = f"{checkpoint_text}\n" if checkpoint_text else ""
         vote_history_line = (
             f"- Vote History: {vote_ledger}\n" if not checkpoint_text else ""
         )
-        return (
-            "This is a short retry prompt. Omit old omitted dialogue; use only the following facts and recent speeches.\n"
-            + state_prefix
-            + "[Game System Confirmed Facts]\n"
-            f"- Your Player Name: {actor.name}\n"
-            f"- Self-Reference: {actor.name} is yourself. Always refer to yourself in the first person (I/me/my). "
-            f"Do not discuss {actor.name} in the third person.\n"
-            f"- Your Role: {ROLE_NAMES_EN[actor.role]}\n"
-            f"- Current Day: Day {self.state.day}\n"
-            "- Current Phase: Day (Discussion)\n"
-            f"- Discussion Turn: {self.state.discussion_turn}/3\n"
-            f"- Alive Players: {', '.join(self.state.alive_players)}\n"
-            f"- Known Dead: {', '.join(dead_players) or 'None'}\n"
-            f"- Confirmed Deaths (Last 3): {death_summary}\n"
-            f"- Latest Vote Result: {latest_vote}\n"
-            + vote_history_line
-            + f"- Response Language: {actor.response_language} (Strictly {actor.response_language})\n"
-            "[Theory (Inference - Not Confirmed)] Prioritize revealing Werewolf results early. "
-            "A lone Seer CO with no counter-claim - especially a Day 1 CO - is placed more genuinely "
-            "(真置き) the longer it persists, so doubt it only with concrete inconsistency. "
-            "Faking claims is an option for wolves/madmen, not mandatory.\n"
-            f"[Public Claims & Results] {'; '.join(public_claims_text) or 'None'}.\n"
-            f"[Recent Speech (Unverified)] {'; '.join(recent_speech) or 'None'}.\n"
-            + (
-                f"[Unanswered Question To You] {unanswered_question}\n"
+        # TASK-062/063 / TASK-066: 載せる内容は従来と同じ（確定事実・公開申告・直近発言・
+        # 本人への未回答質問・反証・秘匿境界・修正指示・出力形式）のままだが、载せ順だけを
+        # `retry_context_policy` の凍結順で決める（legacy_early ではTASK-066以前の手順配置）。
+        # どの段階でも現在質問・確定事実・役職主張・投票／死亡台帳・直近発言・反証・
+        # [CONTINUITY_CHECKPOINT] は残す。口調・論点・結論・推理順はここで決めない。
+        blocks: dict[str, str] = {
+            RETRY_BLOCK_OPENING_NOTE: (
+                "This is a short retry prompt. Omit old omitted dialogue; use only the "
+                "following facts and recent speeches."
+            ),
+            RETRY_BLOCK_STATE_CHECKPOINT: checkpoint_text,
+            RETRY_BLOCK_CONFIRMED_FACTS: (
+                "[Game System Confirmed Facts]\n"
+                f"- Your Player Name: {actor.name}\n"
+                "- Self-Reference: "
+                f"{actor.name} is yourself. Always refer to yourself in the first person (I/me/my). "
+                f"Do not discuss {actor.name} in the third person.\n"
+                f"- Your Role: {ROLE_NAMES_EN[actor.role]}\n"
+                f"- Current Day: Day {self.state.day}\n"
+                "- Current Phase: Day (Discussion)\n"
+                f"- Discussion Turn: {self.state.discussion_turn}/3\n"
+                f"- Alive Players: {', '.join(self.state.alive_players)}\n"
+                f"- Known Dead: {', '.join(dead_players) or 'None'}\n"
+                f"- Confirmed Deaths (Last 3): {death_summary}\n"
+                f"- Latest Vote Result: {latest_vote}\n"
+                + vote_history_line
+                + (
+                    f"- Response Language: {actor.response_language} "
+                    f"(Strictly {actor.response_language})\n"
+                )
+            ).strip(),
+            RETRY_BLOCK_THEORY_LINE: (
+                "[Theory (Inference - Not Confirmed)] Prioritize revealing Werewolf results early. "
+                "A lone Seer CO with no counter-claim - especially a Day 1 CO - is placed more "
+                "genuinely (真置き) the longer it persists, so doubt it only with concrete "
+                "inconsistency. Faking claims is an option for wolves/madmen, not mandatory."
+            ),
+            RETRY_BLOCK_PUBLIC_CLAIMS: (
+                f"[Public Claims & Results] {'; '.join(public_claims_text) or 'None'}."
+            ),
+            RETRY_BLOCK_RECENT_SPEECHES: (
+                f"[Recent Speech (Unverified)] {'; '.join(recent_speech) or 'None'}."
+            ),
+            RETRY_BLOCK_UNANSWERED_QUESTION: (
+                f"[Unanswered Question To You] {unanswered_question}"
                 if unanswered_question
                 else ""
-            )
-            + (
-                f"[Recent Counter-arguments (Unverified)] {'; '.join(counter_arguments)}.\n"
+            ),
+            RETRY_BLOCK_COUNTER_ARGUMENTS: (
+                f"[Recent Counter-arguments (Unverified)] {'; '.join(counter_arguments)}."
                 if counter_arguments
                 else ""
-            )
-            + "[Information Classification] Public speech and CO claims are unverified; do not treat them as confirmed facts.\n"
-            "Do not use past games, training memories, or real-world info; rely strictly on this game's records. "
-            "State 'Not in record, cannot determine' for unrecorded matters. Ask living players, not dead players.\n"
-            + (
-                f"[Private Seer Results (Seer Only)] {'; '.join(private_seer_results)}.\n"
+            ),
+            RETRY_BLOCK_INFORMATION_RULES: (
+                "[Information Classification] Public speech and CO claims are unverified; "
+                "do not treat them as confirmed facts.\n"
+                "Do not use past games, training memories, or real-world info; rely strictly "
+                "on this game's records. State 'Not in record, cannot determine' for unrecorded "
+                "matters. Ask living players, not dead players."
+            ),
+            RETRY_BLOCK_PRIVATE_SEER_RESULTS: (
+                f"[Private Seer Results (Seer Only)] {'; '.join(private_seer_results)}."
                 if private_seer_results
                 else ""
-            )
-            + f"[Correction Guidance] {guidance}\n"
-            + (
-                f"CO decision is complete. Output only 3-5 sentences of discussion body text in {actor.response_language} without markers or CO lines."
+            ),
+            RETRY_BLOCK_CORRECTION_GUIDANCE: f"[Correction Guidance] {guidance}",
+            RETRY_BLOCK_OUTPUT_FORMAT: (
+                (
+                    f"CO decision is complete. Output only 3-5 sentences of discussion body "
+                    f"text in {actor.response_language} without markers or CO lines. Write "
+                    "3-5 sentences concisely covering answers to questions, new evidence/"
+                    f"counter-arguments, and current suspicion and vote intention strictly in "
+                    f"{actor.response_language}."
+                )
                 if body_only
-                else "Response must follow the 2-line structure: '[CO] None/Hold/Claim' followed by '[BODY] body'. "
-                "Only when revealing Seer results, add line '[RESULT] Target=<the player you actually divined> "
-                "Result=Werewolf or Human' (never write the placeholder itself)."
-            )
-            + f" Write 3-5 sentences in [BODY] concisely covering answers to questions, new evidence/counter-arguments, "
-            f"and current suspicion and vote intention strictly in {actor.response_language}."
+                else (
+                    "Response must follow the 2-line structure: '[CO] None/Hold/Claim' followed "
+                    "by '[BODY] body'. Only when revealing Seer results, add line "
+                    "'[RESULT] Target=<the player you actually divined> Result=Werewolf or Human' "
+                    f"(never write the placeholder itself). Write 3-5 sentences in [BODY] "
+                    "concisely covering answers to questions, new evidence/counter-arguments, "
+                    f"and current suspicion and vote intention strictly in {actor.response_language}."
+                )
+            ),
+        }
+        assembled, _included_blocks = assemble_retry_prompt(
+            blocks, resolve_retry_prompt_order(self._retry_context_policy())
         )
+        return assembled
 
     @staticmethod
     def _escalated_num_predict(limit: int) -> int:
@@ -5679,6 +5897,47 @@ class OllamaActions(ActionPolicy):
         if self._stabilization_scope() == OUTPUT_STABILIZATION_SCOPE_MODEL:
             return self._slow_model(actor) and key in {"discussion", "wolf_discussion"}
         return self._stability.has_downgrade(actor.model, key, DOWNGRADE_TIMEOUT_FIT)
+
+    # --- TASK-066: 再生成コンテキストの方策・実効割り当ての実測 ---------------------
+    def _retry_context_policy(self) -> str:
+        """再生成の圧縮段階をどう進めるか（既定 tiered / A/B比較用の legacy）。
+
+        state の値を優先し、未設定なら CLIオプション、どちらも無ければ段階化（既定）。
+        ここで選ぶのは「いつ圧縮を始めるか」だけで、発言の言い方・論点・結論には触れない。
+        """
+        value = getattr(self.state, "retry_context_policy", None)
+        if value is None and self.options is not None:
+            value = self.options.get("retry_context_policy")
+        return normalize_retry_context_policy(value)
+
+    # 実効割り当て不足の判定は TASK-057 の `_prompt_overflow_tokens`（上の定義）をそのまま使う。
+    # 同じ式（プロンプト実測文字数×係数＋生成上限＋余白＋thinking実測余白 − 割り当て）で、
+    # >0 のときだけ圧縮の引き金にする。ここで重複定義すると builder の段階除去まで上書き
+    # してしまうため、追加しないこと（TASK-066レビューで確認済み）。
+
+    def _retry_retained_public_sentences_block(
+        self, action: str, previous_body: str, was_clean: bool
+    ) -> str:
+        """前回このターンで出ていた発言を、再生成プロンプトへ引き継ぐ（TASK-066）。
+
+        圧縮で自分の直前発言まで消えると、モデルは同じ論点を繰り返したり結論を翻したりする。
+        そこで「既に書いた発言」を引用として載せ、書き直しを命じずに足りない部分だけ足す。
+        秘匿境界を越えた疑いのある本文は載せず、議論アクション以外では使わない。
+        口調・文量・論点・結論・推理順はここで指定しない。
+        """
+        if action not in {"discussion", "discussion_body"}:
+            return ""
+        if not previous_body or not was_clean:
+            return ""
+        text = re.sub(r"\s+", " ", str(previous_body)).strip()[:420]
+        if not text:
+            return ""
+        return (
+            "\n[Already Written Draft For This Turn (not published yet)] "
+            f"{text}\n"
+            "Continue from what you already wrote above: keep the parts that stand and add "
+            "only what is missing. You choose the wording, length, points and conclusion.\n"
+        )
 
     def _thinking_off_applies(self, actor: Player, budget_key: str) -> bool:
         """thinking枯渇の処置をこの行動へ掛けるか（action は同じ行動だけで絞る）。"""

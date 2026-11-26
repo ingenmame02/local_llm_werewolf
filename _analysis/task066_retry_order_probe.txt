@@ -1,0 +1,41 @@
+measured block chars (3-scenario average):
+  retry_opening_note=106
+  retry_state_checkpoint=127
+  retry_confirmed_facts=557
+  retry_theory_line=306
+  retry_public_claims=72
+  retry_recent_speeches=215
+  retry_unanswered_question=84
+  retry_counter_arguments=89
+  retry_information_rules=312
+  retry_private_seer_results=54
+  retry_correction_guidance=217
+  retry_output_format=411
+
+legacy vs adopted V1:
+  legacy score=-20.0 order=['retry_opening_note', 'retry_state_checkpoint', 'retry_confirmed_facts', 'retry_theory_line', 'retry_public_claims', 'retry_recent_speeches', 'retry_unanswered_question', 'retry_counter_arguments', 'retry_information_rules', 'retry_private_seer_results', 'retry_correction_guidance', 'retry_output_format']
+  adopted score=-20.0 order=['retry_opening_note', 'retry_state_checkpoint', 'retry_confirmed_facts', 'retry_theory_line', 'retry_public_claims', 'retry_recent_speeches', 'retry_unanswered_question', 'retry_counter_arguments', 'retry_information_rules', 'retry_private_seer_results', 'retry_correction_guidance', 'retry_output_format']
+
+greedy search (single-move + swap, LL-free):
+  #1 score=47.56
+      order=['retry_confirmed_facts', 'retry_opening_note', 'retry_state_checkpoint', 'retry_public_claims', 'retry_theory_line', 'retry_information_rules', 'retry_private_seer_results', 'retry_counter_arguments', 'retry_recent_speeches', 'retry_unanswered_question', 'retry_correction_guidance', 'retry_output_format']
+      adjacency=0.0 weak_middle=40.66 primacy_clutter=0.0 post_format=0.0 efficiency=0.8822
+  #2 score=47.56
+      order=['retry_confirmed_facts', 'retry_opening_note', 'retry_state_checkpoint', 'retry_public_claims', 'retry_theory_line', 'retry_private_seer_results', 'retry_information_rules', 'retry_counter_arguments', 'retry_recent_speeches', 'retry_unanswered_question', 'retry_correction_guidance', 'retry_output_format']
+      adjacency=0.0 weak_middle=40.66 primacy_clutter=0.0 post_format=0.0 efficiency=0.8822
+  #3 score=47.56
+      order=['retry_confirmed_facts', 'retry_opening_note', 'retry_state_checkpoint', 'retry_public_claims', 'retry_information_rules', 'retry_theory_line', 'retry_private_seer_results', 'retry_counter_arguments', 'retry_recent_speeches', 'retry_unanswered_question', 'retry_correction_guidance', 'retry_output_format']
+      adjacency=0.0 weak_middle=40.66 primacy_clutter=0.0 post_format=0.0 efficiency=0.8822
+  #4 score=47.56
+      order=['retry_confirmed_facts', 'retry_opening_note', 'retry_state_checkpoint', 'retry_public_claims', 'retry_information_rules', 'retry_private_seer_results', 'retry_theory_line', 'retry_counter_arguments', 'retry_recent_speeches', 'retry_unanswered_question', 'retry_correction_guidance', 'retry_output_format']
+      adjacency=0.0 weak_middle=40.66 primacy_clutter=0.0 post_format=0.0 efficiency=0.8822
+  #5 score=47.56
+      order=['retry_confirmed_facts', 'retry_opening_note', 'retry_state_checkpoint', 'retry_public_claims', 'retry_private_seer_results', 'retry_theory_line', 'retry_information_rules', 'retry_counter_arguments', 'retry_recent_speeches', 'retry_unanswered_question', 'retry_correction_guidance', 'retry_output_format']
+      adjacency=0.0 weak_middle=40.66 primacy_clutter=0.0 post_format=0.0 efficiency=0.8822
+
+hard-constraint check:
+  legacy: violations=[]
+  adopted V1: violations=[]
+  search best: violations=[]
+
+freedom guard (蜿｣隱ｿ繝ｻ隲也せ繝ｻ邨占ｫ悶・蠑ｷ蛻ｶ譁・ｨ): OK

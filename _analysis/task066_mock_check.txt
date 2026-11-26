@@ -1,0 +1,10 @@
+_analysis/t066_mock_tiered 1
+  game_4309d9bc3ec1.jsonl policy=tiered body_source_stage={'None': 42}
+    retry events: {}
+    all event types: {'action_pending_attack': 1, 'continuity_checkpoint': 4, 'first_night_no_attack': 1, 'game_result': 1, 'morning_casualty': 2, 'seer_results': 2, 'vote_completed': 14, 'vote_started': 14, 'voting_ballot_completed': 2, 'voting_phase_ended': 2, 'voting_phase_started': 2, 'voting_result': 2, 'winner_decided': 1}
+    result retry keys: ['retry_added_ability_expressions', 'retry_body_present_events', 'retry_body_shortened_events', 'retry_compression_events', 'retry_compression_rate', 'retry_dropped_evidence_id_total', 'retry_dropped_speech_char_total', 'retry_dropped_speech_count_total', 'retry_full_preserved_rate', 'retry_initial_prompt_char_total', 'retry_preserved_evidence_id_total', 'retry_prompt_char_total', 'retry_prompt_saved_char_total', 'retry_prompt_shortening_ratio']
+_analysis/t066_mock_legacy 1
+  game_cce2e05c4947.jsonl policy=legacy_early_compression body_source_stage={'None': 42}
+    retry events: {}
+    all event types: {'action_pending_attack': 1, 'continuity_checkpoint': 4, 'first_night_no_attack': 1, 'game_result': 1, 'morning_casualty': 2, 'seer_results': 2, 'vote_completed': 14, 'vote_started': 14, 'voting_ballot_completed': 2, 'voting_phase_ended': 2, 'voting_phase_started': 2, 'voting_result': 2, 'winner_decided': 1}
+    result retry keys: ['retry_added_ability_expressions', 'retry_body_present_events', 'retry_body_shortened_events', 'retry_compression_events', 'retry_compression_rate', 'retry_dropped_evidence_id_total', 'retry_dropped_speech_char_total', 'retry_dropped_speech_count_total', 'retry_full_preserved_rate', 'retry_initial_prompt_char_total', 'retry_preserved_evidence_id_total', 'retry_prompt_char_total', 'retry_prompt_saved_char_total', 'retry_prompt_shortening_ratio']

@@ -1,0 +1,570 @@
+diff --git a/src/werewolf/llm_actions.py b/src/werewolf/llm_actions.py
+index ae69dac..9950f01 100644
+--- a/src/werewolf/llm_actions.py
++++ b/src/werewolf/llm_actions.py
+@@ -154,6 +154,41 @@ from .prompt_layout import normalize_prompt_layout_policy
+ # TASK-064: 閭ｽ蜉幄｡御ｽｿ陦ｨ迴ｾ縺ｮ讀懷・縺ｯ縲靴O陬懈ｭ｣縺ｮ蜀崎ｦ∵ｱゅ′譛ｪ讀懆ｨｼ縺ｮ閭ｽ蜉幄｡ｨ迴ｾ繧貞｢励ｄ縺励◆縺九阪ｒ
+ # 豈斐∋繧玖ｦｳ貂ｬ蟆ら畑・域悽譁・ｂ驕ｸ謚櫁い繧ょ､峨∴縺ｪ縺・ｼ峨ゅお繝ｳ繧ｸ繝ｳ螳溯｡瑚ｨ倬鹸蜿ｰ蟶ｳ縺ｮ螳壽焚繧ゅ％縺薙〒菴ｿ縺・・ from .role_action_provenance import KIND_DIVINATION, detect_ability_expressions
++# TASK-066: 蜀咲函謌舌さ繝ｳ繝・く繧ｹ繝医・谿ｵ髫主喧・郁ｨｼ諡菫晄戟蜆ｪ蜈茨ｼ峨ょ､ｱ謨礼炊逕ｱ縺ｨ縺ｯ縺励＃縺ｧ蝨ｧ邵ｮ髢句ｧ区擅莉ｶ繧・+# 蛻・￠縲∫悄縺ｫ蠢・ｦ√↓縺ｪ繧九∪縺ｧ逋ｺ險螻･豁ｴ繧堤糞縺ｾ縺ｪ縺・ょ哨隱ｿ繝ｻ譁・㍼繝ｻ隲也せ繝ｻ邨占ｫ悶・謗ｨ逅・・↓縺ｯ蟷ｲ貂峨○縺壹・+# 蝨ｧ邵ｮ縺ｯ蟶ｸ縺ｫ繝励Ο繝ｳ繝励ヨ荳翫・陦ｨ迴ｾ縺縺代ｒ遏ｭ縺上☆繧具ｼ亥・髢九Ο繧ｰ縺ｮ譛ｬ譁・・荳蟄嶺ｸ蜿･螟画峩縺励↑縺・ｼ峨・+# 譌｢蟄倥・ --core-compression / optional 谿ｵ髫朱勁蜴ｻ縺ｨ縺ｯ蛻･邉ｻ邨ｱ縺ｮ險ｺ譁ｭ繧ｭ繝ｼ縺ｧ險倬鹸縺吶ｋ縲・+from .retry_context_policy import (
++    RETRY_BLOCK_CONFIRMED_FACTS,
++    RETRY_BLOCK_COUNTER_ARGUMENTS,
++    RETRY_BLOCK_CORRECTION_GUIDANCE,
++    RETRY_BLOCK_INFORMATION_RULES,
++    RETRY_BLOCK_OPENING_NOTE,
++    RETRY_BLOCK_OUTPUT_FORMAT,
++    RETRY_BLOCK_PRIVATE_SEER_RESULTS,
++    RETRY_BLOCK_PUBLIC_CLAIMS,
++    RETRY_BLOCK_RECENT_SPEECHES,
++    RETRY_BLOCK_STATE_CHECKPOINT,
++    RETRY_BLOCK_THEORY_LINE,
++    RETRY_BLOCK_UNANSWERED_QUESTION,
++    RETRY_CONTEXT_POLICY_DEFAULT,
++    RETRY_STAGE_FULL_PRESERVED,
++    RETRY_STAGE_LAST_RESORT_COMPRESSED,
++    RETRY_STAGE_LIGHT_COMPRESSED,
++    RETRY_STAGE_NORMAL,
++    RetryStageDecision,
++    TRIGGER_SEMANTIC_REPAIR,
++    FAILURE_EMPTY_OR_THINKING_ONLY,
++    FAILURE_GENERATION_CAP,
++    FAILURE_TIMEOUT,
++    assemble_retry_prompt,
++    decide_retry_stage,
++    drop_retry_light_sections,
++    normalize_retry_context_policy,
++    resolve_retry_prompt_order,
++    retry_failure_class,
++    retry_stage_log_fields,
++)
+ from .leak_gate_policy import (
+     DEFAULT_LEAK_GUARD_POLICY,
+     RULE_INTERNAL_CONFIG,
+@@ -2428,6 +2463,14 @@ class OllamaActions(ActionPolicy):
+         response_metadata_history: list[dict[str, str | int | bool | None]] = []
+         last_spoken_result: tuple[str, str] | None = None
+         last_soft_discussion: tuple[str, str, dict[str, str | int | bool | None]] | None = None
++        # TASK-066: 蜀咲函謌舌＃縺ｨ縺ｮ谿ｵ髫取ｱｺ螳壹→縲∝燕蝗槫・縺ｦ縺・◆蜈ｬ髢区悽譁・・蠑輔″邯吶℃・亥悸邵ｮ縺ｧ
++        # 逶ｴ蜑阪・隴ｰ隲悶・閾ｪ蛻・・遶句ｴ繧貞､ｱ繧上↑縺・◆繧√・菫晄戟・峨ゅ％縺薙↓蜈･繧九・縺ｯ豎ｺ螳夊ｨ倬鹸縺ｨ
++        # 髟ｷ遏ｭ縺ｮ螳滓ｸｬ縺縺代〒縲∝哨隱ｿ繝ｻ隲也せ繝ｻ邨占ｫ悶ｒ蝗ｺ螳壹☆繧区ュ蝣ｱ縺ｯ謇ｱ繧上↑縺・・+        retry_decisions: list[RetryStageDecision] = []
++        previous_public_body: str = ""
++        previous_body_was_clean = True
++        light_dropped_sections: tuple[str, ...] = ()
++        self._last_body_source_stage = RETRY_STAGE_NORMAL
+         for attempt in range(DISCUSSION_MAX_ATTEMPTS):
+             # TASK-043: 3蝗樒岼縺ｮ蜀崎ｦ∵ｱゅ・逕滓・襍ｷ蝗縺ｮ螟ｱ謨暦ｼ育ｩｺ繝ｻ諤晁・・縺ｿ繝ｻ蛻・ｊ隧ｰ繧・ｼ峨□縺代・             # 諢丞袖讀懆ｨｼ縺ｮ螟ｱ謨励・蠕捺擂縺ｮ2蝗槭∪縺ｧ縺ｮ謖吝虚繧堤ｶｭ謖√＠縲∝・隧ｦ陦後さ繧ｹ繝医ｒ蠅励ｄ縺輔↑縺・・@@ -2449,52 +2492,107 @@ class OllamaActions(ActionPolicy):
+             # round_transcript_memory 縺ｧ繧ょ酔荳縺ｮ髟ｷ縺・・繝ｭ繝ｳ繝励ヨ繧貞・騾√＠縺ｪ縺・ょ・髢句床蟶ｳ縺ｨ
+             # 逶ｴ霑醍匱險縺縺代ｒ菫晄戟縺励◆遏ｭ邵ｮ繝励Ο繝ｳ繝励ヨ縺ｸ蟾ｮ縺玲崛縺医∝哨隱ｿ繝ｻ邨占ｫ悶・隲也せ縺ｯ蝗ｺ螳壹＠縺ｪ縺・             # ・磯聞縺・∪縺ｾ縺ｮ蜀埼√′蠕・■譎る俣縺ｨ蜀崎ｦ∵ｱゅΝ繝ｼ繝励・荳ｻ蝗縺縺｣縺滂ｼ峨・-            uses_core_ledger_retry = (
+-                not keeps_round_context
+-                or last_response_issue in GENERATION_ISSUE_REASONS
++            attempt_budget_key = "co_correction" if is_co_correction else budget_key
++            # TASK-066: 蜀咲函謌舌・谿ｵ髫弱ｒ豎ｺ繧√ｋ縲ょ・蝗樒函謌撰ｼ・ttempt==0・峨・蠕捺擂縺ｩ縺翫ｊ縺ｧ縲・+            # 蝨ｧ邵ｮ縺ｯ縲後さ繝ｳ繝・く繧ｹ繝郁ｶ・℃繝ｻ螳溷柑蜑ｲ繧雁ｽ薙※荳崎ｶｳ繝ｻ蜷御ｸ譚｡莉ｶ縺ｮ騾｣邯壼､ｱ謨励阪〒縺縺鷹ｲ繧縲・+            # 蠖｢蠑上・雉ｪ蝠丞屓遲斐・霆ｽ蠕ｮ縺ｪ諢丞袖逧・､ｱ謨励〒縺ｯ縲∝・蝗槭→蜷後§蜈ｬ髢玖ｨｼ諡繧剃ｿ晄戟縺励◆縺ｾ縺ｾ蟇ｾ雎｡
++            # 繧ｨ繝ｩ繝ｼ縺縺代ｒ遏ｭ縺・｣懆ｶｳ縺ｧ逶ｴ縺吶よｱｺ繧√ｋ縺ｮ縺ｯ霈峨○繧区ュ蝣ｱ縺縺代〒縲∝哨隱ｿ繝ｻ譁・㍼繝ｻ隲也せ繝ｻ
++            # 邨占ｫ悶・謗ｨ逅・・・繝｢繝・Ν縺ｫ蟋斐・縺溘∪縺ｾ縺ｫ縺吶ｋ縲・+            context_overflow_seen = last_response_issue == "context_overflow_compacted"
++            failure_class = retry_failure_class(
++                last_response_issue, context_overflow=context_overflow_seen
++            )
++            effective_context_shortage = bool(attempt) and self._prompt_overflow_tokens(
++                actor, budget_key, prompt_ctx
++            ) > 0
++            decision = (
++                None
++                if attempt == 0
++                else decide_retry_stage(
++                    failure_class=failure_class,
++                    policy=self._retry_context_policy(),
++                    retry_request_number=attempt + 1,
++                    decided=tuple(retry_decisions),
++                    context_overflow=context_overflow_seen,
++                    effective_context_shortage=effective_context_shortage,
++                    timeout_scope_applies=self._timeout_fit_applies(actor, attempt_budget_key),
++                    keeps_round_context=keeps_round_context,
++                )
+             )
+-            user_prompt = (
+-                self._seer_co_correction_prompt(actor, last_spoken_result)
+-                if is_co_correction
+-                else (
+-                    prompt_ctx.user_prompt
+-                    + self._discussion_retry_instruction(
+-                        action, actor, last_response_issue
++            retry_prompt_style: str | None = None
++            light_dropped_sections = ()
++            if attempt == 0:
++                # 蛻晏屓逕滓・縺ｯ蠕捺擂縺ｨ蜷御ｸ縺ｮ繝励Ο繝ｳ繝励ヨ・医％縺薙〒荳蛻・ｵ・∩譖ｿ縺医↑縺・ｼ・+                user_prompt = prompt_ctx.user_prompt
++            elif action == "wolf_discussion":
++                # 螟懊・莠ｺ迢ｼ逶ｸ隲・・逶ｸ隲・嶌謇九・逶ｴ蜑咲匱險縺縺代〒雜ｳ繧翫ｋ・・ASK-053縺ｮ霆ｽ驥丞・隕∵ｱゑｼ・+                user_prompt = self._wolf_consult_light_retry_prompt(actor, recent_messages)
++                retry_prompt_style = "wolf_consult_short"
++            elif is_co_correction:
++                # TASK-064縺ｮCO陬懈ｭ｣縺ｯ縲梧ｬ縺代◆CO陦後□縺代阪ｒ蝠上≧蟆ら畑隕∵ｱゅ・縺ｾ縺ｾ縲ら匱險譛ｬ譁・・
++                # 菴懊ｊ逶ｴ縺励ｒ霑ｫ繧峨↑縺・◆繧√∝ｱ･豁ｴ繧堤糞繧縺ｮ縺ｨ蜷後§譛蠕後・謇区ｮｵ縺ｨ縺励※險倬鹸縺吶ｋ縲・+                user_prompt = self._seer_co_correction_prompt(actor, last_spoken_result)
++                retry_prompt_style = "co_correction_short"
++                if decision is not None:
++                    decision = RetryStageDecision(
++                        stage=RETRY_STAGE_LAST_RESORT_COMPRESSED,
++                        compression_trigger="format_repair_only",
++                        failure_class=decision.failure_class,
++                        request_number=decision.request_number,
++                        escalate_generation=decision.escalate_generation,
++                        thinking_off=decision.thinking_off,
++                        retry_budget_fit=False,
++                        reasons=("co_correction_asks_only_the_missing_claim_line",),
+                     )
+-                    + "\nKeep the full current-round transcript and continuity memo; fix only the problematic part."
+-                    if (keeps_round_context and not uses_core_ledger_retry)
+-                    else self._short_discussion_retry_prompt(
++            elif (
++                decision is not None
++                and decision.stage == RETRY_STAGE_LAST_RESORT_COMPRESSED
++                and action in {"discussion", "discussion_body"}
++            ):
++                # 譛蠕後・謇区ｮｵ: 蜿､縺・匱險譛ｬ譁・ｒID莉倥″遏ｭ陦後∈逡ｳ縺ｿ縲∫樟蝨ｨ雉ｪ蝠上・遒ｺ螳壻ｺ句ｮ溘・蠖ｹ閨ｷ荳ｻ蠑ｵ繝ｻ
++                # 謚慕･ｨ・乗ｭｻ莠｡蜿ｰ蟶ｳ繝ｻ逶ｴ霑醍匱險繝ｻ蜿崎ｨｼ繝ｻcontinuity checkpoint縺縺代ｒ谿九☆縲・+                retry_prompt_style = "core_ledger_short"
++                user_prompt = self._short_discussion_retry_prompt(
+                     actor,
+                     last_response_issue,
+                     recent_messages,
+                     body_only=action == "discussion_body",
++                )
++            elif decision is not None and decision.stage == RETRY_STAGE_LIGHT_COMPRESSED:
++                # 菴主━蜈医・豢ｾ逕溽ｯ・域里蜃ｺ隲也せ繝ｻ謗ｨ逅・ｪ伜ｰ弱・莉ｮ隱ｬ蟾ｮ蛻・・謗ｨ貂ｬ陦後・繧ｻ繧ｪ繝ｪ繝ｼ繧ｫ繝ｼ繝峨・
++                # 豢ｾ逕溘Γ繝｢繝ｻ謨ｴ蜷医い繝ｩ繝ｼ繝医・譛滄剞莉倥″譯亥・繝ｻ驥崎､・ｼ慕畑繝ｻ繝ｩ繧ｦ繝ｳ繝牙床譛ｬ・峨□縺代ｒ關ｽ縺ｨ縺吶・+                # 迴ｾ蝨ｨ雉ｪ蝠上・遒ｺ螳壻ｺ句ｮ溘・蠖ｹ閨ｷ荳ｻ蠑ｵ繝ｻ逋ｺ險譛ｬ譁・・迥ｶ諷狗ｯ繝ｻ閾ｪ蛻・・險倬鹸繝ｻ螂醍ｴ・・蠖｢蠑上・辟｡蛯ｷ縲・+                retry_prompt_style = "optional_sections_light"
++                pruned_prompt, light_dropped_sections, _light_saved = drop_retry_light_sections(
++                    prompt_ctx.user_prompt
++                )
++                user_prompt = (
++                    pruned_prompt
++                    + self._discussion_retry_instruction(action, actor, last_response_issue)
++                    + self._retry_retained_public_sentences_block(
++                        action, previous_public_body, previous_body_was_clean
+                     )
+                 )
+-                if is_light_retry and action in {"discussion", "discussion_body"}
+-                else self._wolf_consult_light_retry_prompt(
+-                    actor,
+-                    recent_messages,
++            else:
++                # full_preserved: 蛻晏屓繝励Ο繝ｳ繝励ヨ繧偵◎縺ｮ縺ｾ縺ｾ菴ｿ縺・∝ｯｾ雎｡繧ｨ繝ｩ繝ｼ縺縺代・遏ｭ縺・｣懆ｶｳ縺ｨ
++                # 蜑榊屓蜈ｬ髢区悽譁・ｼ域ｼ乗ｴｩ讀懷・縺檎┌縺・ｴ蜷医・縺ｿ・峨ｒ雜ｳ縺吶ょｱ･豁ｴ繧り・蛻・・譛ｬ譁・ｂ豸医＆縺ｪ縺・・+                user_prompt = prompt_ctx.user_prompt + self._discussion_retry_instruction(
++                    action, actor, last_response_issue
+                 )
+-                if is_light_retry and action == "wolf_discussion"
+-                else prompt_ctx.user_prompt
+-                + (
+-                    self._discussion_retry_instruction(
+-                        action, actor, last_response_issue
++                if attempt >= 1 and keeps_round_context:
++                    user_prompt += (
++                        "\nKeep the full current-round transcript and continuity memo; "
++                        "fix only the problematic part."
+                     )
+-                    if attempt
+-                    else ""
++                retry_prompt_style = "full_preserved" if attempt >= 1 else None
++                user_prompt += self._retry_retained_public_sentences_block(
++                    action, previous_public_body, previous_body_was_clean
+                 )
+-            )
+-            attempt_budget_key = "co_correction" if is_co_correction else budget_key
+-            generation_escalation = (
+-                attempt >= 1 and last_response_issue in GENERATION_ISSUE_REASONS
+-            )
+-            # 繧ｿ繧､繝繧｢繧ｦ繝亥・隕∵ｱゅ・遏ｭ邵ｮ繝励Ο繝ｳ繝励ヨ繝ｻ諤晁バff縺ｫ蜉縺医※縲∫函謌蝉ｸ企剞縺ｨ
+-            # 繧ｳ繝ｳ繝・く繧ｹ繝医ｒ隕∵ｱゅし繧､繧ｺ縺ｸ邨槭▲縺ｦ蜀埼√・蠢懃ｭ疲凾髢薙ｒ蜑翫ｋ・・ASK-035・峨・-            timeout_retry = attempt >= 1 and last_response_issue == "timeout"
+-            thinking_off_retry = attempt >= 1 and (
+-                last_response_issue in GENERATION_ISSUE_REASONS or timeout_retry
+-            )
++            generation_escalation = bool(decision and decision.escalate_generation)
++            thinking_off_retry = bool(decision and decision.thinking_off)
++            # 繧ｿ繧､繝繧｢繧ｦ繝医・繧ｳ繝ｳ繝・く繧ｹ繝郁ｶ・℃縺ｮ蜀埼√・縲∫函謌蝉ｸ企剞縺ｨ繧ｳ繝ｳ繝・く繧ｹ繝医ｂ隕∵ｱゅし繧､繧ｺ縺ｸ
++            # 邨槭▲縺ｦ蠕・■譎る俣繧貞炎繧具ｼ・ASK-035 / TASK-066縺ｮ螳溷柑蜑ｲ繧雁ｽ薙※荳崎ｶｳ・峨・+            timeout_retry = bool(decision and decision.retry_budget_fit)
+             user_prompt += self._attempt_generation_guidance(
+                 actor,
+                 attempt_budget_key,
+@@ -2502,46 +2600,109 @@ class OllamaActions(ActionPolicy):
+                 thinking_off=thinking_off_retry,
+                 retry_cap=timeout_retry,
+             )
+-            # TASK-046: 霆ｽ蜀崎ｩｦ陦後・遏ｭ邵ｮ繝励Ο繝ｳ繝励ヨ・・ore-ledger蝨ｧ邵ｮ・峨〒縺ｯ縲∽ｿ晄戟縺励◆險ｼ諡
+-            # ・亥・髢気O繝ｻ蜊縺・愛螳壹・謚慕･ｨ繝ｻ豁ｻ莠｡繝ｻ逶ｴ霑醍匱險繝ｻ譛ｬ莠ｺ縺ｸ縺ｮ譛ｪ蝗樒ｭ碑ｳｪ蝠上・逶ｴ霑大渚險ｼ・峨→
+-            # 蝨ｧ邵ｮ谿ｵ髫弱ｒ險倬鹸縺励√・繝ｭ繝ｳ繝励ヨ邱城㍼縺ｨ險ｼ諡谺關ｽ繧貞挨縲・↓讀懆ｨｼ縺ｧ縺阪ｋ繧医≧縺ｫ縺吶ｋ縲・-            if (
+-                is_light_retry
+-                and action in {"discussion", "discussion_body"}
+-                and uses_core_ledger_retry
+-            ):
+-                self._emit(
+-                    "context_compression_stage",
+-                    action,
+-                    actor,
+-                    started_at,
+-                    compression_stage="core_ledger",
+-                    compression_reason=(
+-                        "timeout_retry"
+-                        if timeout_retry
+-                        else (
+-                            "generation_retry"
+-                            if thinking_off_retry
+-                            else "semantic_retry"
+-                        )
+-                    ),
+-                    protected_evidence=[
+-                        "public_claims",
+-                        "vote_ledger",
+-                        "confirmed_deaths",
+-                        "private_seer_results",
+-                        "recent_speeches",
+-                        "unanswered_question_to_actor",
+-                        "recent_counter_arguments",
+-                    ],
+-                    # TASK-053: 遏ｭ邵ｮ繝励Ο繝ｳ繝励ヨ縺ｧ縺ｩ縺薙∪縺ｧ繧ｳ繝ｳ繝・く繧ｹ繝医ｒ遽邏・〒縺阪◆縺九ｒ縲∝・蝗・-                    # 騾∽ｿ｡縺ｮ繝励Ο繝ｳ繝励ヨ髟ｷ縺ｨ逶ｴ謗･豈碑ｼ・〒縺阪ｋ繧医≧縺ｫ縺吶ｋ・磯聞縺・・繝ｭ繝ｳ繝励ヨ蜀埼√・謗帝勁・峨・-                    retry_prompt_style="core_ledger_short",
+-                    initial_user_prompt_char_count=len(prompt_ctx.user_prompt),
+-                    retry_user_prompt_char_count=len(user_prompt),
+-                    dropped_scope="speech_history_beyond_recent_and_ledger",
++            # TASK-046 / TASK-066: 蝨ｧ邵ｮ縺悟ｮ滄圀縺ｫ襍ｷ縺阪◆縺ｨ縺阪・蠕捺擂縺ｮ `context_compression_stage` 縺ｧ
++            # 菫晄戟縺励◆險ｼ諡・亥・髢気O繝ｻ蜊縺・愛螳壹・謚慕･ｨ繝ｻ豁ｻ莠｡繝ｻ逶ｴ霑醍匱險繝ｻ譛ｬ莠ｺ縺ｸ縺ｮ譛ｪ蝗樒ｭ碑ｳｪ蝠上・逶ｴ霑大渚險ｼ・峨ｒ
++            # 險倬鹸縺励∵眠縺励＞ `retry_context_stage` 縺ｯ谿ｵ髫弱◎縺ｮ繧ゅ・縺ｨ蠑輔″驥代∽ｿ晄戟・丞炎髯､縺励◆遽縺ｨ險ｼ諡ID繧・+            # 險倬鹸縺吶ｋ・・ull_preserved 繧ゅ悟悸邵ｮ縺励※縺・↑縺・ｺ句ｮ溘阪ｒ谿九☆・峨ゅ←縺｡繧峨ｂ謨ｰ蛟､繝ｻ譎らせ繝ｻID繝ｻ遽蜷・+            # 縺縺代〒縲∫匱險譛ｬ譁・・霈峨○縺ｪ縺・・+            if decision is not None:
++                retry_decisions.append(decision)
++                self._last_body_source_stage = str(decision.stage)
++            retry_stage_fields: dict[str, object] | None = None
++            retry_stage_emitted = False
++
++            def _placeholder_decision() -> RetryStageDecision:
++                """豎ｺ螳壹′辟｡縺・ｴ蜷医・菫晏ｮ育噪縺ｪ險倬鹸・亥悸邵ｮ縺ｪ縺励・蜷御ｸ險ｼ諡縺ｧ蟇ｾ雎｡繧ｨ繝ｩ繝ｼ縺ｮ縺ｿ・峨・""
++                return RetryStageDecision(
++                    stage=RETRY_STAGE_FULL_PRESERVED,
++                    compression_trigger=TRIGGER_SEMANTIC_REPAIR,
++                    failure_class=failure_class,
+                     request_number=attempt + 1,
++                    reasons=("no_compression_applied",),
++                )
++
++            def _emit_retry_stage(outcome: str, body_char_count: int | None = None) -> None:
++                """谿ｵ髫手ｨｺ譁ｭ繧・隧ｦ陦・蝗槭□縺大・縺呻ｼ域悽譁・・霈峨○縺夐聞縺輔・蟾ｮ蛻・・縺ｿ・峨・""
++                nonlocal retry_stage_emitted
++                if retry_stage_fields is None or retry_stage_emitted:
++                    return
++                retry_stage_emitted = True
++                fields = dict(retry_stage_fields)
++                fields["retry_outcome"] = outcome
++                previous_chars = int(fields.get("retry_previous_body_chars") or 0)
++                if body_char_count is not None:
++                    fields["body_preserved"] = bool(body_char_count)
++                    if previous_chars > 0:
++                        fields["retry_body_char_delta"] = int(body_char_count) - previous_chars
++                        fields["retry_body_shortened"] = bool(int(body_char_count) < previous_chars)
++                self._emit("retry_context_stage", action, actor, started_at, **fields)
++
++            if attempt >= 1 and action in {"discussion", "discussion_body"}:
++                conversation_rows = tuple(
++                    message
++                    for message in (recent_messages or self.state.conversation_log)
++                    if message.speaker != "system"
+                 )
++                retry_stage_fields = retry_stage_log_fields(
++                    policy=self._retry_context_policy(),
++                    decision=(decision if decision is not None else _placeholder_decision()),
++                    initial_prompt_text=prompt_ctx.user_prompt,
++                    retry_prompt_text=user_prompt,
++                    messages=conversation_rows,
++                    previous_body_chars=(
++                        len(previous_public_body) if previous_public_body else None
++                    ),
++                    action=str(action),
++                )
++                retry_stage_fields["retry_prompt_style"] = retry_prompt_style
++                retry_stage_fields["request_number"] = attempt + 1
++                if light_dropped_sections:
++                    retry_stage_fields["retry_light_dropped_sections"] = list(
++                        light_dropped_sections
++                    )
++                if decision is not None and decision.compresses:
++                    self._emit(
++                        "context_compression_stage",
++                        action,
++                        actor,
++                        started_at,
++                        compression_stage=(
++                            "core_ledger"
++                            if decision.stage == RETRY_STAGE_LAST_RESORT_COMPRESSED
++                            else "optional_sections"
++                        ),
++                        compression_reason=(
++                            "timeout_retry"
++                            if failure_class == FAILURE_TIMEOUT
++                            else (
++                                "generation_retry"
++                                if failure_class
++                                in {FAILURE_EMPTY_OR_THINKING_ONLY, FAILURE_GENERATION_CAP}
++                                else "semantic_retry"
++                            )
++                        ),
++                        protected_evidence=[
++                            "public_claims",
++                            "vote_ledger",
++                            "confirmed_deaths",
++                            "private_seer_results",
++                            "recent_speeches",
++                            "unanswered_question_to_actor",
++                            "recent_counter_arguments",
++                        ],
++                        # TASK-053: 遏ｭ邵ｮ繝励Ο繝ｳ繝励ヨ縺ｧ縺ｩ縺薙∪縺ｧ遽邏・〒縺阪◆縺九ｒ蛻晏屓騾∽ｿ｡髟ｷ縺ｨ逶ｴ謗･豈斐∋繧九・+                        retry_prompt_style=retry_prompt_style,
++                        initial_user_prompt_char_count=len(prompt_ctx.user_prompt),
++                        retry_user_prompt_char_count=len(user_prompt),
++                        dropped_scope=(
++                            "speech_history_beyond_recent_and_ledger"
++                            if decision.folds_speech_history
++                            else "low_priority_derived_sections_only"
++                        ),
++                        request_number=attempt + 1,
++                        retry_context_stage=str(decision.stage),
++                        compression_trigger=str(decision.compression_trigger),
++                    )
+             messages = [
+                 {"role": "system", "content": prompt_ctx.system_prompt},
+                 {"role": "user", "content": user_prompt},
+@@ -2584,6 +2745,11 @@ class OllamaActions(ActionPolicy):
+                 )
+                 failure_reasons.append(last_response_issue)
+                 transport_attempts += error.attempts
++                # TASK-066: 霆｢騾∝､ｱ謨励〒繧よｮｵ髫手ｨｺ譁ｭ繧呈ｮ九☆・医←縺ｮ谿ｵ髫弱・繝励Ο繝ｳ繝励ヨ縺悟｣翫ｌ縺溘°縲・+                # 蝨ｧ邵ｮ縺碁ｲ繧薙□逅・罰繧定ｿｽ縺医ｋ繧医≧縺ｫ縺吶ｋ縲よ悽譁・・霈峨○縺ｪ縺・ｼ峨・+                _emit_retry_stage(
++                    "context_overflow" if context_overflow else "transport_error"
++                )
+                 if (
+                     attempt < DISCUSSION_MAX_ATTEMPTS - 1
+                     and context_overflow
+@@ -2680,6 +2846,10 @@ class OllamaActions(ActionPolicy):
+                 )
+             response_text = self._final_response(chat_response.content).strip()
+             is_pass = self._is_pass(response_text)
++            # TASK-066: 縺薙％縺ｧ蛻昴ａ縺ｦ譛ｬ譁・聞縺悟・縺九ｋ縺ｮ縺ｧ縲∵ｮｵ髫手ｨｺ譁ｭ繧・蝗槭□縺大・縺吶・+            # 縲悟悸邵ｮ縺励◆縺ｮ縺ｫ譁・′遏ｭ縺上↑縺｣縺溘阪・縺九悟酔縺倩ｨｼ諡縺ｮ縺ｾ縺ｾ蠖｢縺縺醍峩縺｣縺溘阪・縺九ｒ
++            # 繝ｭ繧ｰ縺ｧ蛻・ｊ蛻・￠繧九◆繧√・聞遏ｭ縺ｮ蟾ｮ蛻・□縺代ｒ險倬鹸縺吶ｋ・亥・螳ｹ縺ｯ險倬鹸縺励↑縺・ｼ峨・+            _emit_retry_stage("response", len(response_text))
+             leak_findings = self._public_response_leak_findings(
+                 action, actor, response_text
+             )
+@@ -2701,6 +2871,10 @@ class OllamaActions(ActionPolicy):
+                 for finding in leak_findings
+                 if finding.category != "hidden_result_leak"
+             )
++            # TASK-066: 谺｡縺ｮ蜀咲函謌舌〒縲御ｻ雁屓蜃ｺ縺ｦ縺・◆閾ｪ蛻・・逋ｺ險縲阪ｒ蠑輔″邯吶＄縺九←縺・°繧呈ｱｺ繧√ｋ縲・+            # 遘伜諺蠅・阜繧定ｶ翫∴縺溽桝縺・′縺ゅｋ譛ｬ譁・・蠑輔″邯吶′縺ｪ縺・ｼ域ｬ｡繝励Ο繝ｳ繝励ヨ縺ｸ霈峨○縺ｪ縺・ｼ峨・+            previous_public_body = "" if leak_findings else response_text
++            previous_body_was_clean = not bool(leak_findings)
+             if leak_findings and not seer_claim_repairable:
+                 self.traces.append(
+                     ActionTrace(
+@@ -3837,62 +4011,98 @@ class OllamaActions(ActionPolicy):
+         # 豁｣隕丞喧縺励◆隲也炊迥ｶ諷具ｼ・CONTINUITY_CHECKPOINT]・峨ｒ蜈磯ｭ縺ｫ鄂ｮ縺上ら｢ｺ螳壻ｺ句ｮ溘・蜈ｬ髢狗筏蜻翫・ID繝ｻ
+         # 蜿崎ｨｼ繝ｻ譛ｪ隗｣豎ｺ縺ｮ蝠上＞縺ｯ縺昴％縺ｸ髮・ｴ・ｸ医∩縺ｪ縺ｮ縺ｧ縲∵兜逾ｨ蜿ｰ蟶ｳ縺ｮ蜈ｨ陦後・蜀肴軸縺励↑縺・ｼ亥・蜉帙′貂帙ｊ縲・         # 蠑ｷ蛹悶Δ繝・Ν縺ｮ蜀崎ｦ∵ｱゅさ繧ｹ繝医′荳九′繧具ｼ峨ょ哨隱ｿ繝ｻ隲也せ繝ｻ邨占ｫ悶・縺薙％縺ｧ豎ｺ繧√↑縺・・-        state_prefix = f"{checkpoint_text}\n" if checkpoint_text else ""
+         vote_history_line = (
+             f"- Vote History: {vote_ledger}\n" if not checkpoint_text else ""
+         )
+-        return (
+-            "This is a short retry prompt. Omit old omitted dialogue; use only the following facts and recent speeches.\n"
+-            + state_prefix
+-            + "[Game System Confirmed Facts]\n"
+-            f"- Your Player Name: {actor.name}\n"
+-            f"- Self-Reference: {actor.name} is yourself. Always refer to yourself in the first person (I/me/my). "
+-            f"Do not discuss {actor.name} in the third person.\n"
+-            f"- Your Role: {ROLE_NAMES_EN[actor.role]}\n"
+-            f"- Current Day: Day {self.state.day}\n"
+-            "- Current Phase: Day (Discussion)\n"
+-            f"- Discussion Turn: {self.state.discussion_turn}/3\n"
+-            f"- Alive Players: {', '.join(self.state.alive_players)}\n"
+-            f"- Known Dead: {', '.join(dead_players) or 'None'}\n"
+-            f"- Confirmed Deaths (Last 3): {death_summary}\n"
+-            f"- Latest Vote Result: {latest_vote}\n"
+-            + vote_history_line
+-            + f"- Response Language: {actor.response_language} (Strictly {actor.response_language})\n"
+-            "[Theory (Inference - Not Confirmed)] Prioritize revealing Werewolf results early. "
+-            "A lone Seer CO with no counter-claim - especially a Day 1 CO - is placed more genuinely "
+-            "(逵溽ｽｮ縺・ the longer it persists, so doubt it only with concrete inconsistency. "
+-            "Faking claims is an option for wolves/madmen, not mandatory.\n"
+-            f"[Public Claims & Results] {'; '.join(public_claims_text) or 'None'}.\n"
+-            f"[Recent Speech (Unverified)] {'; '.join(recent_speech) or 'None'}.\n"
+-            + (
+-                f"[Unanswered Question To You] {unanswered_question}\n"
++        # TASK-062/063 / TASK-066: 霈峨○繧句・螳ｹ縺ｯ蠕捺擂縺ｨ蜷後§・育｢ｺ螳壻ｺ句ｮ溘・蜈ｬ髢狗筏蜻翫・逶ｴ霑醍匱險繝ｻ
++        # 譛ｬ莠ｺ縺ｸ縺ｮ譛ｪ蝗樒ｭ碑ｳｪ蝠上・蜿崎ｨｼ繝ｻ遘伜諺蠅・阜繝ｻ菫ｮ豁｣謖・､ｺ繝ｻ蜃ｺ蜉帛ｽ｢蠑擾ｼ峨・縺ｾ縺ｾ縺縺後∬ｽｽ縺幃・□縺代ｒ
++        # `retry_context_policy` 縺ｮ蜃咲ｵ宣・〒豎ｺ繧√ｋ・・egacy_early 縺ｧ縺ｯTASK-066莉･蜑阪・謇矩・・鄂ｮ・峨・+        # 縺ｩ縺ｮ谿ｵ髫弱〒繧ら樟蝨ｨ雉ｪ蝠上・遒ｺ螳壻ｺ句ｮ溘・蠖ｹ閨ｷ荳ｻ蠑ｵ繝ｻ謚慕･ｨ・乗ｭｻ莠｡蜿ｰ蟶ｳ繝ｻ逶ｴ霑醍匱險繝ｻ蜿崎ｨｼ繝ｻ
++        # [CONTINUITY_CHECKPOINT] 縺ｯ谿九☆縲ょ哨隱ｿ繝ｻ隲也せ繝ｻ邨占ｫ悶・謗ｨ逅・・・縺薙％縺ｧ豎ｺ繧√↑縺・・+        blocks: dict[str, str] = {
++            RETRY_BLOCK_OPENING_NOTE: (
++                "This is a short retry prompt. Omit old omitted dialogue; use only the "
++                "following facts and recent speeches."
++            ),
++            RETRY_BLOCK_STATE_CHECKPOINT: checkpoint_text,
++            RETRY_BLOCK_CONFIRMED_FACTS: (
++                "[Game System Confirmed Facts]\n"
++                f"- Your Player Name: {actor.name}\n"
++                "- Self-Reference: "
++                f"{actor.name} is yourself. Always refer to yourself in the first person (I/me/my). "
++                f"Do not discuss {actor.name} in the third person.\n"
++                f"- Your Role: {ROLE_NAMES_EN[actor.role]}\n"
++                f"- Current Day: Day {self.state.day}\n"
++                "- Current Phase: Day (Discussion)\n"
++                f"- Discussion Turn: {self.state.discussion_turn}/3\n"
++                f"- Alive Players: {', '.join(self.state.alive_players)}\n"
++                f"- Known Dead: {', '.join(dead_players) or 'None'}\n"
++                f"- Confirmed Deaths (Last 3): {death_summary}\n"
++                f"- Latest Vote Result: {latest_vote}\n"
++                + vote_history_line
++                + (
++                    f"- Response Language: {actor.response_language} "
++                    f"(Strictly {actor.response_language})\n"
++                )
++            ).strip(),
++            RETRY_BLOCK_THEORY_LINE: (
++                "[Theory (Inference - Not Confirmed)] Prioritize revealing Werewolf results early. "
++                "A lone Seer CO with no counter-claim - especially a Day 1 CO - is placed more "
++                "genuinely (逵溽ｽｮ縺・ the longer it persists, so doubt it only with concrete "
++                "inconsistency. Faking claims is an option for wolves/madmen, not mandatory."
++            ),
++            RETRY_BLOCK_PUBLIC_CLAIMS: (
++                f"[Public Claims & Results] {'; '.join(public_claims_text) or 'None'}."
++            ),
++            RETRY_BLOCK_RECENT_SPEECHES: (
++                f"[Recent Speech (Unverified)] {'; '.join(recent_speech) or 'None'}."
++            ),
++            RETRY_BLOCK_UNANSWERED_QUESTION: (
++                f"[Unanswered Question To You] {unanswered_question}"
+                 if unanswered_question
+                 else ""
+-            )
+-            + (
+-                f"[Recent Counter-arguments (Unverified)] {'; '.join(counter_arguments)}.\n"
++            ),
++            RETRY_BLOCK_COUNTER_ARGUMENTS: (
++                f"[Recent Counter-arguments (Unverified)] {'; '.join(counter_arguments)}."
+                 if counter_arguments
+                 else ""
+-            )
+-            + "[Information Classification] Public speech and CO claims are unverified; do not treat them as confirmed facts.\n"
+-            "Do not use past games, training memories, or real-world info; rely strictly on this game's records. "
+-            "State 'Not in record, cannot determine' for unrecorded matters. Ask living players, not dead players.\n"
+-            + (
+-                f"[Private Seer Results (Seer Only)] {'; '.join(private_seer_results)}.\n"
++            ),
++            RETRY_BLOCK_INFORMATION_RULES: (
++                "[Information Classification] Public speech and CO claims are unverified; "
++                "do not treat them as confirmed facts.\n"
++                "Do not use past games, training memories, or real-world info; rely strictly "
++                "on this game's records. State 'Not in record, cannot determine' for unrecorded "
++                "matters. Ask living players, not dead players."
++            ),
++            RETRY_BLOCK_PRIVATE_SEER_RESULTS: (
++                f"[Private Seer Results (Seer Only)] {'; '.join(private_seer_results)}."
+                 if private_seer_results
+                 else ""
+-            )
+-            + f"[Correction Guidance] {guidance}\n"
+-            + (
+-                f"CO decision is complete. Output only 3-5 sentences of discussion body text in {actor.response_language} without markers or CO lines."
++            ),
++            RETRY_BLOCK_CORRECTION_GUIDANCE: f"[Correction Guidance] {guidance}",
++            RETRY_BLOCK_OUTPUT_FORMAT: (
++                (
++                    f"CO decision is complete. Output only 3-5 sentences of discussion body "
++                    f"text in {actor.response_language} without markers or CO lines. Write "
++                    "3-5 sentences concisely covering answers to questions, new evidence/"
++                    f"counter-arguments, and current suspicion and vote intention strictly in "
++                    f"{actor.response_language}."
++                )
+                 if body_only
+-                else "Response must follow the 2-line structure: '[CO] None/Hold/Claim' followed by '[BODY] body'. "
+-                "Only when revealing Seer results, add line '[RESULT] Target=<the player you actually divined> "
+-                "Result=Werewolf or Human' (never write the placeholder itself)."
+-            )
+-            + f" Write 3-5 sentences in [BODY] concisely covering answers to questions, new evidence/counter-arguments, "
+-            f"and current suspicion and vote intention strictly in {actor.response_language}."
++                else (
++                    "Response must follow the 2-line structure: '[CO] None/Hold/Claim' followed "
++                    "by '[BODY] body'. Only when revealing Seer results, add line "
++                    "'[RESULT] Target=<the player you actually divined> Result=Werewolf or Human' "
++                    f"(never write the placeholder itself). Write 3-5 sentences in [BODY] "
++                    "concisely covering answers to questions, new evidence/counter-arguments, "
++                    f"and current suspicion and vote intention strictly in {actor.response_language}."
++                )
++            ),
++        }
++        assembled, _included_blocks = assemble_retry_prompt(
++            blocks, resolve_retry_prompt_order(self._retry_context_policy())
+         )
++        return assembled
+ 
+     @staticmethod
+     def _escalated_num_predict(limit: int) -> int:
+@@ -5680,6 +5890,89 @@ class OllamaActions(ActionPolicy):
+             return self._slow_model(actor) and key in {"discussion", "wolf_discussion"}
+         return self._stability.has_downgrade(actor.model, key, DOWNGRADE_TIMEOUT_FIT)
+ 
++    # --- TASK-066: 蜀咲函謌舌さ繝ｳ繝・く繧ｹ繝医・譁ｹ遲悶・螳溷柑蜑ｲ繧雁ｽ薙※縺ｮ螳滓ｸｬ ---------------------
++    def _retry_context_policy(self) -> str:
++        """蜀咲函謌舌・蝨ｧ邵ｮ谿ｵ髫弱ｒ縺ｩ縺・ｲ繧√ｋ縺具ｼ域里螳・tiered / A/B豈碑ｼ・畑縺ｮ legacy・峨・+
++        state 縺ｮ蛟､繧貞━蜈医＠縲∵悴險ｭ螳壹↑繧・CLI繧ｪ繝励す繝ｧ繝ｳ縲√←縺｡繧峨ｂ辟｡縺代ｌ縺ｰ谿ｵ髫主喧・域里螳夲ｼ峨・+        縺薙％縺ｧ驕ｸ縺ｶ縺ｮ縺ｯ縲後＞縺､蝨ｧ邵ｮ繧貞ｧ九ａ繧九°縲阪□縺代〒縲∫匱險縺ｮ險縺・婿繝ｻ隲也せ繝ｻ邨占ｫ悶↓縺ｯ隗ｦ繧後↑縺・・+        """
++        value = getattr(self.state, "retry_context_policy", None)
++        if value is None and self.options is not None:
++            value = self.options.get("retry_context_policy")
++        return normalize_retry_context_policy(value)
++
++    def _prompt_overflow_tokens(
++        self, actor: Player, budget_key: str, prompt_ctx: PromptContext
++    ) -> int:
++        """蛻晏屓繝励Ο繝ｳ繝励ヨ縺悟ｮ溷柑繧ｳ繝ｳ繝・く繧ｹ繝医↓蜿弱∪繧九°縺ｮ雜・℃驥擾ｼ・0 縺ｧ荳崎ｶｳ縲・ 縺ｧ蝠城｡後↑縺暦ｼ峨・+
++        隕狗ｩ阪ｊ縺ｯ騾∽ｿ｡縺ｨ蜷後§蠑擾ｼ・request_token_estimate`: 繝励Ο繝ｳ繝励ヨ螳滓ｸｬ・狗函謌蝉ｸ企剞・・+        thinking菴咏區・峨ｒ菴ｿ縺・∵ｹ諡蛟､縺ｯ TASK-046縺ｧ隗｣豎ｺ縺励◆蜊倅ｸ蛟､・・/api/ps`繝ｻenv繝ｻModelfile繝ｻ
++        險ｭ螳夲ｼ俄・ 辟｡縺代ｌ縺ｰ繝励Ξ繧､繝､繝ｼ縺ｮ `max_num_ctx`縲ょ愛螳壽攝譁吶ｒ蠅励ｄ縺吶□縺代〒蠢懃ｭ泌・螳ｹ縺ｸ縺ｯ
++        蟷ｲ貂峨＠縺ｪ縺・りｧ｣豎ｺ縺ｧ縺阪↑縺・ｴ蜷医・ 0・茨ｼ晏悸邵ｮ縺ｮ蠑輔″驥代↓縺励↑縺・ｼ峨ｒ霑斐☆縲・+        """
++        if not self._dynamic_context_enabled():
++            return 0
++        limit = 0
++        diagnostics = (
++            prompt_ctx.diagnostics if isinstance(prompt_ctx.diagnostics, dict) else {}
++        )
++        resolved = self._context_budgets.get(actor.model)
++        for candidate in (
++            diagnostics.get("effective_context_limit"),
++            getattr(resolved, "limit", None),
++            actor.max_num_ctx,
++        ):
++            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
++                limit = int(candidate)
++                break
++        if limit <= 0:
++            return 0
++        try:
++            options, _source, thinking_enabled, _thinking_source = self._options_for(
++                actor, normalize_action_budget_key(budget_key)
++            )
++        except (TypeError, ValueError, KeyError):
++            return 0
++        num_predict = (options or {}).get("num_predict")
++        needed = request_token_estimate(
++            [
++                {"role": "system", "content": prompt_ctx.system_prompt},
++                {"role": "user", "content": prompt_ctx.user_prompt},
++            ],
++            num_predict,
++            thinking=bool(thinking_enabled),
++            thinking_margin=self._thinking_margin_for(
++                actor, budget_key, bool(thinking_enabled)
++            ),
++        )
++        return max(0, int(needed) - limit)
++
++    def _retry_retained_public_sentences_block(
++        self, action: str, previous_body: str, was_clean: bool
++    ) -> str:
++        """蜑榊屓縺薙・繧ｿ繝ｼ繝ｳ縺ｧ蜃ｺ縺ｦ縺・◆逋ｺ險繧偵∝・逕滓・繝励Ο繝ｳ繝励ヨ縺ｸ蠑輔″邯吶＄・・ASK-066・峨・+
++        蝨ｧ邵ｮ縺ｧ閾ｪ蛻・・逶ｴ蜑咲匱險縺ｾ縺ｧ豸医∴繧九→縲√Δ繝・Ν縺ｯ蜷後§隲也せ繧堤ｹｰ繧願ｿ斐＠縺溘ｊ邨占ｫ悶ｒ鄙ｻ縺励◆繧翫☆繧九・+        縺昴％縺ｧ縲梧里縺ｫ譖ｸ縺・◆逋ｺ險縲阪ｒ蠑慕畑縺ｨ縺励※霈峨○縲∵嶌縺咲峩縺励ｒ蜻ｽ縺倥★縺ｫ雜ｳ繧翫↑縺・Κ蛻・□縺題ｶｳ縺吶・+        遘伜諺蠅・阜繧定ｶ翫∴縺溽桝縺・・縺ゅｋ譛ｬ譁・・霈峨○縺壹∬ｭｰ隲悶い繧ｯ繧ｷ繝ｧ繝ｳ莉･螟悶〒縺ｯ菴ｿ繧上↑縺・・+        蜿｣隱ｿ繝ｻ譁・㍼繝ｻ隲也せ繝ｻ邨占ｫ悶・謗ｨ逅・・・縺薙％縺ｧ謖・ｮ壹＠縺ｪ縺・・+        """
++        if action not in {"discussion", "discussion_body"}:
++            return ""
++        if not previous_body or not was_clean:
++            return ""
++        text = re.sub(r"\s+", " ", str(previous_body)).strip()[:420]
++        if not text:
++            return ""
++        return (
++            "\n[Already Written Draft For This Turn (not published yet)] "
++            f"{text}\n"
++            "Continue from what you already wrote above: keep the parts that stand and add "
++            "only what is missing. You choose the wording, length, points and conclusion.\n"
++        )
++
+     def _thinking_off_applies(self, actor: Player, budget_key: str) -> bool:
+         """thinking譫ｯ貂・・蜃ｦ鄂ｮ繧偵％縺ｮ陦悟虚縺ｸ謗帙￠繧九°・・ction 縺ｯ蜷後§陦悟虚縺縺代〒邨槭ｋ・峨・""
+         key = normalize_action_budget_key(budget_key)
