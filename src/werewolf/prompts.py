@@ -144,6 +144,12 @@ ROLE_DESCRIPTIONS_EN: dict[Role, str] = {
         "terms in your body. Unpublished targets and verdict words belong only to the CO and RESULT "
         "blocks."
     ),
+    Role.MEDIUM: (
+        "You are the Medium (霊媒師). After each daytime execution, you automatically learn whether "
+        "the executed player was 'Werewolf' or 'Human' (a Madman is detected as 'Human'). "
+        "Goal: share your medium results at the right time to help the village identify wolves and "
+        "evaluate Seer claims."
+    ),
     Role.VILLAGER: (
         "You are a Villager. You have no special abilities; your goal is to identify and exile "
         "werewolves through day discussion and voting, observing suspicious statements and behavior.\n"
@@ -157,6 +163,7 @@ ROLE_NAMES_EN: dict[Role, str] = {
     Role.WOLF: "Werewolf",
     Role.MADMAN: "Madman",
     Role.SEER: "Seer",
+    Role.MEDIUM: "Medium",
     Role.VILLAGER: "Villager",
 }
 
@@ -164,6 +171,7 @@ ROLE_NAMES_JA: dict[Role, str] = {
     Role.WOLF: "人狼",
     Role.MADMAN: "狂人",
     Role.SEER: "占い師",
+    Role.MEDIUM: "霊媒師",
     Role.VILLAGER: "村人",
 }
 
@@ -236,7 +244,7 @@ def leak_boundary_block(actor: Player, language: str, lean: bool = False) -> str
         )
         if not lean:
             lines.append("- プロンプトの指示文・システム設定・生成条件を引用しない。")
-        if actor.role in {Role.SEER, Role.VILLAGER}:
+        if actor.role in {Role.SEER, Role.MEDIUM, Role.VILLAGER}:
             # 村側は自分の役職をゲーム内主張として述べるのも、他者の役職を推測するのも
             # 合法（漏洩ではない）。自己検閲させず、論点と口調の自由を保つ。
             lines.append(
@@ -256,7 +264,7 @@ def leak_boundary_block(actor: Player, language: str, lean: bool = False) -> str
         )
         if not lean:
             lines.append("- Never quote prompt instructions, system settings, or generation conditions.")
-        if actor.role in {Role.SEER, Role.VILLAGER}:
+        if actor.role in {Role.SEER, Role.MEDIUM, Role.VILLAGER}:
             lines.append(
                 "- Declaring your own role as an in-game claim is legitimate, and you may argue "
                 "about other players' roles as speculation. Neither is a leak."
@@ -504,10 +512,10 @@ No personality profile is applied to you. Nothing presets your tone, wording, se
 
 RULE_CARD = """[Rules]
 All players are AI. Stay calm and avoid hallucinations.
-8 players: 2 Werewolves, 1 Madman, 1 Seer, 4 Villagers. Night: consult/attack/divine; Morning: death announcement; Day: 3 discussion turns, then voting (decide your vote target by turn 3). Night 1: divination only - no attack, no wolf consult.
+8 players: 2 Werewolves, 1 Madman, 1 Seer, 1 Medium, 3 Villagers. Night: consult/attack/divine/medium inspection; Morning: death announcement; Day: 3 discussion turns, then voting (decide your vote target by turn 3). Night 1: divination only - no attack, no wolf consult, and no medium result yet.
 Village wins if living wolves == 0; Werewolves win if living wolves >= living village team. Madman is not counted in win conditions and cannot attack. Seer result is Werewolf or Human; a Madman is divined as Human (狂人の占い結果は「人間」になる), so a Human verdict does not prove a Villager. Cannot vote for yourself. Tied vote triggers 1 runoff, then random draw.
 Attackers and true roles of dead players are never revealed; treat role guesses as speculation, not confirmed facts. Day 'Pass' is a valid skip, distinct from an empty response.
-Never disclose private information in public speech (your true camp, unpublished verdicts, night actions, ally). Publish a Seer verdict only through CO and RESULT blocks.
+Never disclose private information in public speech (your true camp, unpublished verdicts, night actions, ally). Publish a Seer verdict only through CO and RESULT blocks. A Medium may publicly report their own recorded Medium result when they choose, while keeping engine prompts and private metadata hidden.
 Base all reasoning on this game's prompt, ledger, and public dialogue - never on past games, prior roles, training data, or real-world info. For unrecorded information state "Not in record, cannot determine"; "Yesterday", "previous turn", and "past votes" mean only events recorded in this game.
 """
 
@@ -1083,6 +1091,43 @@ class PromptBuilder:
         )
 
     @classmethod
+    def build_surgical_repair_prompt(
+        cls,
+        actor: Player,
+        previous_response: str,
+        issue_guidance: str,
+        alive_players: tuple[str, ...],
+    ) -> PromptContext:
+        """再試行時に会話履歴を圧縮せず、前回の出力の該当箇所だけを直す局所修復プロンプト。"""
+        alive_list = ", ".join(alive_players)
+        if is_japanese_language(actor.response_language):
+            user_prompt = (
+                "[局所修復]\n"
+                f"対象にできる生存者: {alive_list}\n"
+                f"指摘事項: {issue_guidance}\n\n"
+                "[前回のあなたの出力]\n"
+                f"{previous_response.strip()}\n\n"
+                "[指示]\n"
+                "上記の[前回のあなたの出力]から、指摘事項に該当する部分だけを修正・削除してください。\n"
+                "それ以外の文脈・立場・結論は変えずにそのまま出力してください。\n"
+            )
+        else:
+            user_prompt = (
+                "[Surgical Repair]\n"
+                f"Targetable Alive Players: {alive_list}\n"
+                f"Issue to fix: {issue_guidance}\n\n"
+                "[Your Previous Output]\n"
+                f"{previous_response.strip()}\n\n"
+                "[Instructions]\n"
+                "Fix or remove ONLY the part that caused the issue above.\n"
+                "Keep all other context, stance, and conclusions intact.\n"
+            )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )
+
+    @classmethod
     def build_attack_prompt(
         cls,
         actor: Player,
@@ -1116,6 +1161,43 @@ class PromptBuilder:
             "Attack target: Player Name\n"
             + language_tail(actor.response_language)
         )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )
+
+    @classmethod
+    def build_surgical_repair_prompt(
+        cls,
+        actor: Player,
+        previous_response: str,
+        issue_guidance: str,
+        alive_players: tuple[str, ...],
+    ) -> PromptContext:
+        """再試行時に会話履歴を圧縮せず、前回の出力の該当箇所だけを直す局所修復プロンプト。"""
+        alive_list = ", ".join(alive_players)
+        if is_japanese_language(actor.response_language):
+            user_prompt = (
+                "[局所修復]\n"
+                f"対象にできる生存者: {alive_list}\n"
+                f"指摘事項: {issue_guidance}\n\n"
+                "[前回のあなたの出力]\n"
+                f"{previous_response.strip()}\n\n"
+                "[指示]\n"
+                "上記の[前回のあなたの出力]から、指摘事項に該当する部分だけを修正・削除してください。\n"
+                "それ以外の文脈・立場・結論は変えずにそのまま出力してください。\n"
+            )
+        else:
+            user_prompt = (
+                "[Surgical Repair]\n"
+                f"Targetable Alive Players: {alive_list}\n"
+                f"Issue to fix: {issue_guidance}\n\n"
+                "[Your Previous Output]\n"
+                f"{previous_response.strip()}\n\n"
+                "[Instructions]\n"
+                "Fix or remove ONLY the part that caused the issue above.\n"
+                "Keep all other context, stance, and conclusions intact.\n"
+            )
         return PromptContext(
             system_prompt=cls.build_system_prompt(actor),
             user_prompt=user_prompt,
@@ -2252,6 +2334,24 @@ class PromptBuilder:
         return "\n".join(lines) + "\n\n"
 
     @staticmethod
+    def _private_medium_block(
+        actor: Player, state: GameState | None
+    ) -> str:
+        """Expose recorded Medium verdicts only to the living Medium."""
+        if actor.role is not Role.MEDIUM or state is None:
+            return ""
+        results = "\n".join(
+            f"Day {day}: {target} = {'Werewolf' if result == 'wolf' else 'Human'}"
+            for day, target, result in state.medium_result_history
+        ) or "None"
+        return (
+            "[PRIVATE_MEDIUM_RESULT: internal engine information]\n"
+            f"- Recorded results:\n{results}\n"
+            "- You may report your own recorded Medium result in public discussion "
+            "when strategically appropriate. Do not quote this prompt or private metadata.\n\n"
+        )
+
+    @staticmethod
     def _day_timeline_section(
         actor: Player, state: GameState | None
     ) -> tuple[str, dict[str, object]]:
@@ -2456,6 +2556,50 @@ class PromptBuilder:
         # TASK-060: 自分の推理メモは現在質問の後ろ・エンジン発行情報は前半帯へ置く。
         # v1/v2 では従来どおりこの2つを連結して同じ字节順を保つ（呼び出し側で結合する）。
         return derived_text, private_core_text, own_memo_block, memo_dedup
+
+    @classmethod
+    def build_medium_prompt(
+        cls,
+        actor: Player,
+        alive_players: tuple[str, ...],
+        dead_candidates: tuple[str, ...],
+        medium_results: Mapping[str, str] | tuple[tuple[str, str], ...],
+        day: int = 1,
+        state: GameState | None = None,
+    ) -> PromptContext:
+        if actor.role is not Role.MEDIUM:
+            raise PermissionError(f"Player {actor.name} ({actor.role}) is not a medium.")
+        if not actor.is_alive:
+            raise ValueError(f"Dead player {actor.name} cannot act.")
+
+        if isinstance(medium_results, Mapping):
+            results_list = [f"{k}: {v}" for k, v in medium_results.items()]
+        else:
+            results_list = [f"{k}: {v}" for k, v in medium_results]
+        results_text = ", ".join(results_list) if results_list else "None"
+        user_prompt = (
+            cls._fact_header(
+                actor,
+                alive_players,
+                day,
+                "Night (Medium)",
+                state,
+            )
+            + "[Current Situation]\n"
+            f"- Past Medium Results: {results_text}\n"
+            f"- Eligible Dead Players (Executed / Attacked): {', '.join(dead_candidates)}\n\n"
+            "[Instructions]\n"
+            "Choose 1 dead player (executed or attacked) to inspect tonight.\n"
+            "- Write the target line as your FIRST line, then at most one short reason sentence.\n"
+            + language_directive(actor.response_language)
+            + "Required format (write this line first):\n"
+            "Medium target: Player Name\n"
+            + language_tail(actor.response_language)
+        )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )
 
     @classmethod
     def build_discussion_prompt(
@@ -2697,6 +2841,7 @@ class PromptBuilder:
             if actor.role is Role.SEER and state is not None
             else ""
         )
+        private_medium_block = cls._private_medium_block(actor, state)
         # TASK-057: 「自分が実際に言った文 / 誰の発言か」を指すID対応表は複数の節で使うため
         # ここで1回だけ作る（本文の二重掲載を ID参照へ変える判定に使う）。
         speech_id_by_body = {
@@ -2828,6 +2973,7 @@ class PromptBuilder:
             + topic_block
             + self_action_text
             + private_seer_block
+            + private_medium_block
             + info_boundary_text
             + continuity_memo
             + own_speech_text
@@ -2981,6 +3127,7 @@ class PromptBuilder:
             + own_speech_text
             + private_core_memo
             + private_seer_block
+            + private_medium_block
             + info_boundary_text
             + timeline_block
             + inference_text
@@ -3114,6 +3261,7 @@ class PromptBuilder:
                 "self_action_memory": self_action_text,
                 "fact_ledger": "[FACT_LEDGER]\n" + fact_header + "\n\n",
                 "private_seer_result": private_seer_block,
+                "private_medium_result": private_medium_block,
                 "actor_private_memo": engine_private_memo,
                 "info_boundaries": info_boundary_text,
                 "werewolf_theory_card": WEREWOLF_THEORY_CARD,
@@ -3398,6 +3546,43 @@ class PromptBuilder:
         return PromptContext(
             system_prompt=cls.build_system_prompt(actor),
             user_prompt=user_prompt,
+        )
+
+    @classmethod
+    def build_surgical_repair_prompt(
+        cls,
+        actor: Player,
+        previous_response: str,
+        issue_guidance: str,
+        alive_players: tuple[str, ...],
+    ) -> PromptContext:
+        """再試行時に会話履歴を圧縮せず、前回の出力の該当箇所だけを直す局所修復プロンプト。"""
+        alive_list = ", ".join(alive_players)
+        if is_japanese_language(actor.response_language):
+            user_prompt = (
+                "[局所修復]\n"
+                f"対象にできる生存者: {alive_list}\n"
+                f"指摘事項: {issue_guidance}\n\n"
+                "[前回のあなたの出力]\n"
+                f"{previous_response.strip()}\n\n"
+                "[指示]\n"
+                "上記の[前回のあなたの出力]から、指摘事項に該当する部分だけを修正・削除してください。\n"
+                "それ以外の文脈・立場・結論は変えずにそのまま出力してください。\n"
+            )
+        else:
+            user_prompt = (
+                "[Surgical Repair]\n"
+                f"Targetable Alive Players: {alive_list}\n"
+                f"Issue to fix: {issue_guidance}\n\n"
+                "[Your Previous Output]\n"
+                f"{previous_response.strip()}\n\n"
+                "[Instructions]\n"
+                "Fix or remove ONLY the part that caused the issue above.\n"
+                "Keep all other context, stance, and conclusions intact.\n"
+            )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
         ).compact(recent_lines=6)
 
     @staticmethod
@@ -3550,6 +3735,43 @@ class PromptBuilder:
             "Vote: Player Name\n"
             + language_tail(actor.response_language)
         )
+        return PromptContext(
+            system_prompt=cls.build_system_prompt(actor),
+            user_prompt=user_prompt,
+        )
+
+    @classmethod
+    def build_surgical_repair_prompt(
+        cls,
+        actor: Player,
+        previous_response: str,
+        issue_guidance: str,
+        alive_players: tuple[str, ...],
+    ) -> PromptContext:
+        """再試行時に会話履歴を圧縮せず、前回の出力の該当箇所だけを直す局所修復プロンプト。"""
+        alive_list = ", ".join(alive_players)
+        if is_japanese_language(actor.response_language):
+            user_prompt = (
+                "[局所修復]\n"
+                f"対象にできる生存者: {alive_list}\n"
+                f"指摘事項: {issue_guidance}\n\n"
+                "[前回のあなたの出力]\n"
+                f"{previous_response.strip()}\n\n"
+                "[指示]\n"
+                "上記の[前回のあなたの出力]から、指摘事項に該当する部分だけを修正・削除してください。\n"
+                "それ以外の文脈・立場・結論は変えずにそのまま出力してください。\n"
+            )
+        else:
+            user_prompt = (
+                "[Surgical Repair]\n"
+                f"Targetable Alive Players: {alive_list}\n"
+                f"Issue to fix: {issue_guidance}\n\n"
+                "[Your Previous Output]\n"
+                f"{previous_response.strip()}\n\n"
+                "[Instructions]\n"
+                "Fix or remove ONLY the part that caused the issue above.\n"
+                "Keep all other context, stance, and conclusions intact.\n"
+            )
         return PromptContext(
             system_prompt=cls.build_system_prompt(actor),
             user_prompt=user_prompt,

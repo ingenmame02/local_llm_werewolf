@@ -2976,6 +2976,7 @@ class GameLogger:
             ],
             "wolf_chat_log": wolf_chat_data,
             "seer_results": state.seer_results,
+            "medium_results": state.medium_results,
             "fact_ledger": {
                 "confirmed_facts": [
                     asdict(fact) for fact in state.fact_ledger.confirmed_facts

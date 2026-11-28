@@ -1,3 +1,4 @@
+import json
 import re
 from enum import Enum
 
@@ -5,12 +6,14 @@ from enum import Enum
 class ActionKind(str, Enum):
     ATTACK = "attack"
     SEER = "seer"
+    MEDIUM = "medium"
     VOTE = "vote"
 
 
 _LABELS = {
     ActionKind.ATTACK: ("Attack target", "襲撃対象", "Attack Target", "Attack"),
     ActionKind.SEER: ("Seer target", "占い対象", "Seer Target", "Divine target", "Divination target"),
+    ActionKind.MEDIUM: ("Medium target", "霊媒対象", "Medium Target"),
     ActionKind.VOTE: ("Vote", "投票", "Vote target", "Vote Target"),
 }
 _TRAILING_PUNCTUATION = re.compile(r"[\s。．.!！?？,，;；:：]+$")
@@ -66,6 +69,20 @@ class ActionParser:
         """対象行を解析する。`candidates`を指定すると、別名解決と自然文からの抽出も行う。"""
         if response is None or not isinstance(response, str) or not response:
             return None
+        stripped_json = response.strip()
+        if stripped_json.startswith("{") and stripped_json.endswith("}"):
+            try:
+                parsed_json = json.loads(stripped_json)
+            except ValueError:
+                parsed_json = None
+            if isinstance(parsed_json, dict) and isinstance(parsed_json.get("target"), str):
+                raw_target = parsed_json["target"].strip()
+                if candidates:
+                    resolved = ActionParser.resolve_target(raw_target, candidates)
+                    if resolved is not None:
+                        return resolved
+                elif raw_target:
+                    return raw_target
         labels = _LABELS[action]
         pattern = "|".join(re.escape(label) for label in labels)
         match = re.search(

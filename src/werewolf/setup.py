@@ -14,7 +14,7 @@ INITIAL_ROLES = (
     Role.VILLAGER,
     Role.VILLAGER,
     Role.VILLAGER,
-    Role.VILLAGER,
+    Role.MEDIUM,
 )
 
 

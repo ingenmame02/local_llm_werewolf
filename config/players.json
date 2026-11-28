@@ -6,10 +6,11 @@
       "num_ctx": 16384,
       "max_num_ctx": 16384,
       "recommended_num_ctx": 16384,
-      "personality_profile": "analytical",
+      "timeout": 300,
+      "personality_profile": "none",
       "num_predict": 1536,
       "num_predict_by_action": {
-        "discussion": 2560,
+        "discussion": 4096,
         "wolf_discussion": 1280,
         "attack": 640,
         "seer": 640,
@@ -26,7 +27,7 @@
       "name": "Player 2",
       "model": "werewolf-muse-glimmer-16k",
       "num_ctx": 16384,
-      "personality_profile": "questioning",
+      "personality_profile": "none",
       "num_predict": 4096,
       "num_predict_by_action": {
         "discussion": 3584,
@@ -42,7 +43,7 @@
       "name": "Player 3",
       "model": "werewolf-mistral-small-16k",
       "num_ctx": 16384,
-      "personality_profile": "cautious",
+      "personality_profile": "none",
       "num_predict": 1024,
       "temperature": 0.25,
       "top_p": 0.9,
@@ -65,7 +66,7 @@
       "name": "Player 4",
       "model": "werewolf-glm-4.7-flash-16k",
       "num_ctx": 16384,
-      "personality_profile": "consensus",
+      "personality_profile": "none",
       "num_predict": 1024,
       "num_predict_by_action": {
         "discussion": 2560,
@@ -81,7 +82,7 @@
       "name": "Player 5",
       "model": "werewolf-qwen3.8-16k",
       "num_ctx": 16384,
-      "personality_profile": "analytical",
+      "personality_profile": "none",
       "num_predict": 1024,
       "num_predict_by_action": {
         "discussion": 2560,
@@ -97,7 +98,7 @@
       "name": "Player 6",
       "model": "werewolf-deepseek-r1-16k",
       "num_ctx": 16384,
-      "personality_profile": "intuitive",
+      "personality_profile": "none",
       "num_predict": 2048,
       "num_predict_by_action": {
         "discussion": 4096,
@@ -113,7 +114,7 @@
       "name": "Player 7",
       "model": "werewolf-gpt-oss-20b-16k",
       "num_ctx": 16384,
-      "personality_profile": "assertive",
+      "personality_profile": "none",
       "num_predict": 1536,
       "num_predict_by_action": {
         "discussion": 3072,
@@ -129,7 +130,7 @@
       "name": "Player 8",
       "model": "werewolf-gemma4-16k",
       "num_ctx": 16384,
-      "personality_profile": "balanced",
+      "personality_profile": "none",
       "num_predict": 4096,
       "num_predict_by_action": {
         "discussion": 4096,

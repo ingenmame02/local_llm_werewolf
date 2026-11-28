@@ -220,6 +220,9 @@ class OllamaClient:
         thinking = request_options.pop("thinking", None)
         if isinstance(thinking, bool):
             payload["think"] = thinking
+        response_format = request_options.pop("format", None)
+        if isinstance(response_format, (str, dict)):
+            payload["format"] = response_format
         if request_options:
             payload["options"] = request_options
         if tools:

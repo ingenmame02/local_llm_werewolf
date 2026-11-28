@@ -6,10 +6,11 @@
       "num_ctx": 16384,
       "max_num_ctx": 16384,
       "recommended_num_ctx": 16384,
+      "timeout": 300,
       "personality_profile": "free",
       "num_predict": 1536,
       "num_predict_by_action": {
-        "discussion": 2560,
+        "discussion": 4096,
         "wolf_discussion": 1280,
         "attack": 640,
         "seer": 640,

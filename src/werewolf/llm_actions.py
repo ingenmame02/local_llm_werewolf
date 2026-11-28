@@ -1280,6 +1280,35 @@ class OllamaActions(ActionPolicy):
             budget_key="seer",
         )
 
+    def choose_medium_target(
+        self, medium: str, candidates: tuple[str, ...], results: tuple[tuple[str, str], ...]
+    ) -> str:
+        started_at = self._start_action("medium", self._player(medium))
+        actor = self._player(medium)
+        eligible_candidates = tuple(
+            candidate
+            for candidate in candidates
+            if candidate not in self.state.medium_results
+        )
+        if not eligible_candidates:
+            raise ValueError(f"No valid dead medium targets for {medium}.")
+        prompt_ctx = PromptBuilder.build_medium_prompt(
+            actor=actor,
+            alive_players=tuple(self.state.alive_players),
+            dead_candidates=eligible_candidates,
+            medium_results=results,
+            day=self.state.day,
+            state=self.state,
+        )
+        return self._select_target(
+            ActionKind.MEDIUM,
+            actor,
+            eligible_candidates,
+            prompt_ctx,
+            started_at,
+            budget_key="seer",
+        )
+
     def _build_discussion_prompt_with_budget(
         self,
         actor: Player,
@@ -2102,6 +2131,16 @@ class OllamaActions(ActionPolicy):
                     # 再要求は1行形式だけを求めるため、思考をoffにして
                     # 思考トークンが num_predict を消費しないようにする。
                     disable_thinking=request_number >= 1,
+                    response_format={
+                        "type": "object",
+                        "properties": {
+                            "target": {
+                                "type": "string",
+                                "enum": list(valid_candidates),
+                            }
+                        },
+                        "required": ["target"],
+                    },
                 )
             except OllamaError as error:
                 last_error = error
@@ -2607,6 +2646,24 @@ class OllamaActions(ActionPolicy):
                 thinking_off=thinking_off_retry,
                 retry_cap=timeout_retry,
             )
+            if (
+                attempt >= 1
+                and last_response_issue == "unverified_attributed_speech"
+                and raw_responses
+            ):
+                # Quote hallucinations need a surgical edit, not a fresh
+                # answer. Keep the prior text visible and constrain the
+                # repair to removing only the unverified attribution.
+                surgical = PromptBuilder.build_surgical_repair_prompt(
+                    actor=actor,
+                    previous_response=raw_responses[-1],
+                    issue_guidance=self._discussion_retry_instruction(
+                        action, actor, "unverified_attributed_speech"
+                    ),
+                    alive_players=tuple(self.state.alive_players),
+                )
+                user_prompt = surgical.user_prompt
+                retry_prompt_style = "surgical_repair"
             # TASK-046 / TASK-066: 圧縮が実際に起きたときは従来の `context_compression_stage` で
             # 保持した証拠（公開CO・占い判定・投票・死亡・直近発言・本人への未回答質問・直近反証）を
             # 記録し、新しい `retry_context_stage` は段階そのものと引き金、保持／削除した節と証拠IDを
@@ -3410,7 +3467,7 @@ class OllamaActions(ActionPolicy):
                         tuple(raw_responses),
                         (),
                         None,
-                        True,
+                        False,
                         failure_reasons=tuple(failure_reasons),
                         response_metadata=tuple(response_metadata_history),
                         content_preserved=bool(body),
@@ -3542,7 +3599,8 @@ class OllamaActions(ActionPolicy):
                     reason="seer_result_without_claim",
                 )
             fallback_response = forced_seer_message
-        elif action == "discussion_claim":
+        preserved_used = False
+        if action == "discussion_claim":
             fallback_response = (
                 self._deterministic_discussion_claim(actor) or "[CO] None"
             )
@@ -3562,6 +3620,7 @@ class OllamaActions(ActionPolicy):
                     body_preserved=True,
                 )
                 fallback_response = preserved_fallback
+                preserved_used = True
             elif action == "wolf_discussion":
                 fallback_response = self._consult_fallback_text(actor)
             else:
@@ -3577,7 +3636,7 @@ class OllamaActions(ActionPolicy):
                 tuple(raw_responses),
                 (),
                 None,
-                True,
+                not preserved_used,
                 last_error.to_dict() if last_error is not None else None,
                 tuple(failure_reasons),
                 tuple(response_metadata_history),
@@ -3601,6 +3660,8 @@ class OllamaActions(ActionPolicy):
                 if response_metadata_history
                 else None
             ),
+            content_preserved=preserved_used,
+            recovered_content=preserved_used,
         )
         return fallback_response
 
@@ -5331,7 +5392,17 @@ class OllamaActions(ActionPolicy):
             response = str(response)
         structured_output = parse_discussion_output(response)
         if has_discussion_output_markers(response) and structured_output is None:
-            return "discussion_output_format"
+            # A malformed/extra body marker without a role claim is still
+            # recoverable discussion text. Keep strict validation for CO and
+            # result claims, where silently accepting text could lose facts.
+            marker_only_body = extract_discussion_body(response)
+            has_claim_marker = bool(re.search(r"(?im)^\s*(?:\[CO\]|縲・?:CO)", response))
+            has_result_marker = bool(re.search(r"(?im)^\s*(?:\[RESULT\]|邨先棡)", response))
+            if marker_only_body and not has_claim_marker and not has_result_marker:
+                response = marker_only_body
+                structured_output = None
+            else:
+                return "discussion_output_format"
         body = structured_output.body if structured_output is not None else response
         claim_content = (
             structured_output.claim
@@ -5796,6 +5867,14 @@ class OllamaActions(ActionPolicy):
             self._context_integrity_applied.add(actor.model)
         if num_predict is not None:
             options["num_predict"] = num_predict
+            # Once a model has produced a thinking-only response for this
+            # action, reserve more room on subsequent turns. This is scoped
+            # to model × action and leaves first-run configured budgets intact.
+            profile = self._thinking_profiles.get(actor.model, key)
+            if profile is not None and profile.thinking_only_count > 0:
+                boosted = min(8192, max(int(num_predict) + 1, int(num_predict * 1.5)))
+                options["num_predict"] = boosted
+                num_predict_source = "thinking_only_recovery_boost"
         # TASK-043: プレイヤー別の生成サンプリングは全体設定（CLI）より優先する。
         # 幻覚・案内文の模倣を起こすモデルは temperature を下げて安定させる。
         for option_key in GENERATION_SAMPLING_KEYS:
@@ -7002,10 +7081,14 @@ class OllamaActions(ActionPolicy):
         budget_key: str = "discussion",
         disable_thinking: bool = False,
         retry_budget_fit: bool = False,
+        response_format: dict[str, object] | str | None = None,
     ) -> ChatResponse:
         options, num_predict_source, thinking_enabled, thinking_source = self._options_for(
             actor, budget_key, disable_thinking=disable_thinking
         )
+        if response_format is not None:
+            options = dict(options or {})
+            options["format"] = response_format
         if increase_generation:
             current_limit = options.get("num_predict", 512) if options else 512
             if isinstance(current_limit, int) and not isinstance(current_limit, bool):
@@ -7439,7 +7522,9 @@ class OllamaActions(ActionPolicy):
             transport_retries=max(0, transport_attempts - (semantic_retries + 1)),
             total_retries=semantic_retries
             + max(0, transport_attempts - (semantic_retries + 1)),
-            fallback_used=fallback_used,
+            # Preserving a valid model body is recovery, not a generated
+            # fallback, so do not count it in fallback statistics.
+            fallback_used=bool(fallback_used and not content_preserved),
             content_preserved=content_preserved,
             recovered_content=recovered_content,
             repair_applied=repair_applied,

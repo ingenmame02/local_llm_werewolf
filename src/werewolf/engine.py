@@ -82,6 +82,7 @@ _CLAIMED_ROLE_NAMES = {
     "wolf": "wolf",
     "werewolf": "wolf",
     "madman": "madman",
+    "medium": "medium",
     "villager": "villager",
 }
 
@@ -1095,6 +1096,7 @@ class GameEngine:
         if self.state.winner is not None:
             return
         self.run_seer_phase()
+        self.run_medium_phase()
         self.resolve_morning()
         if self.state.winner is not None:
             return
@@ -1169,6 +1171,43 @@ class GameEngine:
                 )
         else:
             self.state.pending_attack = None
+
+    def run_medium_phase(self) -> None:
+        self.state.phase = Phase.NIGHT_MEDIUM
+        if self.state.day <= 1:
+            return
+        mediums = self._living_by_role(Role.MEDIUM)
+        if not mediums:
+            return
+        medium = mediums[0]
+        dead_pool: list[str] = []
+        for _, name in (*self.state.executions, *self.state.attack_deaths):
+            if name not in dead_pool and name not in self.state.medium_results:
+                dead_pool.append(name)
+        candidates = tuple(dead_pool)
+        if not candidates:
+            return
+        target = self.actions.choose_medium_target(
+            medium.name,
+            candidates,
+            tuple(self.state.medium_results.items()),
+        )
+        if target not in candidates:
+            target = candidates[0]
+        target_player = self._player(target)
+        result = "wolf" if target_player.role is Role.WOLF else "human"
+        self.state.medium_results[target] = result
+        self.state.medium_result_history.append((self.state.day, target, result))
+        self.state.fact_ledger.confirmed_facts.append(
+            LedgerFact(
+                day=self.state.day,
+                kind="medium_result",
+                description=f"{target}: {result}",
+                visibility="medium",
+                actor=medium.name,
+                evidence_id=f"medium-result-day-{self.state.day}-{target}",
+            )
+        )
 
     def run_seer_phase(self) -> None:
         self.state.phase = Phase.NIGHT_SEER
@@ -1817,7 +1856,7 @@ class GameEngine:
             for player in self.state.players
         )
         living_village = sum(
-            player.is_alive and player.role in (Role.SEER, Role.VILLAGER)
+            player.is_alive and player.role in (Role.SEER, Role.MEDIUM, Role.VILLAGER)
             for player in self.state.players
         )
         self.state.winner_counts = {
@@ -2291,6 +2330,7 @@ class GameEngine:
                     Role.WOLF: "Werewolf",
                     Role.MADMAN: "Madman",
                     Role.SEER: "Seer",
+                    Role.MEDIUM: "Medium",
                     Role.VILLAGER: "Villager",
                 }[player.role]
             # Add current action to past actions (if applicable)
@@ -2302,6 +2342,7 @@ class GameEngine:
                 Role.WOLF: "Werewolf",
                 Role.MADMAN: "Madman",
                 Role.SEER: "Seer",
+                Role.MEDIUM: "Medium",
                 Role.VILLAGER: "Villager",
             }[player.role]
             memory = SelfMemory(
@@ -2315,6 +2356,7 @@ class GameEngine:
                     Role.WOLF: "Werewolf",
                     Role.MADMAN: "Madman",
                     Role.SEER: "Seer",
+                    Role.MEDIUM: "Medium",
                     Role.VILLAGER: "Villager",
                 }.get(player.role, str(player.role.value))
             if not self_mem.partner and player.partner:

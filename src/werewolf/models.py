@@ -93,12 +93,14 @@ class Role(str, Enum):
     WOLF = "wolf"
     MADMAN = "madman"
     SEER = "seer"
+    MEDIUM = "medium"
     VILLAGER = "villager"
 
 
 class Phase(str, Enum):
     NIGHT_WOLF = "night_wolf"
     NIGHT_SEER = "night_seer"
+    NIGHT_MEDIUM = "night_medium"
     MORNING = "morning"
     DAY_DISCUSSION = "day_discussion"
     VOTING = "voting"
@@ -499,6 +501,8 @@ class GameState:
     wolf_chat_log: list[Message] = field(default_factory=list)
     seer_results: dict[str, str] = field(default_factory=dict)
     seer_result_history: list[tuple[int, str, str]] = field(default_factory=list)
+    medium_results: dict[str, str] = field(default_factory=dict)
+    medium_result_history: list[tuple[int, str, str]] = field(default_factory=list)
     votes: dict[str, str] = field(default_factory=dict)
     vote_history: list[tuple[int, bool, dict[str, str]]] = field(default_factory=list)
     attack_deaths: list[tuple[int, str]] = field(default_factory=list)
